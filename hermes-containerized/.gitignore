@@ -1,0 +1,14 @@
+# 敏感文件
+.env
+data/
+
+# 源码 (通过 git submodule 或 clone 管理)
+src/
+
+# OS
+.DS_Store
+*.swp
+*.swo
+
+# Docker
+*.log

@@ -1,0 +1,119 @@
+{
+  "id": "openclaw-plugin-hermes",
+  "name": "Hermes Agent",
+  "description": "Delegate heavy tasks (terminal, browser, code execution) to a containerized Hermes Agent via ACP.",
+  "permissions": {
+    "reason": "Requires Docker exec for health checks and stdio ACP transport, and TCP sockets for ACP bridge communication.",
+    "requires": ["net"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "hermesCommand": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Command to invoke hermes-acp. Default: docker exec hermes-agent hermes acp"
+      },
+      "hermesContainerName": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Docker container name for Hermes. Default: hermes-agent"
+      },
+      "hermesDataDir": {
+        "type": "string",
+        "description": "Hermes data directory on host (mounted as /opt/data)"
+      },
+      "defaultModel": {
+        "type": "string",
+        "description": "Default LLM model for Hermes tasks"
+      },
+      "defaultContextLevel": {
+        "type": "string",
+        "enum": [
+          "L0",
+          "L1",
+          "L2",
+          "L3"
+        ],
+        "description": "Default context level for task dispatch"
+      },
+      "defaultCredentialScope": {
+        "type": "string",
+        "enum": [
+          "C0",
+          "C1",
+          "C2"
+        ],
+        "description": "Default credential scope for task dispatch"
+      },
+      "defaultWriteback": {
+        "type": "string",
+        "enum": [
+          "W0",
+          "W1",
+          "W2",
+          "W3"
+        ],
+        "description": "Default writeback strategy for task dispatch"
+      },
+      "timeout": {
+        "type": "number",
+        "minimum": 5,
+        "description": "Default timeout in seconds for Hermes tasks. Default: 1800"
+      },
+      "autoStrategy": {
+        "type": "boolean",
+        "description": "Enable automatic L/C/W strategy inference. Default: true"
+      },
+      "enableLayeredProtocol": {
+        "type": "boolean",
+        "description": "Enable the layered dispatch protocol (L/C/W). When disabled, tasks are sent directly to Hermes without strategy inference, context assembly, or credential injection. Default: true"
+      },
+      "transport": {
+        "type": "string",
+        "enum": [
+          "tcp",
+          "stdio"
+        ],
+        "description": "Transport mode: tcp (recommended, persistent connection) or stdio (docker exec per task). Default: tcp"
+      },
+      "tcpHost": {
+        "type": "string",
+        "description": "TCP host for Hermes ACP bridge. Default: 127.0.0.1"
+      },
+      "tcpPort": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 65535,
+        "description": "TCP port for Hermes ACP bridge. Default: 3100"
+      }
+    }
+  },
+  "uiHints": {
+    "hermesCommand": {
+      "label": "Hermes Command",
+      "help": "Override the command used to start hermes-acp. Leave empty to use docker exec."
+    },
+    "hermesContainerName": {
+      "label": "Container Name",
+      "help": "Docker container name where Hermes Agent runs."
+    },
+    "hermesDataDir": {
+      "label": "Data Directory",
+      "help": "Host path to Hermes persistent data (config, memories, skills)."
+    },
+    "defaultModel": {
+      "label": "Default Model",
+      "help": "LLM model Hermes uses for tasks. Can be overridden per dispatch."
+    },
+    "autoStrategy": {
+      "label": "Auto Strategy",
+      "help": "When enabled, the plugin automatically determines context level, credential scope, and writeback strategy based on the task."
+    },
+    "enableLayeredProtocol": {
+      "label": "Layered Protocol",
+      "help": "When enabled, uses the L/C/W layered dispatch protocol. When disabled, tasks are sent directly to Hermes without strategy, context, or credential processing."
+    }
+  }
+}
