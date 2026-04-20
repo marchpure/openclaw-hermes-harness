@@ -5,6 +5,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { request } from "node:http";
 import { promisify } from "node:util";
 import { HermesAcpClient } from "./acp-client.js";
 import type { HermesPluginConfig, HealthReport } from "./types.js";
@@ -191,7 +192,8 @@ async function checkHostBridgeAvailable(config: HermesPluginConfig): Promise<boo
     return false;
   }
   try {
-    const endpoint = `http://${config.hostBridgeHost}:${config.hostBridgePort}/__openclaw/hermes-host-tool`;
+    const bridgeHost = config.hostBridgeHost === "0.0.0.0" ? "127.0.0.1" : config.hostBridgeHost;
+    const endpoint = `http://${bridgeHost}:${config.hostBridgePort}/__openclaw/hermes-host-tool`;
     const checkScript = [
       "command -v openclaw-host-tool >/dev/null 2>&1",
       `test -n ${JSON.stringify(endpoint)}`,
@@ -201,10 +203,39 @@ async function checkHostBridgeAvailable(config: HermesPluginConfig): Promise<boo
       ["exec", "-e", `OPENCLAW_HOST_TOOL_URL=${endpoint}`, config.hermesContainerName, "sh", "-c", checkScript],
       { timeout: EXEC_TIMEOUT },
     );
-    return true;
+    return checkHostBridgeEndpoint(bridgeHost, config.hostBridgePort);
   } catch {
     return false;
   }
+}
+
+async function checkHostBridgeEndpoint(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = request(
+      {
+        hostname: host,
+        port,
+        path: "/__openclaw/hermes-host-tool",
+        method: "POST",
+        timeout: EXEC_TIMEOUT,
+        headers: {
+          "content-type": "application/json",
+        },
+      },
+      (res) => {
+        res.resume();
+        res.on("end", () => {
+          resolve(res.statusCode === 400 || res.statusCode === 404);
+        });
+      },
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on("error", () => resolve(false));
+    req.end(JSON.stringify({ tool: "lark.docs.search", arguments: { query: "" } }));
+  });
 }
 
 export const healthTestHooks = {
