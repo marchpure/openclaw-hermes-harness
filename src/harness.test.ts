@@ -3,10 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createHermesAgentHarness } from "./harness.js";
+import { setHermesHarnessAgentEventEmitterForTest } from "./agent-event-bridge.js";
 import {
   buildHermesHarnessBootstrapHash,
   buildHermesHarnessPromptBlocks,
+  handleHarnessEvent,
 } from "./runtime-client.js";
+import type { AcpSessionEvent } from "./types.js";
 
 describe("hermes harness", () => {
   it("maps a Hermes runtime response to an agent harness result", async () => {
@@ -207,5 +210,65 @@ describe("hermes harness", () => {
     expect(text).not.toContain("read its SKILL.md");
     expect(text).not.toContain("<location>");
     expect(text).not.toContain("SKILL.md");
+  });
+
+  it("bridges Hermes tool events to OpenClaw agent events without suppressing callbacks", async () => {
+    const emitted: Array<{ runId: string; stream: string; data: Record<string, unknown>; sessionKey?: string }> = [];
+    const callbackEvents: Array<{ stream: string; data: Record<string, unknown> }> = [];
+    const toolResults: Array<{ text?: string }> = [];
+    setHermesHarnessAgentEventEmitterForTest((event) => emitted.push(event));
+    try {
+      const params = {
+        provider: "hermes",
+        modelId: "default",
+        prompt: "run tool",
+        runId: "run-bridge",
+        sessionId: "session-bridge",
+        sessionKey: "main",
+        sessionFile: "/tmp/hermes/session.json",
+        timeoutMs: 30_000,
+        workspaceDir: "/tmp/hermes",
+        onAgentEvent: (event: { stream: string; data: Record<string, unknown> }) => {
+          callbackEvents.push(event);
+        },
+        onToolResult: (payload: { text?: string }) => {
+          toolResults.push(payload);
+        },
+      } as unknown as Parameters<typeof handleHarnessEvent>[1];
+
+      await handleHarnessEvent(
+        { type: "tool_progress", toolName: "web_search", toolCallId: "tool-1" },
+        params,
+        {
+          markAssistantStarted: async () => undefined,
+          markReasoningStarted: () => undefined,
+          markReasoningEnded: async () => undefined,
+          toolMetas: new Map(),
+        },
+      );
+      await handleHarnessEvent(
+        {
+          type: "tool_result",
+          toolName: "web_search",
+          toolCallId: "tool-1",
+          text: JSON.stringify({ success: true, title: "result title", url: "https://example.com" }),
+        },
+        params,
+        {
+          markAssistantStarted: async () => undefined,
+          markReasoningStarted: () => undefined,
+          markReasoningEnded: async () => undefined,
+          toolMetas: new Map([["tool-1", { toolName: "web_search" }]]),
+        },
+      );
+
+      expect(emitted.map((event) => event.stream)).toEqual(["tool", "item", "tool", "item"]);
+      expect(emitted.every((event) => event.runId === "run-bridge")).toBe(true);
+      expect(emitted.every((event) => event.sessionKey === "main")).toBe(true);
+      expect(callbackEvents.map((event) => event.stream)).toEqual(["tool", "item", "tool", "item"]);
+      expect(toolResults).toEqual([{ text: "title: result title\nurl: https://example.com\nsuccess: true" }]);
+    } finally {
+      setHermesHarnessAgentEventEmitterForTest(undefined);
+    }
   });
 });

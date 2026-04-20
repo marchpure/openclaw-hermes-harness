@@ -6,6 +6,7 @@ import type {
   AgentHarnessAttemptResult,
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
+import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient, type AcpPromptBlock } from "./acp-client.js";
 import type { AcpSessionEvent, HermesPluginConfig } from "./types.js";
 
@@ -381,7 +382,7 @@ async function promptHermesHarness(
   });
 }
 
-async function handleHarnessEvent(
+export async function handleHarnessEvent(
   event: AcpSessionEvent,
   params: AgentHarnessAttemptParams,
   state: {
@@ -399,6 +400,13 @@ async function handleHarnessEvent(
 
   if (event.type === "thinking" && event.text) {
     state.markReasoningStarted();
+    publishHermesHarnessAgentEvent(params, {
+      stream: "thinking",
+      data: {
+        text: event.text,
+        delta: event.text,
+      },
+    });
     await params.onReasoningStream?.({ text: event.text });
     return;
   }
@@ -406,8 +414,9 @@ async function handleHarnessEvent(
   if (event.type === "tool_progress") {
     const id = event.toolCallId || `${event.toolName || "tool"}:${state.toolMetas.size}`;
     const toolName = event.toolName || "hermes_tool";
+    const startedAt = Date.now();
     state.toolMetas.set(id, { toolName });
-    params.onAgentEvent?.({
+    publishHermesHarnessAgentEvent(params, {
       stream: "tool",
       data: {
         phase: "start",
@@ -415,7 +424,7 @@ async function handleHarnessEvent(
         toolCallId: id,
       },
     });
-    params.onAgentEvent?.({
+    publishHermesHarnessAgentEvent(params, {
       stream: "item",
       data: {
         itemId: id,
@@ -424,6 +433,8 @@ async function handleHarnessEvent(
         title: toolName,
         status: "running",
         name: toolName,
+        toolCallId: id,
+        startedAt,
       },
     });
     return;
@@ -439,7 +450,7 @@ async function handleHarnessEvent(
       toolName,
       ...(outputText ? { meta: outputText.slice(0, 200) } : {}),
     });
-    params.onAgentEvent?.({
+    publishHermesHarnessAgentEvent(params, {
       stream: "tool",
       data: {
         phase: "result",
@@ -451,15 +462,17 @@ async function handleHarnessEvent(
         },
       },
     });
-    params.onAgentEvent?.({
+    publishHermesHarnessAgentEvent(params, {
       stream: "item",
       data: {
         itemId: id,
         phase: "end",
         kind: "tool",
-        title: toolName,
-        status: isError ? "error" : "completed",
+        title: buildHermesToolItemTitle(toolName, outputText),
+        status: isError ? "failed" : "completed",
         name: toolName,
+        toolCallId: id,
+        endedAt: Date.now(),
         ...(outputText ? { summary: outputText, progressText: outputText } : {}),
       },
     });
@@ -470,6 +483,14 @@ async function handleHarnessEvent(
   if (event.type === "done") {
     await state.markReasoningEnded();
   }
+}
+
+function buildHermesToolItemTitle(toolName: string, outputText: string): string {
+  const firstLine = outputText.split(/\r?\n/, 1)[0]?.trim();
+  if (!firstLine) {
+    return toolName;
+  }
+  return `${toolName}: ${firstLine.slice(0, 120)}`;
 }
 
 function formatHermesToolOutput(text: string | undefined): string {
