@@ -31,6 +31,9 @@ export async function checkHealth(config: HermesPluginConfig): Promise<HealthRep
     healthy: false,
     containerRunning: false,
     acpResponsive: false,
+    hostBridgeAvailable: false,
+    larkDocsSearchAvailable: false,
+    larkDocsFetchAvailable: false,
     errors: [],
   };
 
@@ -72,7 +75,26 @@ export async function checkHealth(config: HermesPluginConfig): Promise<HealthRep
     report.errors.push(`ACP check failed: ${msg}`);
   }
 
-  report.healthy = report.containerRunning && report.acpResponsive && report.errors.length === 0;
+  // 5. Check the host capability bridge wrapper inside Hermes.
+  try {
+    report.hostBridgeAvailable = await checkHostBridgeAvailable(config);
+    report.larkDocsSearchAvailable = report.hostBridgeAvailable;
+    report.larkDocsFetchAvailable = report.hostBridgeAvailable;
+    if (!report.hostBridgeAvailable) {
+      report.errors.push("Host bridge check failed: openclaw-host-tool is not available in Hermes container");
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    report.errors.push(`Host bridge check failed: ${msg}`);
+  }
+
+  report.healthy =
+    report.containerRunning &&
+    report.acpResponsive &&
+    report.hostBridgeAvailable &&
+    report.larkDocsSearchAvailable &&
+    report.larkDocsFetchAvailable &&
+    report.errors.length === 0;
   return report;
 }
 
@@ -164,8 +186,30 @@ async function checkAcpResponsive(config: HermesPluginConfig): Promise<boolean> 
   }
 }
 
+async function checkHostBridgeAvailable(config: HermesPluginConfig): Promise<boolean> {
+  if (!config.hostBridgeEnabled) {
+    return false;
+  }
+  try {
+    const endpoint = `http://${config.hostBridgeHost}:${config.hostBridgePort}/__openclaw/hermes-host-tool`;
+    const checkScript = [
+      "command -v openclaw-host-tool >/dev/null 2>&1",
+      `test -n ${JSON.stringify(endpoint)}`,
+    ].join(" && ");
+    await execFileAsync(
+      "docker",
+      ["exec", "-e", `OPENCLAW_HOST_TOOL_URL=${endpoint}`, config.hermesContainerName, "sh", "-c", checkScript],
+      { timeout: EXEC_TIMEOUT },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const healthTestHooks = {
   checkAcpResponsive,
+  checkHostBridgeAvailable,
 };
 
 /**
@@ -176,6 +220,9 @@ export function formatHealthReport(report: HealthReport): string {
   lines.push(`Hermes Health: ${report.healthy ? "✅ Healthy" : "❌ Unhealthy"}`);
   lines.push(`  Container: ${report.containerRunning ? "✅ Running" : "❌ Not Running"}`);
   lines.push(`  ACP: ${report.acpResponsive ? "✅ Responsive" : "❌ Not Responsive"}`);
+  lines.push(`  Host Bridge: ${report.hostBridgeAvailable ? "✅ Available" : "❌ Unavailable"}`);
+  lines.push(`  Lark Docs Search: ${report.larkDocsSearchAvailable ? "✅ Available" : "❌ Unavailable"}`);
+  lines.push(`  Lark Docs Fetch: ${report.larkDocsFetchAvailable ? "✅ Available" : "❌ Unavailable"}`);
 
   if (report.hermesVersion) {
     lines.push(`  Version: ${report.hermesVersion}`);

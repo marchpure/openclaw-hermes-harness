@@ -332,6 +332,9 @@ export interface HealthReport {
   healthy: boolean;
   containerRunning: boolean;
   acpResponsive: boolean;
+  hostBridgeAvailable: boolean;
+  larkDocsSearchAvailable: boolean;
+  larkDocsFetchAvailable: boolean;
   hermesVersion?: string;
   containerStats?: {
     cpuPercent: string;
