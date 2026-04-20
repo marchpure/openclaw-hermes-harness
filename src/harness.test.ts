@@ -1,19 +1,25 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHermesAgentHarness } from "./harness.js";
 import { publishHermesHarnessAgentEvent, setHermesHarnessAgentEventEmitterForTest } from "./agent-event-bridge.js";
+import { HermesAcpClient } from "./acp-client.js";
 import {
   buildHermesHarnessBootstrapHash,
   buildHermesHarnessPromptBlocks,
   handleHarnessEvent,
+  runHermesHarnessAttempt,
   resolveHermesHarnessSessionForTest,
 } from "./runtime-client.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import type { AcpSessionEvent } from "./types.js";
 
 describe("hermes harness", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("maps a Hermes runtime response to an agent harness result", async () => {
     const harness = createHermesAgentHarness({
       client: {
@@ -476,6 +482,60 @@ describe("hermes harness", () => {
         { stream: "tool", data: { phase: "start" } },
       ),
     ).not.toThrow();
+  });
+
+  it("times out startup instead of waiting forever for a stuck ACP server", async () => {
+    vi.spyOn(HermesAcpClient.prototype, "start").mockImplementation(
+      () => new Promise<void>(() => {}),
+    );
+    vi.spyOn(HermesAcpClient.prototype, "close").mockResolvedValue(undefined);
+
+    const result = await runHermesHarnessAttempt(DEFAULT_CONFIG, {
+      provider: "hermes",
+      modelId: "default",
+      prompt: "hello",
+      runId: "run-startup-timeout",
+      sessionId: "session-startup-timeout",
+      sessionFile: "/tmp/hermes/session.json",
+      timeoutMs: 25,
+      workspaceDir: "/tmp/hermes",
+    } as unknown as Parameters<typeof runHermesHarnessAttempt>[1]);
+
+    expect(result.timedOut).toBe(true);
+    expect(result.promptError).toBeInstanceOf(Error);
+    expect(String(result.promptError)).toContain("startup aborted");
+  });
+
+  it("does not let stuck ACP close block a completed harness attempt", async () => {
+    vi.spyOn(HermesAcpClient.prototype, "start").mockResolvedValue(undefined);
+    vi.spyOn(HermesAcpClient.prototype, "newSession").mockResolvedValue("session-new");
+    vi.spyOn(HermesAcpClient.prototype, "prompt").mockResolvedValue({
+      text: "done",
+      events: [{ type: "done" }],
+    });
+    vi.spyOn(HermesAcpClient.prototype, "close").mockImplementation(
+      () => new Promise<void>(() => {}),
+    );
+
+    const result = await Promise.race([
+      runHermesHarnessAttempt(
+        { ...DEFAULT_CONFIG, transport: "stdio" },
+        {
+          provider: "hermes",
+          modelId: "default",
+          prompt: "hello",
+          runId: "run-close-timeout",
+          sessionId: "session-close-timeout",
+          sessionFile: "/tmp/hermes/session.json",
+          timeoutMs: 100,
+          workspaceDir: "/tmp/hermes",
+        } as unknown as Parameters<typeof runHermesHarnessAttempt>[1],
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("stuck"), 2600)),
+    ]);
+
+    expect(result).not.toBe("stuck");
+    expect(result).toMatchObject({ assistantText: "done" });
   });
 
   it("summarizes nested tool error JSON instead of surfacing raw success false payloads", async () => {

@@ -27,6 +27,8 @@ const ZERO_ASSISTANT_USAGE = {
 };
 
 const HARNESS_CALLBACK_TIMEOUT_MS = 1000;
+const HERMES_STARTUP_GRACE_MS = 1000;
+const HERMES_CLEANUP_GRACE_MS = 2000;
 
 type HarnessMessage = AgentHarnessAttemptResult["messagesSnapshot"][number];
 
@@ -127,8 +129,18 @@ export async function runHermesHarnessAttempt(
   }, timeoutMs);
 
   try {
-    await client.start({}, runtimeCwd);
-    let session = await resolveHermesHarnessSession(client, config, params, contextHash, runtimeCwd);
+    await awaitWithHermesAbort({
+      label: "startup",
+      signal: timeoutController.signal,
+      timeoutMs: timeoutMs + HERMES_STARTUP_GRACE_MS,
+      operation: () => client.start({}, runtimeCwd),
+    });
+    let session = await awaitWithHermesAbort({
+      label: "session initialization",
+      signal: timeoutController.signal,
+      timeoutMs: timeoutMs + HERMES_STARTUP_GRACE_MS,
+      operation: () => resolveHermesHarnessSession(client, config, params, contextHash, runtimeCwd),
+    });
     let result;
     try {
       result = await promptHermesHarness(client, promptBlocks, session.sessionId, params, timeoutMs, timeoutController.signal, {
@@ -257,7 +269,115 @@ export async function runHermesHarnessAttempt(
   } finally {
     clearTimeout(timeout);
     params.abortSignal?.removeEventListener("abort", upstreamAbort);
-    await client.close({ closeSession: config.transport !== "tcp" }).catch(() => {});
+    await cleanupHermesClientBestEffort(client, { closeSession: config.transport !== "tcp" });
+  }
+}
+
+async function cleanupHermesClientBestEffort(
+  client: HermesAcpClient,
+  options: { closeSession: boolean },
+): Promise<void> {
+  const closePromise = client.close(options);
+  const finished = await awaitCleanupWithGrace({
+    label: "close",
+    promise: closePromise,
+  });
+  if (finished) {
+    return;
+  }
+  void closePromise.catch((err) => {
+    console.warn(`[hermes] detached ACP close failed: ${formatCallbackError(err)}`);
+  });
+}
+
+async function awaitCleanupWithGrace(params: {
+  label: string;
+  promise: Promise<unknown>;
+}): Promise<boolean> {
+  const timeoutToken = Symbol(`hermes-cleanup-${params.label}`);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const observed = params.promise.then(
+    () => ({ kind: "done" as const }),
+    (error) => ({ kind: "error" as const, error }),
+  );
+  const timeout = new Promise<typeof timeoutToken>((resolve) => {
+    timer = setTimeout(() => resolve(timeoutToken), HERMES_CLEANUP_GRACE_MS);
+    timer.unref?.();
+  });
+  try {
+    const outcome = await Promise.race([observed, timeout]);
+    if (outcome === timeoutToken) {
+      console.warn(
+        `[hermes] ACP ${params.label} cleanup exceeded ${HERMES_CLEANUP_GRACE_MS}ms; detaching cleanup`,
+      );
+      return false;
+    }
+    if (outcome.kind === "error") {
+      console.warn(`[hermes] ACP ${params.label} cleanup failed: ${formatCallbackError(outcome.error)}`);
+    }
+    return true;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function awaitWithHermesAbort<T>(params: {
+  label: string;
+  signal: AbortSignal;
+  timeoutMs: number;
+  operation: () => Promise<T>;
+}): Promise<T> {
+  if (params.signal.aborted) {
+    throw new Error(`Hermes ${params.label} aborted`);
+  }
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let cleanupAbort: (() => void) | undefined;
+  const abortToken = Symbol(`hermes-${params.label}-abort`);
+  const timeoutToken = Symbol(`hermes-${params.label}-timeout`);
+  const observed = params.operation().then(
+    (value) => ({ kind: "value" as const, value }),
+    (error) => ({ kind: "error" as const, error }),
+  );
+  const guard = new Promise<typeof abortToken | typeof timeoutToken>((resolve) => {
+    const abort = () => resolve(abortToken);
+    params.signal.addEventListener("abort", abort, { once: true });
+    cleanupAbort = () => params.signal.removeEventListener("abort", abort);
+    timeout = setTimeout(() => resolve(timeoutToken), Math.max(100, params.timeoutMs));
+    timeout.unref?.();
+  });
+  try {
+    const outcome = await Promise.race([observed, guard]);
+    if (outcome === abortToken) {
+      void observed.then((lateOutcome) => {
+        if (lateOutcome.kind === "error") {
+          console.warn(
+            `[hermes] detached ${params.label} failed after abort: ${formatCallbackError(lateOutcome.error)}`,
+          );
+        }
+      });
+      throw new Error(`Hermes ${params.label} aborted`);
+    }
+    if (outcome === timeoutToken) {
+      void observed.then((lateOutcome) => {
+        if (lateOutcome.kind === "error") {
+          console.warn(
+            `[hermes] detached ${params.label} failed after timeout: ${formatCallbackError(lateOutcome.error)}`,
+          );
+        }
+      });
+      throw new Error(`Hermes ${params.label} timed out`);
+    }
+    if (outcome.kind === "error") {
+      throw outcome.error;
+    }
+    return outcome.value;
+  } finally {
+    cleanupAbort?.();
+    if (timeout) {
+      clearTimeout(timeout);
+    }
   }
 }
 
