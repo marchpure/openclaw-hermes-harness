@@ -1,0 +1,34 @@
+{
+  "name": "openclaw-hermes-harness",
+  "version": "0.1.0",
+  "description": "OpenClaw Hermes harness, model provider, and ACP tools plugin",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/marchpure/openclaw-hermes-harness.git"
+  },
+  "main": "./index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.4.15"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "openclaw": ">=2026.4.15",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.4"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.4.15",
+      "minGatewayVersion": "2026.4.15"
+    }
+  }
+}

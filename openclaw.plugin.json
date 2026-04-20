@@ -1,0 +1,123 @@
+{
+  "id": "hermes",
+  "name": "Hermes",
+  "description": "Hermes agent runtime harness, Hermes model catalog, and Docker ACP tools.",
+  "providers": ["hermes"],
+  "activation": {
+    "onAgentHarnesses": ["hermes"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "discovery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "models": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "hermesCommand": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Command to invoke Hermes ACP. Default: docker exec hermes-agent bash -c 'source /opt/hermes/.venv/bin/activate && hermes acp'."
+      },
+      "hermesContainerName": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Docker container name for Hermes. Default: hermes-agent."
+      },
+      "hermesDataDir": {
+        "type": "string",
+        "description": "Hermes data directory on host."
+      },
+      "transport": {
+        "type": "string",
+        "enum": ["tcp", "stdio"],
+        "description": "Transport mode: tcp connects to the persistent ACP bridge, stdio uses docker exec per task. Default: tcp."
+      },
+      "tcpHost": {
+        "type": "string",
+        "description": "TCP host for Hermes ACP bridge. Default: 127.0.0.1."
+      },
+      "tcpPort": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 65535,
+        "description": "TCP port for Hermes ACP bridge. Default: 3100."
+      },
+      "defaultModel": {
+        "type": "string",
+        "description": "Default LLM model for Hermes tasks."
+      },
+      "defaultContextLevel": {
+        "type": "string",
+        "enum": ["L0", "L1", "L2", "L3"],
+        "description": "Default context level for task dispatch."
+      },
+      "defaultCredentialScope": {
+        "type": "string",
+        "enum": ["none", "specified", "all", "C0", "C1", "C2"],
+        "description": "Default credential scope for task dispatch."
+      },
+      "defaultWriteback": {
+        "type": "string",
+        "enum": ["W0", "W1", "W2", "W3"],
+        "description": "Default writeback strategy for task dispatch."
+      },
+      "timeout": {
+        "type": "number",
+        "minimum": 5,
+        "description": "Default timeout in seconds for Hermes tasks. Default: 1800."
+      },
+      "autoStrategy": {
+        "type": "boolean",
+        "description": "Enable automatic L/C/W strategy inference. Default: true."
+      },
+      "enableLayeredProtocol": {
+        "type": "boolean",
+        "description": "Enable the layered dispatch protocol (L/C/W). Default: true."
+      },
+      "acp": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Optional nested compatibility config for Hermes ACP."
+      },
+      "runtime": {
+        "type": "object",
+        "additionalProperties": true,
+        "description": "Deprecated compatibility namespace from an earlier Hermes harness prototype."
+      }
+    }
+  },
+  "uiHints": {
+    "discovery": {
+      "label": "Model Discovery",
+      "help": "Hermes model catalog controls."
+    },
+    "hermesContainerName": {
+      "label": "Container Name",
+      "help": "Docker container name where Hermes Agent runs."
+    },
+    "transport": {
+      "label": "Transport",
+      "help": "Use tcp for the persistent ACP bridge or stdio for docker exec per task."
+    },
+    "tcpPort": {
+      "label": "TCP Port",
+      "help": "Hermes ACP bridge port."
+    },
+    "defaultModel": {
+      "label": "Default Model",
+      "help": "LLM model Hermes uses for tasks."
+    },
+    "enableLayeredProtocol": {
+      "label": "Layered Protocol",
+      "help": "When disabled, tasks are sent directly without L/C/W context, credential, or writeback processing."
+    }
+  }
+}
