@@ -92,11 +92,12 @@ export class HermesAcpClient extends EventEmitter {
       await this.startStdio(env, cwd);
     }
 
-    // Initialize the ACP connection (same for both transports)
-    const initResult = await this.sendRequest("initialize", {
+    // Initialize the ACP connection (same for both transports).
+    const initResult = await this.sendCompatRequest("initialize", {
       protocolVersion: 1,
       clientInfo: { name: "openclaw-plugin-hermes", version: "1.0.0" },
       clientCapabilities: {},
+    }, {
       protocol_version: 1,
       client_info: { name: "openclaw-plugin-hermes", version: "1.0.0" },
       client_capabilities: {},
@@ -231,7 +232,7 @@ export class HermesAcpClient extends EventEmitter {
     if (!sid) {
       throw new Error("sessionId is required");
     }
-    await this.sendRequest("session/resume", { cwd, sessionId: sid, session_id: sid });
+    await this.sendCompatRequest("session/resume", { cwd, sessionId: sid }, { cwd, session_id: sid });
     this.sessionId = sid;
     this.logger.info(`Session resumed: ${this.sessionId}`);
     return this.sessionId;
@@ -299,8 +300,10 @@ export class HermesAcpClient extends EventEmitter {
 
       // Send the prompt request
       const prompt = typeof input === "string" ? [{ type: "text", text: input }] : input;
-      this.sendRequest("session/prompt", {
+      this.sendCompatRequest("session/prompt", {
         sessionId: sid,
+        prompt,
+      }, {
         session_id: sid,
         prompt,
       }, timeout + 10000).then((result) => {
@@ -328,7 +331,7 @@ export class HermesAcpClient extends EventEmitter {
     const sid = sessionId ?? this.sessionId;
     if (!sid) return;
     try {
-      await this.sendRequest("session/cancel", { sessionId: sid, session_id: sid });
+      await this.sendCompatRequest("session/cancel", { sessionId: sid }, { session_id: sid });
     } catch {
       // Best-effort cancel
     }
@@ -341,8 +344,7 @@ export class HermesAcpClient extends EventEmitter {
     const closeSession = options?.closeSession ?? true;
     if (closeSession && this.sessionId) {
       try {
-        await this.sendRequest("session/close", {
-          sessionId: this.sessionId,
+        await this.sendCompatRequest("session/close", { sessionId: this.sessionId }, {
           session_id: this.sessionId,
         });
       } catch {
@@ -462,6 +464,23 @@ export class HermesAcpClient extends EventEmitter {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+  }
+
+  private async sendCompatRequest(
+    method: string,
+    primaryParams: Record<string, unknown>,
+    fallbackParams: Record<string, unknown>,
+    timeoutOverrideMs?: number,
+  ): Promise<unknown> {
+    try {
+      return await this.sendRequest(method, primaryParams, timeoutOverrideMs);
+    } catch (err) {
+      if (!shouldRetryWithFallbackParams(err)) {
+        throw err;
+      }
+      this.logger.warn(`ACP ${method} rejected primary params; retrying compatibility params`);
+      return this.sendRequest(method, fallbackParams, timeoutOverrideMs);
+    }
   }
 
   // ─── Internal: Message Parsing (shared by both transports) ────────────
@@ -624,4 +643,9 @@ function stringifyAcpToolOutput(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function shouldRetryWithFallbackParams(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /invalid\s+params|missing|required|unknown\s+field|unexpected\s+field|schema|validation/i.test(message);
 }

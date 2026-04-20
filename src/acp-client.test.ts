@@ -54,7 +54,7 @@ describe("Hermes ACP client", () => {
     });
   });
 
-  it("initializes with both ACP camelCase and compatibility snake_case fields", async () => {
+  it("initializes with ACP camelCase fields by default", async () => {
     const client = new HermesAcpClient(DEFAULT_CONFIG);
     const sendRequest = vi.fn().mockResolvedValue({});
     (client as unknown as { startTcp: () => Promise<void>; sendRequest: typeof sendRequest }).startTcp =
@@ -67,13 +67,34 @@ describe("Hermes ACP client", () => {
       protocolVersion: 1,
       clientInfo: { name: "openclaw-plugin-hermes", version: "1.0.0" },
       clientCapabilities: {},
+    }, undefined);
+  });
+
+  it("falls back to snake_case ACP fields when primary params are rejected", async () => {
+    const client = new HermesAcpClient(DEFAULT_CONFIG);
+    const sendRequest = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("ACP error [-32602]: invalid params: missing protocol_version"))
+      .mockResolvedValueOnce({});
+    (client as unknown as { startTcp: () => Promise<void>; sendRequest: typeof sendRequest }).startTcp =
+      async () => undefined;
+    (client as unknown as { sendRequest: typeof sendRequest }).sendRequest = sendRequest;
+
+    await client.start();
+
+    expect(sendRequest).toHaveBeenNthCalledWith(1, "initialize", {
+      protocolVersion: 1,
+      clientInfo: { name: "openclaw-plugin-hermes", version: "1.0.0" },
+      clientCapabilities: {},
+    }, undefined);
+    expect(sendRequest).toHaveBeenNthCalledWith(2, "initialize", {
       protocol_version: 1,
       client_info: { name: "openclaw-plugin-hermes", version: "1.0.0" },
       client_capabilities: {},
-    });
+    }, undefined);
   });
 
-  it("resumes sessions using both ACP camelCase and compatibility snake_case ids", async () => {
+  it("resumes sessions using ACP camelCase ids by default", async () => {
     const client = new HermesAcpClient(DEFAULT_CONFIG);
     const sendRequest = vi.fn().mockResolvedValue({});
     (client as unknown as { sendRequest: typeof sendRequest }).sendRequest = sendRequest;
@@ -83,8 +104,7 @@ describe("Hermes ACP client", () => {
     expect(sendRequest).toHaveBeenCalledWith("session/resume", {
       cwd: "/tmp/workspace",
       sessionId: "session-123",
-      session_id: "session-123",
-    });
+    }, undefined);
     expect(client.currentSessionId).toBe("session-123");
   });
 });
