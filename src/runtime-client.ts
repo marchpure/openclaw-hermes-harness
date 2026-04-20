@@ -295,6 +295,7 @@ async function buildHermesHarnessPromptSections(
       "Hermes runtime-local skills, memory, and identity are implementation details of the backend. Do not present them as capabilities of the current OpenClaw agent.",
       "Only the skills listed under # Available OpenClaw Skills are exposed to the current OpenClaw agent. If that section is absent or empty, say no OpenClaw skills were exposed.",
       "If the user asks what skills you have, list only # Available OpenClaw Skills. Do not enumerate Hermes image/container built-in skills unless OpenClaw explicitly lists them there.",
+      "For current weather, market price, commodity price, and other realtime lookup tasks, use available shell/network tools or OpenClaw host capabilities before trying Hermes-local browser skills. If a browser skill or external API key is unavailable, recover with another public source when possible and summarize the limitation in natural language; do not show raw internal JSON errors to the user.",
       "Use Hermes tools for execution. If OpenClaw dynamic tools are unavailable through ACP, explain the limitation instead of pretending to call them.",
     ].join("\n"),
     params.agentId ? `# Agent\nagentId: ${params.agentId}` : undefined,
