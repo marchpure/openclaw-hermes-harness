@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   AgentHarnessAttemptParams,
   AgentHarnessAttemptResult,
@@ -58,6 +59,7 @@ type HermesHarnessBinding = {
   sessionFile: string;
   sessionId: string;
   cwd: string;
+  contextHash: string;
   model?: string;
   agentId?: string;
   transport: HermesPluginConfig["transport"];
@@ -88,8 +90,9 @@ export async function runHermesHarnessAttempt(
   };
   const client = new HermesAcpClient(config, logger);
   const timeoutMs = Math.max(1, params.timeoutMs);
-  const promptBlocks = buildHermesHarnessPromptBlocks(params);
+  const promptBlocks = await buildHermesHarnessPromptBlocks(params);
   const finalPromptText = readTextPrompt(promptBlocks);
+  const contextHash = hashText(finalPromptText);
   const toolMetas = new Map<string, { toolName: string; meta?: string }>();
   let assistantStarted = false;
   let reasoningStarted = false;
@@ -117,7 +120,7 @@ export async function runHermesHarnessAttempt(
 
   try {
     await client.start({}, params.workspaceDir);
-    let session = await resolveHermesHarnessSession(client, config, params);
+    let session = await resolveHermesHarnessSession(client, config, params, contextHash);
     let result;
     try {
       result = await promptHermesHarness(client, promptBlocks, session.sessionId, params, timeoutMs, timeoutController.signal, {
@@ -146,7 +149,7 @@ export async function runHermesHarnessAttempt(
         throw err;
       }
       await clearHermesHarnessBinding(params.sessionFile);
-      session = await createHermesHarnessSession(client, config, params);
+      session = await createHermesHarnessSession(client, config, params, contextHash);
       result = await promptHermesHarness(client, promptBlocks, session.sessionId, params, timeoutMs, timeoutController.signal, {
         get assistantStarted() {
           return assistantStarted;
@@ -247,15 +250,18 @@ export async function runHermesHarnessAttempt(
   }
 }
 
-export function buildHermesHarnessPromptBlocks(params: AgentHarnessAttemptParams): AcpPromptBlock[] {
+export async function buildHermesHarnessPromptBlocks(params: AgentHarnessAttemptParams): Promise<AcpPromptBlock[]> {
+  const workspaceContext = await buildWorkspaceContextPrompt(params.workspaceDir);
   const sections = [
     "# OpenClaw Runtime",
     [
       "You are executing as the current OpenClaw agent through the Hermes ACP runtime.",
-      "Preserve the active agent identity, workspace, session, and channel context.",
+      "Preserve the active OpenClaw agent identity, workspace, session, and channel context.",
+      "If Hermes has its own default assistant identity, treat it only as the execution backend; do not replace the OpenClaw agent identity with it.",
       "Use Hermes tools for execution. If OpenClaw dynamic tools are unavailable through ACP, explain the limitation instead of pretending to call them.",
     ].join("\n"),
     params.agentId ? `# Agent\nagentId: ${params.agentId}` : undefined,
+    workspaceContext ? `# Workspace Context\n${workspaceContext}` : undefined,
     params.extraSystemPrompt ? `# Developer Instructions\n${params.extraSystemPrompt}` : undefined,
     params.skillsSnapshot?.prompt ? `# Available Skills\n${params.skillsSnapshot.prompt}` : undefined,
     params.toolsAllow?.length ? `# OpenClaw Tool Allowlist\n${params.toolsAllow.map((tool) => `- ${tool}`).join("\n")}` : undefined,
@@ -279,21 +285,29 @@ async function resolveHermesHarnessSession(
   client: HermesAcpClient,
   config: HermesPluginConfig,
   params: AgentHarnessAttemptParams,
+  contextHash: string,
 ): Promise<{ sessionId: string; reused: boolean }> {
   if (config.transport === "tcp") {
     const binding = await readHermesHarnessBinding(params.sessionFile);
-    if (binding?.sessionId && binding.cwd === params.workspaceDir) {
+    if (
+      binding?.sessionId &&
+      binding.cwd === params.workspaceDir &&
+      binding.contextHash === contextHash &&
+      binding.agentId === params.agentId &&
+      binding.model === params.modelId
+    ) {
       return { sessionId: binding.sessionId, reused: true };
     }
   }
 
-  return createHermesHarnessSession(client, config, params);
+  return createHermesHarnessSession(client, config, params, contextHash);
 }
 
 async function createHermesHarnessSession(
   client: HermesAcpClient,
   config: HermesPluginConfig,
   params: AgentHarnessAttemptParams,
+  contextHash: string,
 ): Promise<{ sessionId: string; reused: boolean }> {
   const sessionId = await client.newSession(params.workspaceDir);
   if (config.transport === "tcp") {
@@ -302,6 +316,7 @@ async function createHermesHarnessSession(
       sessionFile: params.sessionFile,
       sessionId,
       cwd: params.workspaceDir,
+      contextHash,
       model: params.modelId,
       agentId: params.agentId,
       transport: config.transport,
@@ -474,6 +489,48 @@ function readTextPrompt(blocks: AcpPromptBlock[]): string {
     .map((block) => (typeof block.text === "string" ? block.text : ""))
     .filter(Boolean)
     .join("\n\n");
+}
+
+async function buildWorkspaceContextPrompt(workspaceDir: string): Promise<string> {
+  const files = [
+    { path: "SOUL.md", title: "SOUL.md" },
+    { path: "AGENTS.md", title: "AGENTS.md" },
+    { path: "USER.md", title: "USER.md" },
+    { path: "MEMORY.md", title: "MEMORY.md" },
+  ];
+  const sections: string[] = [];
+  for (const file of files) {
+    const text = await readWorkspaceTextFile(join(workspaceDir, file.path));
+    if (!text) continue;
+    sections.push(`## ${file.title}\n${text}`);
+  }
+  return sections.join("\n\n");
+}
+
+async function readWorkspaceTextFile(path: string): Promise<string | undefined> {
+  try {
+    const text = await readFile(path, "utf8");
+    const trimmed = text.trim();
+    if (!trimmed) return undefined;
+    return truncateForHarnessPrompt(trimmed, 24_000);
+  } catch {
+    return undefined;
+  }
+}
+
+function truncateForHarnessPrompt(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const keepHead = Math.floor(maxChars * 0.35);
+  const keepTail = maxChars - keepHead;
+  return [
+    text.slice(0, keepHead),
+    `\n\n[OpenClaw note: workspace file truncated; omitted ${text.length - maxChars} chars]\n\n`,
+    text.slice(-keepTail),
+  ].join("");
+}
+
+function hashText(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 function resolveHermesHarnessBindingPath(sessionFile: string): string {

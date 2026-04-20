@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createHermesAgentHarness } from "./harness.js";
 import { buildHermesHarnessPromptBlocks } from "./runtime-client.js";
@@ -56,35 +59,45 @@ describe("hermes harness", () => {
     });
   });
 
-  it("builds harness prompt blocks from prepared OpenClaw attempt context", () => {
-    const blocks = buildHermesHarnessPromptBlocks({
-      provider: "hermes",
-      modelId: "default",
-      prompt: "do the work",
-      runId: "run-123",
-      sessionId: "session-123",
-      sessionFile: "/tmp/hermes/session.json",
-      timeoutMs: 30_000,
-      workspaceDir: "/tmp/hermes",
-      agentId: "researcher",
-      extraSystemPrompt: "Use the researcher identity.",
-      skillsSnapshot: {
-        prompt: "- **research**: agent-specific research skill",
-        skills: [{ name: "research" }],
-      },
-      images: [{ mimeType: "image/png", data: "ZmFrZQ==" }],
-    } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0]);
+  it("builds harness prompt blocks from prepared OpenClaw attempt context", async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), "hermes-harness-"));
+    try {
+      await writeFile(join(workspaceDir, "SOUL.md"), "I am the researcher workspace identity.", "utf8");
+      await writeFile(join(workspaceDir, "AGENTS.md"), "Preserve the researcher runtime identity.", "utf8");
 
-    expect(blocks[0]).toMatchObject({ type: "text" });
-    expect(String(blocks[0].text)).toContain("agentId: researcher");
-    expect(String(blocks[0].text)).toContain("Use the researcher identity.");
-    expect(String(blocks[0].text)).toContain("agent-specific research skill");
-    expect(String(blocks[0].text)).toContain("do the work");
-    expect(String(blocks[0].text)).not.toContain("Context Level");
-    expect(blocks[1]).toMatchObject({
-      type: "image",
-      mimeType: "image/png",
-      data: "ZmFrZQ==",
-    });
+      const blocks = await buildHermesHarnessPromptBlocks({
+        provider: "hermes",
+        modelId: "default",
+        prompt: "do the work",
+        runId: "run-123",
+        sessionId: "session-123",
+        sessionFile: "/tmp/hermes/session.json",
+        timeoutMs: 30_000,
+        workspaceDir,
+        agentId: "researcher",
+        extraSystemPrompt: "Use the researcher identity.",
+        skillsSnapshot: {
+          prompt: "- **research**: agent-specific research skill",
+          skills: [{ name: "research" }],
+        },
+        images: [{ mimeType: "image/png", data: "ZmFrZQ==" }],
+      } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0]);
+
+      expect(blocks[0]).toMatchObject({ type: "text" });
+      expect(String(blocks[0].text)).toContain("agentId: researcher");
+      expect(String(blocks[0].text)).toContain("I am the researcher workspace identity.");
+      expect(String(blocks[0].text)).toContain("Preserve the researcher runtime identity.");
+      expect(String(blocks[0].text)).toContain("Use the researcher identity.");
+      expect(String(blocks[0].text)).toContain("agent-specific research skill");
+      expect(String(blocks[0].text)).toContain("do the work");
+      expect(String(blocks[0].text)).not.toContain("Context Level");
+      expect(blocks[1]).toMatchObject({
+        type: "image",
+        mimeType: "image/png",
+        data: "ZmFrZQ==",
+      });
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
   });
 });
