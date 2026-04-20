@@ -26,6 +26,8 @@ const ZERO_ASSISTANT_USAGE = {
   },
 };
 
+const HARNESS_CALLBACK_TIMEOUT_MS = 1000;
+
 type HarnessMessage = AgentHarnessAttemptResult["messagesSnapshot"][number];
 
 export type HermesRunResponse = {
@@ -180,7 +182,7 @@ export async function runHermesHarnessAttempt(
     }
 
     if (reasoningStarted && !reasoningEnded) {
-      await params.onReasoningEnd?.();
+      notifyHarnessCallback("onReasoningEnd", () => params.onReasoningEnd?.());
       reasoningEnded = true;
     }
 
@@ -221,6 +223,9 @@ export async function runHermesHarnessAttempt(
   } catch (err) {
     promptError = err;
     aborted ||= timeoutController.signal.aborted;
+    if (config.transport === "tcp" && timeoutController.signal.aborted) {
+      await clearHermesHarnessBinding(params.sessionFile);
+    }
     const message = err instanceof Error ? err.message : String(err);
     const usage = undefined;
     const lastAssistant = buildAssistantMessage(params, "", usage, {
@@ -352,8 +357,11 @@ async function resolveHermesHarnessSession(
         return { sessionId: binding.sessionId, reused: true };
       } catch (err) {
         await clearHermesHarnessBinding(params.sessionFile);
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`Hermes session resume failed for ${binding.sessionId}: ${message}`);
+        console.warn(
+          `[hermes] stale TCP session ${binding.sessionId} could not be resumed; creating a new Hermes session: ${
+            formatCallbackError(err)
+          }`,
+        );
       }
     }
   }
@@ -419,7 +427,7 @@ async function promptHermesHarness(
         markAssistantStarted: async () => {
           if (state.assistantStarted) return;
           state.assistantStarted = true;
-          await params.onAssistantMessageStart?.();
+          notifyHarnessCallback("onAssistantMessageStart", () => params.onAssistantMessageStart?.());
         },
         markReasoningStarted: () => {
           state.reasoningStarted = true;
@@ -427,7 +435,7 @@ async function promptHermesHarness(
         markReasoningEnded: async () => {
           if (!state.reasoningStarted || state.reasoningEnded) return;
           state.reasoningEnded = true;
-          await params.onReasoningEnd?.();
+          notifyHarnessCallback("onReasoningEnd", () => params.onReasoningEnd?.());
         },
         toolMetas: state.toolMetas,
       });
@@ -446,8 +454,8 @@ export async function handleHarnessEvent(
   },
 ): Promise<void> {
   if (event.type === "text" && event.text) {
-    await state.markAssistantStarted();
-    await params.onPartialReply?.({ text: event.text });
+    notifyHarnessCallback("markAssistantStarted", () => state.markAssistantStarted());
+    notifyHarnessCallback("onPartialReply", () => params.onPartialReply?.({ text: event.text }));
     return;
   }
 
@@ -460,7 +468,7 @@ export async function handleHarnessEvent(
         delta: event.text,
       },
     });
-    await params.onReasoningStream?.({ text: event.text });
+    notifyHarnessCallback("onReasoningStream", () => params.onReasoningStream?.({ text: event.text }));
     return;
   }
 
@@ -529,13 +537,39 @@ export async function handleHarnessEvent(
         ...(outputText ? { summary: outputText, progressText: outputText } : {}),
       },
     });
-    await params.onToolResult?.({ text: outputText } as never);
+    notifyHarnessCallback("onToolResult", () => params.onToolResult?.({ text: outputText } as never));
     return;
   }
 
   if (event.type === "done") {
-    await state.markReasoningEnded();
+    notifyHarnessCallback("markReasoningEnded", () => state.markReasoningEnded());
   }
+}
+
+async function safeHarnessCallback(label: string, callback: () => unknown): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve(callback()),
+      new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, HARNESS_CALLBACK_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (err) {
+    console.warn(`[hermes] OpenClaw harness callback ${label} failed: ${formatCallbackError(err)}`);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function notifyHarnessCallback(label: string, callback: () => unknown): void {
+  void safeHarnessCallback(label, callback);
+}
+
+function formatCallbackError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function buildHermesToolItemTitle(toolName: string, outputText: string): string {

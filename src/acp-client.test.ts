@@ -107,4 +107,56 @@ describe("Hermes ACP client", () => {
     }, undefined);
     expect(client.currentSessionId).toBe("session-123");
   });
+
+  it("settles prompts even when event callbacks throw or reject", async () => {
+    const client = new HermesAcpClient(DEFAULT_CONFIG);
+    (client as unknown as { sessionId: string }).sessionId = "session-123";
+    (client as unknown as { sendCompatRequest: () => Promise<unknown> }).sendCompatRequest = async () => ({});
+
+    const promptPromise = client.prompt("hello", "session-123", {
+      timeout: 500,
+      onEvent: (event) => {
+        if (event.type === "text") {
+          throw new Error("callback failed");
+        }
+        return Promise.reject(new Error("callback rejected"));
+      },
+    });
+
+    client.emit("session-event-raw", { type: "text", text: "hello " });
+    client.emit("session-event-raw", { type: "thinking", text: "work" });
+    client.emit("session-event-raw", { type: "done" });
+
+    await expect(promptPromise).resolves.toMatchObject({
+      text: "hello ",
+    });
+  });
+
+  it("settles prompts on JSON-RPC response when Hermes does not send done", async () => {
+    const client = new HermesAcpClient(DEFAULT_CONFIG);
+    (client as unknown as { sessionId: string }).sessionId = "session-123";
+    (client as unknown as { sendCompatRequest: () => Promise<unknown> }).sendCompatRequest = async () => ({
+      usage: {
+        inputTokens: 1,
+        outputTokens: 2,
+        totalTokens: 3,
+      },
+    });
+
+    const promptPromise = client.prompt("hello", "session-123", {
+      timeout: 500,
+      onEvent: () => new Promise<void>(() => {}),
+    });
+
+    client.emit("session-event-raw", { type: "text", text: "partial" });
+
+    await expect(promptPromise).resolves.toMatchObject({
+      text: "partial",
+      usage: {
+        input_tokens: 1,
+        output_tokens: 2,
+        total_tokens: 3,
+      },
+    });
+  });
 });

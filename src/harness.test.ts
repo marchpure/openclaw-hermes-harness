@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createHermesAgentHarness } from "./harness.js";
-import { setHermesHarnessAgentEventEmitterForTest } from "./agent-event-bridge.js";
+import { publishHermesHarnessAgentEvent, setHermesHarnessAgentEventEmitterForTest } from "./agent-event-bridge.js";
 import {
   buildHermesHarnessBootstrapHash,
   buildHermesHarnessPromptBlocks,
@@ -247,7 +247,7 @@ describe("hermes harness", () => {
     }
   });
 
-  it("fails fast when a matching TCP Hermes session binding cannot be resumed", async () => {
+  it("creates a fresh TCP Hermes session when a matching binding cannot be resumed", async () => {
     const workspaceDir = await mkdtemp(join(tmpdir(), "hermes-harness-session-fallback-"));
     const sessionFile = join(workspaceDir, "session.json");
     try {
@@ -283,26 +283,25 @@ describe("hermes harness", () => {
         },
       };
 
-      await expect(
-        resolveHermesHarnessSessionForTest(
-          client as never,
-          DEFAULT_CONFIG,
-          {
-            provider: "hermes",
-            modelId: "default",
-            prompt: "same prompt",
-            runId: "run-123",
-            sessionId: "session-fallback",
-            sessionFile,
-            timeoutMs: 30_000,
-            workspaceDir,
-            agentId: "agent-123",
-          } as unknown as Parameters<typeof resolveHermesHarnessSessionForTest>[2],
-          "hash-123",
-        ),
-      ).rejects.toThrow("Hermes session resume failed for session-stale: session not found");
+      const result = await resolveHermesHarnessSessionForTest(
+        client as never,
+        DEFAULT_CONFIG,
+        {
+          provider: "hermes",
+          modelId: "default",
+          prompt: "same prompt",
+          runId: "run-123",
+          sessionId: "session-fallback",
+          sessionFile,
+          timeoutMs: 30_000,
+          workspaceDir,
+          agentId: "agent-123",
+        } as unknown as Parameters<typeof resolveHermesHarnessSessionForTest>[2],
+        "hash-123",
+      );
 
-      expect(calls).toEqual(["resume"]);
+      expect(result).toEqual({ sessionId: "session-new", reused: false });
+      expect(calls).toEqual(["resume", "new"]);
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }
@@ -418,6 +417,65 @@ describe("hermes harness", () => {
     } finally {
       setHermesHarnessAgentEventEmitterForTest(undefined);
     }
+  });
+
+  it("keeps harness event handling non-blocking when OpenClaw callbacks hang or throw", async () => {
+    const never = new Promise<void>(() => {});
+    const toolMetas = new Map<string, { toolName: string; meta?: string }>([
+      ["tool-1", { toolName: "web_search" }],
+    ]);
+    const params = {
+      provider: "hermes",
+      modelId: "default",
+      prompt: "stream",
+      runId: "run-non-blocking",
+      sessionId: "session-non-blocking",
+      sessionFile: "/tmp/hermes/session.json",
+      timeoutMs: 30_000,
+      workspaceDir: "/tmp/hermes",
+      onPartialReply: () => never,
+      onReasoningStream: () => never,
+      onToolResult: () => {
+        throw new Error("ui callback failed");
+      },
+    } as unknown as Parameters<typeof handleHarnessEvent>[1];
+    const state = {
+      markAssistantStarted: async () => never,
+      markReasoningStarted: () => undefined,
+      markReasoningEnded: async () => never,
+      toolMetas,
+    };
+
+    await expect(Promise.race([
+      handleHarnessEvent({ type: "text", text: "hello" }, params, state).then(() => "returned"),
+      new Promise((resolve) => setTimeout(() => resolve("timed-out"), 50)),
+    ])).resolves.toBe("returned");
+    await expect(Promise.race([
+      handleHarnessEvent({ type: "thinking", text: "thinking" }, params, state).then(() => "returned"),
+      new Promise((resolve) => setTimeout(() => resolve("timed-out"), 50)),
+    ])).resolves.toBe("returned");
+    await expect(Promise.race([
+      handleHarnessEvent(
+        { type: "tool_result", toolName: "web_search", toolCallId: "tool-1", text: "done" },
+        params,
+        state,
+      ).then(() => "returned"),
+      new Promise((resolve) => setTimeout(() => resolve("timed-out"), 50)),
+    ])).resolves.toBe("returned");
+  });
+
+  it("does not let agent event callbacks throw back into Hermes event processing", () => {
+    expect(() =>
+      publishHermesHarnessAgentEvent(
+        {
+          runId: "run-throwing-callback",
+          onAgentEvent: () => {
+            throw new Error("ui event callback failed");
+          },
+        } as unknown as Parameters<typeof publishHermesHarnessAgentEvent>[0],
+        { stream: "tool", data: { phase: "start" } },
+      ),
+    ).not.toThrow();
   });
 
   it("summarizes nested tool error JSON instead of surfacing raw success false payloads", async () => {

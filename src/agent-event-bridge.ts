@@ -24,7 +24,11 @@ export function publishHermesHarnessAgentEvent(
   event: HarnessAgentEvent,
 ): void {
   void emitHermesHarnessAgentEvent(params, event);
-  void params.onAgentEvent?.(event);
+  try {
+    void Promise.resolve(params.onAgentEvent?.(event)).catch(() => {});
+  } catch {
+    // Best effort only. Agent event delivery must not block or fail the turn.
+  }
 }
 
 export async function emitHermesHarnessAgentEvent(

@@ -260,11 +260,13 @@ export class HermesAcpClient extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       let settled = false;
+      let removeAbortListener: (() => void) | undefined;
       const settle = (fn: () => void): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutTimer);
         this.off("session-event-raw", eventHandler);
+        removeAbortListener?.();
         fn();
       };
       const timeoutTimer = setTimeout(() => {
@@ -275,7 +277,13 @@ export class HermesAcpClient extends EventEmitter {
       const eventHandler = (event: AcpSessionEvent) => {
         events.push(event);
         this.emit("session-event", event);
-        void options?.onEvent?.(event);
+        try {
+          void Promise.resolve(options?.onEvent?.(event)).catch((err) => {
+            this.logger.warn(`ACP event callback failed: ${formatCallbackError(err)}`);
+          });
+        } catch (err) {
+          this.logger.warn(`ACP event callback failed: ${formatCallbackError(err)}`);
+        }
 
         if (event.type === "text" && event.text) {
           finalText += event.text;
@@ -292,10 +300,16 @@ export class HermesAcpClient extends EventEmitter {
 
       // Handle abort signal
       if (options?.signal) {
-        options.signal.addEventListener("abort", () => {
+        const abortHandler = () => {
           this.cancel(sid).catch(() => {});
           settle(() => reject(new Error("Prompt aborted")));
-        }, { once: true });
+        };
+        if (options.signal.aborted) {
+          abortHandler();
+        } else {
+          options.signal.addEventListener("abort", abortHandler, { once: true });
+          removeAbortListener = () => options.signal?.removeEventListener("abort", abortHandler);
+        }
       }
 
       // Send the prompt request
@@ -643,6 +657,10 @@ function stringifyAcpToolOutput(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function formatCallbackError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function shouldRetryWithFallbackParams(err: unknown): boolean {
