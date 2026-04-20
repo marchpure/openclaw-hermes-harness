@@ -407,6 +407,14 @@ async function handleHarnessEvent(
     const toolName = event.toolName || "hermes_tool";
     state.toolMetas.set(id, { toolName });
     params.onAgentEvent?.({
+      stream: "tool",
+      data: {
+        phase: "start",
+        name: toolName,
+        toolCallId: id,
+      },
+    });
+    params.onAgentEvent?.({
       stream: "item",
       data: {
         itemId: id,
@@ -423,28 +431,104 @@ async function handleHarnessEvent(
   if (event.type === "tool_result") {
     const id = event.toolCallId || `tool:${state.toolMetas.size}`;
     const existing = state.toolMetas.get(id);
+    const toolName = event.toolName || existing?.toolName || "hermes_tool";
+    const outputText = formatHermesToolOutput(event.text);
+    const isError = isHermesToolError(event.text);
     state.toolMetas.set(id, {
-      toolName: existing?.toolName ?? "hermes_tool",
-      ...(event.text ? { meta: event.text.slice(0, 200) } : {}),
+      toolName,
+      ...(outputText ? { meta: outputText.slice(0, 200) } : {}),
+    });
+    params.onAgentEvent?.({
+      stream: "tool",
+      data: {
+        phase: "result",
+        name: toolName,
+        toolCallId: id,
+        isError,
+        result: {
+          content: outputText ? [{ type: "text", text: outputText }] : [],
+        },
+      },
     });
     params.onAgentEvent?.({
       stream: "item",
       data: {
         itemId: id,
-        phase: "completed",
+        phase: "end",
         kind: "tool",
-        title: existing?.toolName ?? "Hermes tool",
-        status: "completed",
-        ...(event.text ? { meta: event.text.slice(0, 200) } : {}),
+        title: toolName,
+        status: isError ? "error" : "completed",
+        name: toolName,
+        ...(outputText ? { summary: outputText, progressText: outputText } : {}),
       },
     });
-    await params.onToolResult?.({ text: event.text ?? "" } as never);
+    await params.onToolResult?.({ text: outputText } as never);
     return;
   }
 
   if (event.type === "done") {
     await state.markReasoningEnded();
   }
+}
+
+function formatHermesToolOutput(text: string | undefined): string {
+  if (!text) {
+    return "";
+  }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      const output = readString(record.output);
+      const error = readString(record.error);
+      const exitCode = record.exit_code ?? record.exitCode;
+      const parts: string[] = [];
+      if (output) {
+        parts.push(output);
+      }
+      if (error) {
+        parts.push(`error: ${error}`);
+      }
+      if (typeof exitCode === "number" && exitCode !== 0) {
+        parts.push(`exit_code: ${exitCode}`);
+      }
+      if (parts.length > 0) {
+        return parts.join("\n").trim();
+      }
+    }
+  } catch {
+    // Fall through to the original text for non-JSON tool payloads.
+  }
+  return trimmed;
+}
+
+function isHermesToolError(text: string | undefined): boolean {
+  if (!text) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return false;
+    }
+    const record = parsed as Record<string, unknown>;
+    const exitCode = record.exit_code ?? record.exitCode;
+    if (typeof exitCode === "number" && exitCode !== 0) {
+      return true;
+    }
+    const error = record.error;
+    return typeof error === "string" && error.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 function buildUserMessage(params: AgentHarnessAttemptParams): HarnessMessage {
