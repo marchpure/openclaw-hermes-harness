@@ -9,39 +9,18 @@
  * OpenClaw is the brain, Hermes is the hands.
  */
 
+import { createHermesAgentHarness } from "./harness.js";
+import { buildHermesProvider } from "./provider.js";
 import { dispatchToHermes } from "./dispatcher.js";
 import { checkHealth, formatHealthReport } from "./health.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
-import type { HermesPluginConfig, DispatchRequest, HealthReport } from "./types.js";
-import { DEFAULT_CONFIG } from "./types.js";
+import type { DispatchRequest, HermesPluginConfig } from "./types.js";
+import { resolveHermesAcpConfig } from "./config.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
 function resolveConfig(raw: unknown): HermesPluginConfig {
-  const input = (raw ?? {}) as Record<string, unknown>;
-  return {
-    hermesCommand: (input.hermesCommand as string) ?? undefined,
-    hermesContainerName: (input.hermesContainerName as string) ?? DEFAULT_CONFIG.hermesContainerName,
-    hermesDataDir: (input.hermesDataDir as string) ?? undefined,
-    defaultModel: (input.defaultModel as string) ?? undefined,
-    defaultContextLevel:
-      (input.defaultContextLevel as HermesPluginConfig["defaultContextLevel"]) ??
-      DEFAULT_CONFIG.defaultContextLevel,
-    defaultCredentialScope:
-      (input.defaultCredentialScope as HermesPluginConfig["defaultCredentialScope"]) ??
-      DEFAULT_CONFIG.defaultCredentialScope,
-    defaultWriteback:
-      (input.defaultWriteback as HermesPluginConfig["defaultWriteback"]) ??
-      DEFAULT_CONFIG.defaultWriteback,
-    transport:
-      (input.transport as HermesPluginConfig["transport"]) ??
-      DEFAULT_CONFIG.transport,
-    tcpHost: (input.tcpHost as string) ?? DEFAULT_CONFIG.tcpHost,
-    tcpPort: (input.tcpPort as number) ?? DEFAULT_CONFIG.tcpPort,
-    timeout: (input.timeout as number) ?? DEFAULT_CONFIG.timeout,
-    autoStrategy: (input.autoStrategy as boolean) ?? DEFAULT_CONFIG.autoStrategy,
-    enableLayeredProtocol: (input.enableLayeredProtocol as boolean) ?? DEFAULT_CONFIG.enableLayeredProtocol,
-  };
+  return resolveHermesAcpConfig(raw);
 }
 
 // ─── Plugin Definition ──────────────────────────────────────────────────────
@@ -54,6 +33,9 @@ const plugin = {
   register(api: any) {
     const config = resolveConfig(api.pluginConfig);
     const workspaceDir = api.workspaceDir ?? process.cwd();
+
+    api.registerProvider?.(buildHermesProvider({ pluginConfig: api.pluginConfig }));
+    api.registerAgentHarness?.(createHermesAgentHarness({ pluginConfig: api.pluginConfig }));
 
     const logger = {
       info: (msg: string, ...args: unknown[]) => api.logger?.info?.(msg, ...args) ?? console.log(`[hermes] ${msg}`),
@@ -253,7 +235,9 @@ const plugin = {
       },
     });
 
-    logger.info("Hermes Agent plugin registered (3 tools: hermes_dispatch, hermes_status, hermes_strategy)");
+    logger.info(
+      "Hermes Agent plugin registered (provider, harness, and 3 tools: hermes_dispatch, hermes_status, hermes_strategy)",
+    );
   },
 };
 
