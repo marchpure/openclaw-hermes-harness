@@ -10,7 +10,8 @@ import {
   type HermesRunResponse,
   type HermesRuntimeClient,
 } from "./runtime-client.js";
-import { resolveHermesAcpConfig } from "./config.js";
+import { readHermesPluginConfig, resolveHermesAcpConfig } from "./config.js";
+import { runHermesAppServerAttempt } from "./app-server/run-attempt.js";
 
 const DEFAULT_HERMES_HARNESS_PROVIDER_IDS = new Set(["hermes"]);
 
@@ -40,11 +41,15 @@ export function createHermesAgentHarness(options?: {
       };
     },
     runAttempt: async (params) => {
-      const client =
-        options?.client ??
-        createHermesRuntimeClient({
-          config: resolveHermesAcpConfig(options?.pluginConfig),
-        });
+      const parsedConfig = readHermesPluginConfig(options?.pluginConfig);
+      const runtimeMode = parsedConfig.runtimeMode ?? "app-server";
+      if (runtimeMode !== "acp") {
+        return runHermesAppServerAttempt(resolveHermesAcpConfig(options?.pluginConfig), params);
+      }
+      if (!options?.client) {
+        throw new Error("Hermes ACP harness runtime requires a configured ACP client.");
+      }
+      const client = options.client;
       const response = await client.runAttempt(params);
       return buildHermesAttemptResult(params, response);
     },

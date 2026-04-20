@@ -9,7 +9,7 @@ import { readHermesPluginConfig } from "./config.js";
 const PROVIDER_ID = "hermes";
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 32_000;
-const FALLBACK_HERMES_MODELS = ["default"];
+const FALLBACK_HERMES_MODELS = ["doubao-seed-2-0-pro-260215"];
 
 export function buildHermesProvider(options: { pluginConfig?: unknown } = {}): ProviderPlugin {
   return {

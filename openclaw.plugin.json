@@ -25,6 +25,14 @@
           }
         }
       },
+      "runtimeMode": {
+        "type": "string",
+        "enum": [
+          "app-server",
+          "acp"
+        ],
+        "description": "Harness runtime protocol. app-server is the default and supports OpenClaw dynamic tools; acp keeps the legacy Hermes ACP path."
+      },
       "hermesCommand": {
         "type": "string",
         "minLength": 1,
@@ -122,6 +130,10 @@
     "discovery": {
       "label": "Model Discovery",
       "help": "Hermes model catalog controls."
+    },
+    "runtimeMode": {
+      "label": "Runtime Mode",
+      "help": "Use app-server for OpenClaw dynamic tools. Use acp only for the legacy Hermes ACP bridge."
     },
     "hermesCommand": {
       "label": "Hermes Command",

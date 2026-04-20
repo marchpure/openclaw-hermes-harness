@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createHermesAgentHarness } from "./harness.js";
 import { setHermesHarnessAgentEventEmitterForTest } from "./agent-event-bridge.js";
+import { HermesAppServerEventProjector } from "./app-server/projector.js";
 import {
   buildHermesHarnessBootstrapHash,
   buildHermesHarnessPromptBlocks,
@@ -14,6 +15,7 @@ import type { AcpSessionEvent } from "./types.js";
 describe("hermes harness", () => {
   it("maps a Hermes runtime response to an agent harness result", async () => {
     const harness = createHermesAgentHarness({
+      pluginConfig: { runtimeMode: "acp" },
       client: {
         async runAttempt() {
           return {
@@ -270,5 +272,42 @@ describe("hermes harness", () => {
     } finally {
       setHermesHarnessAgentEventEmitterForTest(undefined);
     }
+  });
+
+  it("synthesizes a minimal assistant payload when Hermes only emits reasoning or tools", async () => {
+    const projector = new HermesAppServerEventProjector(
+      {
+        prompt: "run tool only",
+        sessionId: "session-tool-only",
+      } as never,
+      "thread-tool-only",
+    );
+
+    await projector.handleNotification({
+      method: "item/reasoning/textDelta",
+      params: { threadId: "thread-tool-only", delta: "thinking..." },
+    });
+    await projector.handleNotification({
+      method: "item/tool/started",
+      params: { threadId: "thread-tool-only", itemId: "tool-1", tool: "web_search" },
+    });
+    await projector.handleNotification({
+      method: "item/tool/completed",
+      params: { threadId: "thread-tool-only", itemId: "tool-1", tool: "web_search", preview: "ok" },
+    });
+    await projector.handleNotification({
+      method: "turn/completed",
+      params: { threadId: "thread-tool-only", turn: { id: "turn-1", status: "completed" } },
+    });
+
+    const result = projector.buildResult({
+      didSendViaMessagingTool: false,
+      messagingToolSentTexts: [],
+      messagingToolSentMediaUrls: [],
+      messagingToolSentTargets: [],
+    });
+
+    expect(result.assistantTexts[0]).toContain("Hermes completed tool execution");
+    expect(result.assistantTexts[0]).toContain("web_search");
   });
 });

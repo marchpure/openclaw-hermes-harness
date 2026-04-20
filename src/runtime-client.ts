@@ -726,6 +726,10 @@ function readTextPrompt(blocks: AcpPromptBlock[]): string {
     .join("\n\n");
 }
 
+export function readTextPromptForAppServer(blocks: AcpPromptBlock[]): string {
+  return readTextPrompt(blocks);
+}
+
 async function buildWorkspaceContextPrompt(workspaceDir: string): Promise<string> {
   const files = [
     { path: "SOUL.md", title: "SOUL.md" },

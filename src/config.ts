@@ -1,6 +1,7 @@
 import { DEFAULT_CONFIG, type HermesPluginConfig as HermesAcpPluginConfig } from "./types.js";
 
 export type HermesPluginConfig = {
+  runtimeMode?: "app-server" | "acp";
   discovery?: {
     enabled?: boolean;
     models?: string[];
@@ -18,6 +19,9 @@ export function readHermesPluginConfig(value: unknown): HermesPluginConfig {
   const acp = readObject(input.acp);
   const runtime = readObject(input.runtime);
   return {
+    ...(input.runtimeMode === "app-server" || input.runtimeMode === "acp"
+      ? { runtimeMode: input.runtimeMode }
+      : {}),
     ...(discovery
       ? {
           discovery: {
