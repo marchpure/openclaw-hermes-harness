@@ -284,7 +284,7 @@ export class HermesAcpClient extends EventEmitter {
       this.sendRequest("session/prompt", {
         session_id: sid,
         prompt,
-      }).then((result) => {
+      }, timeout + 10000).then((result) => {
         const promptResult = result as Record<string, unknown>;
         if (promptResult.usage) {
           const u = promptResult.usage as Record<string, number>;
@@ -407,7 +407,11 @@ export class HermesAcpClient extends EventEmitter {
     }
   }
 
-  private async sendRequest(method: string, params?: Record<string, unknown>): Promise<unknown> {
+  private async sendRequest(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutOverrideMs?: number,
+  ): Promise<unknown> {
     const id = ++this.requestId;
     const request: AcpJsonRpcRequest = {
       jsonrpc: "2.0",
@@ -417,9 +421,9 @@ export class HermesAcpClient extends EventEmitter {
     };
 
     return new Promise((resolve, reject) => {
-      const timeoutMs = method === "session/prompt"
+      const timeoutMs = timeoutOverrideMs ?? (method === "session/prompt"
         ? (this.config.timeout * 1000 + 10000)
-        : 30000;
+        : 30000);
 
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
@@ -492,6 +496,19 @@ export class HermesAcpClient extends EventEmitter {
       if (event) {
         this.emit("session-event-raw", event);
       }
+      return;
+    }
+
+    if (method === "session/request_permission") {
+      const toolCall = (params.toolCall ?? {}) as Record<string, unknown>;
+      const event = this.parseSessionEvent({
+        ...toolCall,
+        sessionUpdate: "tool_call_update",
+        status: "pending",
+      });
+      if (event) {
+        this.emit("session-event-raw", event);
+      }
     }
   }
 
@@ -500,31 +517,38 @@ export class HermesAcpClient extends EventEmitter {
     const type = data.type as string | undefined;
 
     if (sessionUpdate === "agent_message_text" || sessionUpdate === "agentMessageText" || sessionUpdate === "agent_message_chunk") {
-      const content = data.content as Record<string, unknown> | undefined;
-      const text = (content?.text as string) ?? (data.text as string) ?? "";
+      const text = extractAcpText(data.content) ?? (data.text as string) ?? "";
       return { type: "text", text };
     }
 
     if (sessionUpdate === "agent_thought" || sessionUpdate === "agentThought" ||
         sessionUpdate === "agent_thinking" || sessionUpdate === "agent_thought_chunk" || type === "thinking") {
-      const content = data.content as Record<string, unknown> | undefined;
-      const text = (content?.text as string) ?? (data.text as string) ?? "";
+      const text = extractAcpText(data.content) ?? (data.text as string) ?? "";
       return { type: "thinking", text };
     }
 
-    if (sessionUpdate === "tool_call_begin" || sessionUpdate === "toolCallBegin" || type === "tool_call") {
+    if (sessionUpdate === "tool_call_begin" || sessionUpdate === "toolCallBegin" || sessionUpdate === "tool_call" || type === "tool_call") {
       return {
         type: "tool_progress",
-        toolName: (data.name as string) ?? (data.toolName as string) ?? "",
+        toolName: (data.name as string) ?? (data.toolName as string) ?? (data.title as string) ?? "",
         toolCallId: (data.id as string) ?? (data.toolCallId as string) ?? "",
       };
     }
 
-    if (sessionUpdate === "tool_call_end" || sessionUpdate === "toolCallEnd" || type === "tool_result") {
+    if (sessionUpdate === "tool_call_end" || sessionUpdate === "toolCallEnd" || sessionUpdate === "tool_call_update" || type === "tool_result") {
+      const status = data.status as string | undefined;
+      if (status === "pending" || status === "in_progress") {
+        return {
+          type: "tool_progress",
+          toolName: (data.name as string) ?? (data.toolName as string) ?? (data.title as string) ?? "",
+          toolCallId: (data.id as string) ?? (data.toolCallId as string) ?? "",
+        };
+      }
       return {
         type: "tool_result",
+        toolName: (data.name as string) ?? (data.toolName as string) ?? (data.title as string) ?? "",
         toolCallId: (data.id as string) ?? (data.toolCallId as string) ?? "",
-        text: (data.output as string) ?? (data.text as string) ?? "",
+        text: stringifyAcpToolOutput(data.rawOutput ?? data.output ?? data.content ?? data.text),
       };
     }
 
@@ -548,5 +572,34 @@ export class HermesAcpClient extends EventEmitter {
       pending.reject(error);
     }
     this.pendingRequests.clear();
+  }
+}
+
+function extractAcpText(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const text = content
+      .map((entry) => extractAcpText(entry))
+      .filter((entry): entry is string => Boolean(entry))
+      .join("");
+    return text || undefined;
+  }
+  if (content && typeof content === "object") {
+    const block = content as Record<string, unknown>;
+    if (typeof block.text === "string") return block.text;
+    if (typeof block.content === "string") return block.content;
+  }
+  return undefined;
+}
+
+function stringifyAcpToolOutput(value: unknown): string {
+  const text = extractAcpText(value);
+  if (text !== undefined) return text;
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
   }
 }

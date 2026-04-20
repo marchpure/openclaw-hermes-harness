@@ -1,5 +1,6 @@
 import type {
   AgentHarness,
+  AgentHarnessCompactResult,
   AgentHarnessAttemptParams,
   AgentHarnessAttemptResult,
 } from "openclaw/plugin-sdk/agent-harness";
@@ -47,11 +48,20 @@ export function createHermesAgentHarness(options?: {
       const response = await client.runAttempt(params);
       return buildHermesAttemptResult(params, response);
     },
+    compact: async () => buildUnsupportedCompactResult(),
     reset: async (params) => {
       if (params.sessionFile) {
         await clearHermesHarnessBinding(params.sessionFile);
       }
     },
+  };
+}
+
+function buildUnsupportedCompactResult(): AgentHarnessCompactResult {
+  return {
+    ok: false,
+    compacted: false,
+    reason: "Hermes ACP runtime does not expose an OpenClaw-compatible compaction API yet; reset clears the session binding.",
   };
 }
 

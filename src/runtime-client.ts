@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
   AgentHarnessAttemptParams,
@@ -92,7 +92,7 @@ export async function runHermesHarnessAttempt(
   const timeoutMs = Math.max(1, params.timeoutMs);
   const promptBlocks = await buildHermesHarnessPromptBlocks(params);
   const finalPromptText = readTextPrompt(promptBlocks);
-  const contextHash = hashText(finalPromptText);
+  const contextHash = buildHermesHarnessContextHash(promptBlocks);
   const toolMetas = new Map<string, { toolName: string; meta?: string }>();
   let assistantStarted = false;
   let reasoningStarted = false;
@@ -529,8 +529,13 @@ function truncateForHarnessPrompt(text: string, maxChars: number): string {
   ].join("");
 }
 
-function hashText(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
+export function buildHermesHarnessContextHash(blocks: AcpPromptBlock[]): string {
+  const hash = createHash("sha256");
+  for (const block of blocks) {
+    hash.update(JSON.stringify(block));
+    hash.update("\n");
+  }
+  return hash.digest("hex");
 }
 
 function resolveHermesHarnessBindingPath(sessionFile: string): string {
@@ -550,5 +555,7 @@ async function readHermesHarnessBinding(sessionFile: string): Promise<HermesHarn
 async function writeHermesHarnessBinding(sessionFile: string, binding: HermesHarnessBinding): Promise<void> {
   const path = resolveHermesHarnessBindingPath(sessionFile);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(binding, null, 2)}\n`, "utf8");
+  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(tmpPath, `${JSON.stringify(binding, null, 2)}\n`, "utf8");
+  await rename(tmpPath, path);
 }

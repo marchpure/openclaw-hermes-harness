@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createHermesAgentHarness } from "./harness.js";
-import { buildHermesHarnessPromptBlocks } from "./runtime-client.js";
+import { buildHermesHarnessContextHash, buildHermesHarnessPromptBlocks } from "./runtime-client.js";
 
 describe("hermes harness", () => {
   it("maps a Hermes runtime response to an agent harness result", async () => {
@@ -59,6 +59,22 @@ describe("hermes harness", () => {
     });
   });
 
+  it("declares compaction unsupported instead of silently inheriting PI semantics", async () => {
+    const harness = createHermesAgentHarness();
+
+    const result = await harness.compact?.({
+      sessionId: "session-123",
+      sessionFile: "/tmp/hermes/session.json",
+      workspaceDir: "/tmp/hermes",
+    } as unknown as Parameters<NonNullable<typeof harness.compact>>[0]);
+
+    expect(result).toMatchObject({
+      ok: false,
+      compacted: false,
+    });
+    expect(result?.reason).toContain("does not expose");
+  });
+
   it("builds harness prompt blocks from prepared OpenClaw attempt context", async () => {
     const workspaceDir = await mkdtemp(join(tmpdir(), "hermes-harness-"));
     try {
@@ -99,5 +115,29 @@ describe("hermes harness", () => {
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }
+  });
+
+  it("includes image blocks in the harness context hash", async () => {
+    const base = {
+      provider: "hermes",
+      modelId: "default",
+      prompt: "compare this image",
+      runId: "run-123",
+      sessionId: "session-123",
+      sessionFile: "/tmp/hermes/session.json",
+      timeoutMs: 30_000,
+      workspaceDir: "/tmp/hermes",
+    } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0];
+
+    const first = await buildHermesHarnessPromptBlocks({
+      ...base,
+      images: [{ type: "image", mimeType: "image/png", data: "Zmlyc3Q=" }],
+    });
+    const second = await buildHermesHarnessPromptBlocks({
+      ...base,
+      images: [{ type: "image", mimeType: "image/png", data: "c2Vjb25k" }],
+    });
+
+    expect(buildHermesHarnessContextHash(first)).not.toBe(buildHermesHarnessContextHash(second));
   });
 });
