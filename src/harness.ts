@@ -4,6 +4,7 @@ import type {
   AgentHarnessAttemptResult,
 } from "openclaw/plugin-sdk/agent-harness";
 import {
+  clearHermesHarnessBinding,
   createHermesRuntimeClient,
   type HermesRunResponse,
   type HermesRuntimeClient,
@@ -46,6 +47,11 @@ export function createHermesAgentHarness(options?: {
       const response = await client.runAttempt(params);
       return buildHermesAttemptResult(params, response);
     },
+    reset: async (params) => {
+      if (params.sessionFile) {
+        await clearHermesHarnessBinding(params.sessionFile);
+      }
+    },
   };
 }
 
@@ -61,20 +67,22 @@ function buildHermesAttemptResult(
         : [];
   const hadPotentialSideEffects = response.hadPotentialSideEffects === true;
   return {
-    aborted: false,
-    externalAbort: false,
-    timedOut: false,
+    aborted: response.aborted ?? false,
+    externalAbort: response.externalAbort ?? false,
+    timedOut: response.timedOut ?? false,
     idleTimedOut: false,
     timedOutDuringCompaction: false,
-    promptError: null,
-    promptErrorSource: null,
+    promptError: response.promptError ?? null,
+    promptErrorSource: response.promptErrorSource ?? null,
     sessionIdUsed: response.sessionId ?? params.sessionId,
     bootstrapPromptWarningSignaturesSeen: params.bootstrapPromptWarningSignaturesSeen,
     bootstrapPromptWarningSignature: params.bootstrapPromptWarningSignature,
-    messagesSnapshot: [],
+    finalPromptText: response.finalPromptText,
+    messagesSnapshot: response.messagesSnapshot ?? [],
     assistantTexts,
-    toolMetas: [],
-    lastAssistant: undefined,
+    toolMetas: response.toolMetas ?? [],
+    lastAssistant: response.lastAssistant as never,
+    currentAttemptAssistant: response.currentAttemptAssistant as never,
     didSendViaMessagingTool: false,
     messagingToolSentTexts: [],
     messagingToolSentMediaUrls: [],
@@ -85,7 +93,7 @@ function buildHermesAttemptResult(
       hadPotentialSideEffects,
       replaySafe: response.replaySafe ?? !hadPotentialSideEffects,
     },
-    itemLifecycle: {
+    itemLifecycle: response.itemLifecycle ?? {
       startedCount: assistantTexts.length > 0 ? 1 : 0,
       completedCount: assistantTexts.length > 0 ? 1 : 0,
       activeCount: 0,

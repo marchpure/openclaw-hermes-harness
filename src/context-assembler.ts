@@ -11,8 +11,14 @@
  */
 
 import { readFile, readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import type { ContextLevel, ContextPayload, HermesPluginConfig } from "./types.js";
+import { join } from "node:path";
+import type {
+  ContextLevel,
+  ContextPayload,
+  HermesPluginConfig,
+  OpenClawAttemptContext,
+  OpenClawSkillSnapshot,
+} from "./types.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -86,6 +92,7 @@ function adaptiveMemorySummary(fullMemory: string, maxChars: number): string {
 export interface AssemblerOptions {
   workspaceDir: string;
   config: HermesPluginConfig;
+  openClawContext?: OpenClawAttemptContext;
 }
 
 /**
@@ -96,7 +103,8 @@ export async function assembleContext(
   level: ContextLevel,
   options: AssemblerOptions,
 ): Promise<ContextPayload> {
-  const { workspaceDir, config } = options;
+  const { workspaceDir, config, openClawContext } = options;
+  const isHarnessAttempt = hasHarnessContext(openClawContext);
   const payload: ContextPayload = { task };
 
   // ── L0: Task + Model Config ───────────────────────────────────────────
@@ -104,6 +112,10 @@ export async function assembleContext(
   payload.modelConfig = {
     model: config.defaultModel ?? "minimax-m2.5",
   };
+
+  if (isHarnessAttempt) {
+    await addPreparedOpenClawContext(payload, workspaceDir, openClawContext);
+  }
 
   if (level === "L0") return payload;
 
@@ -127,22 +139,7 @@ export async function assembleContext(
 
   // ── L2: + Memory, Identity, Workspace Instructions ────────────────────
 
-  // Read SOUL.md
-  const soulPath = join(workspaceDir, "SOUL.md");
-  const soul = await readFileIfExists(soulPath);
-
-  // Read USER.md
-  const userPath = join(workspaceDir, "USER.md");
-  const user = await readFileIfExists(userPath);
-
-  // Read AGENTS.md
-  const agentsPath = join(workspaceDir, "AGENTS.md");
-  const agents = await readFileIfExists(agentsPath);
-
-  payload.identity = {};
-  if (soul) payload.identity.soul = soul;
-  if (user) payload.identity.user = user;
-  if (agents) payload.identity.agents = agents;
+  await addWorkspaceIdentity(payload, workspaceDir);
 
   // Read memory: MEMORY.md + today's daily file
   const memoryPath = join(workspaceDir, "MEMORY.md");
@@ -181,9 +178,17 @@ export async function assembleContext(
     payload.memory.summary = undefined;
   }
 
-  // Read skills manifest
-  const skillsDir = join(workspaceDir, "skills");
-  payload.skills = await readSkillsManifest(skillsDir);
+  // Prefer OpenClaw's prepared skills snapshot in harness mode; it already
+  // reflects agent-level filters and merged skill sources.
+  if (openClawContext?.skillsSnapshot) {
+    payload.openClaw = {
+      ...(payload.openClaw ?? {}),
+      skillsPrompt: buildSkillsPromptFromSnapshot(openClawContext.skillsSnapshot),
+    };
+  } else {
+    const skillsDir = join(workspaceDir, "skills");
+    payload.skills = await readSkillsManifest(skillsDir);
+  }
 
   // Read MCP server config (from OpenClaw config if available)
   // For now, return empty — this would integrate with OpenClaw's config system
@@ -193,6 +198,81 @@ export async function assembleContext(
   payload.cronDefinitions = [];
 
   return payload;
+}
+
+function hasHarnessContext(context: OpenClawAttemptContext | undefined): boolean {
+  return Boolean(
+    context?.agentId ||
+      context?.agentDir ||
+      context?.skillsSnapshot ||
+      context?.extraSystemPrompt ||
+      context?.toolsAllow?.length ||
+      context?.bootstrapContextMode ||
+      context?.bootstrapContextRunKind,
+  );
+}
+
+async function addPreparedOpenClawContext(
+  payload: ContextPayload,
+  workspaceDir: string,
+  context: OpenClawAttemptContext | undefined,
+): Promise<void> {
+  payload.openClaw = {
+    ...(context?.agentId ? { agentId: context.agentId } : {}),
+    ...(context?.agentDir ? { agentDir: context.agentDir } : {}),
+    ...(context?.extraSystemPrompt ? { extraSystemPrompt: context.extraSystemPrompt } : {}),
+    ...(context?.toolsAllow?.length ? { toolsAllow: context.toolsAllow } : {}),
+    ...(context?.bootstrapContextMode ? { bootstrapContextMode: context.bootstrapContextMode } : {}),
+    ...(context?.bootstrapContextRunKind ? { bootstrapContextRunKind: context.bootstrapContextRunKind } : {}),
+  };
+
+  if (context?.skillsSnapshot) {
+    payload.openClaw.skillsPrompt = buildSkillsPromptFromSnapshot(context.skillsSnapshot);
+  }
+
+  await addWorkspaceIdentity(payload, workspaceDir);
+}
+
+async function addWorkspaceIdentity(payload: ContextPayload, workspaceDir: string): Promise<void> {
+  const [soul, user, agents] = await Promise.all([
+    readFileIfExists(join(workspaceDir, "SOUL.md")),
+    readFileIfExists(join(workspaceDir, "USER.md")),
+    readFileIfExists(join(workspaceDir, "AGENTS.md")),
+  ]);
+
+  payload.identity = {
+    ...(payload.identity ?? {}),
+    ...(soul ? { soul } : {}),
+    ...(user ? { user } : {}),
+    ...(agents ? { agents } : {}),
+  };
+}
+
+function buildSkillsPromptFromSnapshot(snapshot: OpenClawSkillSnapshot): string {
+  if (snapshot.prompt?.trim()) {
+    return snapshot.prompt;
+  }
+
+  const resolvedSkills = snapshot.resolvedSkills ?? [];
+  if (resolvedSkills.length > 0) {
+    return resolvedSkills
+      .map((skill) => {
+        const name = skill.name ?? skill.source ?? skill.path ?? "unknown";
+        const description = skill.description ? `: ${skill.description}` : "";
+        const path = skill.path ? ` (${skill.path})` : "";
+        return `- **${name}**${description}${path}`;
+      })
+      .join("\n");
+  }
+
+  const skills = snapshot.skills ?? [];
+  return skills
+    .map((skill) => {
+      const required = skill.requiredEnv?.length ? `; requires env: ${skill.requiredEnv.join(", ")}` : "";
+      const primary = skill.primaryEnv ? `; primary env: ${skill.primaryEnv}` : "";
+      return `- **${skill.name}**${primary}${required}`;
+    })
+    .join("\n");
 }
 
 /**
@@ -237,6 +317,13 @@ export function serializeContextForPrompt(payload: ContextPayload): string {
 
   parts.push(`# Task\n${payload.task}`);
 
+  if (payload.openClaw?.agentId) {
+    parts.push(`# OpenClaw Agent\nagentId: ${payload.openClaw.agentId}`);
+  }
+  if (payload.openClaw?.extraSystemPrompt) {
+    parts.push(`# OpenClaw Extra System Prompt\n${payload.openClaw.extraSystemPrompt}`);
+  }
+
   if (payload.identity?.soul) {
     parts.push(`# Identity (SOUL)\n${payload.identity.soul}`);
   }
@@ -262,7 +349,13 @@ export function serializeContextForPrompt(payload: ContextPayload): string {
       `# Allowed Commands\n${payload.toolConfig.commandAllowlist.map((c) => `- ${c}`).join("\n")}`,
     );
   }
+  if (payload.openClaw?.toolsAllow?.length) {
+    parts.push(`# OpenClaw Tool Allowlist\n${payload.openClaw.toolsAllow.map((tool) => `- ${tool}`).join("\n")}`);
+  }
 
+  if (payload.openClaw?.skillsPrompt?.trim()) {
+    parts.push(`# Available Skills\n${payload.openClaw.skillsPrompt.trim()}`);
+  }
   if (payload.skills && payload.skills.length > 0) {
     const skillList = payload.skills
       .map((s) => `- **${s.name}**: ${s.description ?? "(no description)"}`)

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHermesAgentHarness } from "./harness.js";
+import { buildHermesHarnessPromptBlocks } from "./runtime-client.js";
 
 describe("hermes harness", () => {
   it("maps a Hermes runtime response to an agent harness result", async () => {
@@ -52,6 +53,38 @@ describe("hermes harness", () => {
       harness.supports({ provider: "openai", modelId: "gpt-5.4", requestedRuntime: "auto" }),
     ).toMatchObject({
       supported: false,
+    });
+  });
+
+  it("builds harness prompt blocks from prepared OpenClaw attempt context", () => {
+    const blocks = buildHermesHarnessPromptBlocks({
+      provider: "hermes",
+      modelId: "default",
+      prompt: "do the work",
+      runId: "run-123",
+      sessionId: "session-123",
+      sessionFile: "/tmp/hermes/session.json",
+      timeoutMs: 30_000,
+      workspaceDir: "/tmp/hermes",
+      agentId: "researcher",
+      extraSystemPrompt: "Use the researcher identity.",
+      skillsSnapshot: {
+        prompt: "- **research**: agent-specific research skill",
+        skills: [{ name: "research" }],
+      },
+      images: [{ mimeType: "image/png", data: "ZmFrZQ==" }],
+    } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0]);
+
+    expect(blocks[0]).toMatchObject({ type: "text" });
+    expect(String(blocks[0].text)).toContain("agentId: researcher");
+    expect(String(blocks[0].text)).toContain("Use the researcher identity.");
+    expect(String(blocks[0].text)).toContain("agent-specific research skill");
+    expect(String(blocks[0].text)).toContain("do the work");
+    expect(String(blocks[0].text)).not.toContain("Context Level");
+    expect(blocks[1]).toMatchObject({
+      type: "image",
+      mimeType: "image/png",
+      data: "ZmFrZQ==",
     });
   });
 });

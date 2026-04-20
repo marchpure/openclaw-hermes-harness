@@ -103,6 +103,7 @@ export async function dispatchToHermes(
     contextPayload = await assembleContext(request.task, strategy.context, {
       workspaceDir,
       config,
+      openClawContext: request.openClawContext,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

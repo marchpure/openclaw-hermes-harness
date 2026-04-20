@@ -25,6 +25,10 @@ import type {
   TransportMode,
 } from "./types.js";
 
+export type AcpPromptBlock = Record<string, unknown> & {
+  type: string;
+};
+
 // ─── Logger (plugin-compatible) ─────────────────────────────────────────────
 
 interface Logger {
@@ -221,9 +225,9 @@ export class HermesAcpClient extends EventEmitter {
    * Returns the final response text and emits events along the way.
    */
   async prompt(
-    text: string,
+    input: string | AcpPromptBlock[],
     sessionId?: string,
-    options?: { timeout?: number; signal?: AbortSignal },
+    options?: { timeout?: number; signal?: AbortSignal; onEvent?: (event: AcpSessionEvent) => void | Promise<void> },
   ): Promise<{ text: string; events: AcpSessionEvent[]; usage?: { input_tokens: number; output_tokens: number; total_tokens: number } }> {
     const sid = sessionId ?? this.sessionId;
     if (!sid) {
@@ -237,34 +241,31 @@ export class HermesAcpClient extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       let settled = false;
+      const settle = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
+        this.off("session-event-raw", eventHandler);
+        fn();
+      };
       const timeoutTimer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new Error(`Hermes prompt timed out after ${timeout / 1000}s`));
-        }
+        settle(() => reject(new Error(`Hermes prompt timed out after ${timeout / 1000}s`)));
       }, timeout);
 
       // Set up a temporary line handler for streaming events
       const eventHandler = (event: AcpSessionEvent) => {
         events.push(event);
         this.emit("session-event", event);
+        void options?.onEvent?.(event);
 
         if (event.type === "text" && event.text) {
           finalText += event.text;
         }
         if (event.type === "done") {
-          clearTimeout(timeoutTimer);
-          if (!settled) {
-            settled = true;
-            resolve({ text: finalText, events, usage });
-          }
+          settle(() => resolve({ text: finalText, events, usage }));
         }
         if (event.type === "error") {
-          clearTimeout(timeoutTimer);
-          if (!settled) {
-            settled = true;
-            reject(new Error(event.message ?? "Hermes returned an error"));
-          }
+          settle(() => reject(new Error(event.message ?? "Hermes returned an error")));
         }
       };
 
@@ -273,19 +274,16 @@ export class HermesAcpClient extends EventEmitter {
       // Handle abort signal
       if (options?.signal) {
         options.signal.addEventListener("abort", () => {
-          clearTimeout(timeoutTimer);
-          if (!settled) {
-            settled = true;
-            this.cancel(sid).catch(() => {});
-            reject(new Error("Prompt aborted"));
-          }
+          this.cancel(sid).catch(() => {});
+          settle(() => reject(new Error("Prompt aborted")));
         }, { once: true });
       }
 
       // Send the prompt request
+      const prompt = typeof input === "string" ? [{ type: "text", text: input }] : input;
       this.sendRequest("session/prompt", {
         session_id: sid,
-        prompt: [{ type: "text", text }],
+        prompt,
       }).then((result) => {
         const promptResult = result as Record<string, unknown>;
         if (promptResult.usage) {
@@ -296,17 +294,9 @@ export class HermesAcpClient extends EventEmitter {
             total_tokens: u.total_tokens ?? u.totalTokens ?? 0,
           };
         }
-        if (!settled) {
-          clearTimeout(timeoutTimer);
-          settled = true;
-          resolve({ text: finalText, events, usage });
-        }
+        settle(() => resolve({ text: finalText, events, usage }));
       }).catch((err) => {
-        clearTimeout(timeoutTimer);
-        if (!settled) {
-          settled = true;
-          reject(err);
-        }
+        settle(() => reject(err));
       });
     });
   }
@@ -328,8 +318,9 @@ export class HermesAcpClient extends EventEmitter {
   /**
    * Close the ACP connection.
    */
-  async close(): Promise<void> {
-    if (this.sessionId) {
+  async close(options?: { closeSession?: boolean }): Promise<void> {
+    const closeSession = options?.closeSession ?? true;
+    if (closeSession && this.sessionId) {
       try {
         await this.sendRequest("session/close", { session_id: this.sessionId });
       } catch {

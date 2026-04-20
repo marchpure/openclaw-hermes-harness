@@ -140,6 +140,12 @@ export interface DispatchRequest {
   files?: FileAttachment[];
   /** If set, skip auto-strategy and use these exact values */
   explicitStrategy?: boolean;
+  /**
+   * OpenClaw's prepared attempt context when Hermes is selected as an
+   * Agent Harness runtime. This context is agent-scoped and must not be
+   * inferred from the plugin registration workspace.
+   */
+  openClawContext?: OpenClawAttemptContext;
 }
 
 export interface Artifact {
@@ -231,6 +237,15 @@ export interface AcpSessionEvent {
 
 export interface ContextPayload {
   task: string;
+  openClaw?: {
+    agentId?: string;
+    agentDir?: string;
+    extraSystemPrompt?: string;
+    skillsPrompt?: string;
+    toolsAllow?: string[];
+    bootstrapContextMode?: "full" | "lightweight";
+    bootstrapContextRunKind?: "default" | "heartbeat" | "cron";
+  };
   modelConfig?: {
     model: string;
     provider?: string;
@@ -254,6 +269,34 @@ export interface ContextPayload {
   skills?: Array<{ name: string; path: string; description?: string }>;
   mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
   cronDefinitions?: Array<{ schedule: string; task: string; enabled: boolean }>;
+}
+
+export interface OpenClawSkillSnapshot {
+  prompt?: string;
+  skills?: Array<{
+    name: string;
+    primaryEnv?: string;
+    requiredEnv?: string[];
+  }>;
+  resolvedSkills?: Array<{
+    name?: string;
+    description?: string;
+    path?: string;
+    source?: string;
+  }>;
+  skillFilter?: string[];
+  version?: number;
+}
+
+export interface OpenClawAttemptContext {
+  agentId?: string;
+  agentDir?: string;
+  config?: unknown;
+  skillsSnapshot?: OpenClawSkillSnapshot;
+  extraSystemPrompt?: string;
+  toolsAllow?: string[];
+  bootstrapContextMode?: "full" | "lightweight";
+  bootstrapContextRunKind?: "default" | "heartbeat" | "cron";
 }
 
 // ─── Credential Entry ───────────────────────────────────────────────────────
