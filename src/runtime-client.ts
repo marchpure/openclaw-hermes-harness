@@ -276,6 +276,7 @@ async function buildHermesHarnessPromptSections(
   options: { includeUserPrompt: boolean },
 ): Promise<string[]> {
   const workspaceContext = await buildWorkspaceContextPrompt(params.workspaceDir);
+  const skillsPrompt = buildHermesSkillsPrompt(params.skillsSnapshot);
   return [
     "# OpenClaw Runtime",
     [
@@ -290,7 +291,7 @@ async function buildHermesHarnessPromptSections(
     params.agentId ? `# Agent\nagentId: ${params.agentId}` : undefined,
     workspaceContext ? `# Workspace Context\n${workspaceContext}` : undefined,
     params.extraSystemPrompt ? `# Developer Instructions\n${params.extraSystemPrompt}` : undefined,
-    params.skillsSnapshot?.prompt ? `# Available OpenClaw Skills\n${params.skillsSnapshot.prompt}` : undefined,
+    skillsPrompt ? `# Available OpenClaw Skills\n${skillsPrompt}` : undefined,
     params.toolsAllow?.length ? `# OpenClaw Tool Allowlist\n${params.toolsAllow.map((tool) => `- ${tool}`).join("\n")}` : undefined,
     options.includeUserPrompt ? `# User Prompt\n${params.prompt}` : undefined,
   ].filter((section): section is string => Boolean(section && section.trim()));
@@ -487,8 +488,29 @@ function formatHermesToolOutput(text: string | undefined): string {
       const error = readString(record.error);
       const exitCode = record.exit_code ?? record.exitCode;
       const parts: string[] = [];
+      const title = readString(record.title);
+      const url = readString(record.url);
+      const message = readString(record.message);
+      const command = readString(record.command);
+      const success = record.success;
+      const snapshot = readString(record.snapshot);
       if (output) {
         parts.push(output);
+      }
+      if (!output && command) {
+        parts.push(`command: ${command}`);
+      }
+      if (title) {
+        parts.push(`title: ${title}`);
+      }
+      if (url) {
+        parts.push(`url: ${url}`);
+      }
+      if (!output && typeof success === "boolean") {
+        parts.push(`success: ${success}`);
+      }
+      if (!output && message) {
+        parts.push(message);
       }
       if (error) {
         parts.push(`error: ${error}`);
@@ -496,14 +518,21 @@ function formatHermesToolOutput(text: string | undefined): string {
       if (typeof exitCode === "number" && exitCode !== 0) {
         parts.push(`exit_code: ${exitCode}`);
       }
+      if (parts.length === 0 && snapshot) {
+        parts.push("snapshot captured");
+      }
       if (parts.length > 0) {
-        return parts.join("\n").trim();
+        return truncateVisibleToolText(parts.join("\n").trim());
+      }
+      const summary = summarizeJsonToolResult(record);
+      if (summary) {
+        return summary;
       }
     }
   } catch {
     // Fall through to the original text for non-JSON tool payloads.
   }
-  return trimmed;
+  return truncateVisibleToolText(trimmed);
 }
 
 function isHermesToolError(text: string | undefined): boolean {
@@ -529,6 +558,92 @@ function isHermesToolError(text: string | undefined): boolean {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function truncateVisibleToolText(text: string, maxChars = 1200): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars - 32)}\n...[tool output truncated]`;
+}
+
+function summarizeJsonToolResult(record: Record<string, unknown>): string {
+  const noisyKeys = new Set([
+    "snapshot",
+    "content",
+    "html",
+    "markdown",
+    "raw_output",
+    "rawOutput",
+    "details",
+    "data",
+  ]);
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(record)) {
+    if (noisyKeys.has(key)) {
+      continue;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        continue;
+      }
+      lines.push(`${key}: ${trimmed}`);
+      continue;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
+      lines.push(`${key}: ${String(value)}`);
+      continue;
+    }
+  }
+  return lines.length > 0 ? truncateVisibleToolText(lines.join("\n")) : "";
+}
+
+function buildHermesSkillsPrompt(snapshot: AgentHarnessAttemptParams["skillsSnapshot"]): string {
+  if (!snapshot) {
+    return "";
+  }
+  const resolvedSkills = snapshot.resolvedSkills ?? [];
+  if (resolvedSkills.length > 0) {
+    return resolvedSkills
+      .map((skill) => {
+        const name = skill.name ?? skill.source ?? "unknown";
+        const description = skill.description ? `: ${skill.description}` : "";
+        return `- ${name}${description}`;
+      })
+      .join("\n");
+  }
+
+  const skills = snapshot.skills ?? [];
+  if (skills.length > 0) {
+    return skills
+      .map((skill) => {
+        const required = skill.requiredEnv?.length
+          ? `; requires env: ${skill.requiredEnv.join(", ")}`
+          : "";
+        const primary = skill.primaryEnv ? `; primary env: ${skill.primaryEnv}` : "";
+        return `- ${skill.name}${primary}${required}`;
+      })
+      .join("\n");
+  }
+
+  const prompt = snapshot.prompt?.trim() ?? "";
+  if (!prompt) {
+    return "";
+  }
+  return prompt
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        Boolean(line) &&
+        !line.includes("<available_skills>") &&
+        !line.includes("</available_skills>") &&
+        !line.includes("<location>") &&
+        !line.includes("read its SKILL.md") &&
+        !line.includes("Before replying: scan <available_skills>"),
+    )
+    .join("\n");
 }
 
 function buildUserMessage(params: AgentHarnessAttemptParams): HarnessMessage {

@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createHermesAgentHarness } from "./harness.js";
-import { buildHermesHarnessBootstrapHash, buildHermesHarnessPromptBlocks } from "./runtime-client.js";
+import {
+  buildHermesHarnessBootstrapHash,
+  buildHermesHarnessPromptBlocks,
+} from "./runtime-client.js";
 
 describe("hermes harness", () => {
   it("maps a Hermes runtime response to an agent harness result", async () => {
@@ -104,7 +107,7 @@ describe("hermes harness", () => {
       expect(String(blocks[0].text)).toContain("I am the researcher workspace identity.");
       expect(String(blocks[0].text)).toContain("Preserve the researcher runtime identity.");
       expect(String(blocks[0].text)).toContain("Use the researcher identity.");
-      expect(String(blocks[0].text)).toContain("agent-specific research skill");
+      expect(String(blocks[0].text)).toContain("- research");
       expect(String(blocks[0].text)).toContain("Available OpenClaw Skills");
       expect(String(blocks[0].text)).toContain("Do not enumerate Hermes image/container built-in skills");
       expect(String(blocks[0].text)).toContain("do the work");
@@ -169,5 +172,40 @@ describe("hermes harness", () => {
     } as unknown as Parameters<typeof buildHermesHarnessBootstrapHash>[0];
 
     expect(await buildHermesHarnessBootstrapHash(base)).not.toBe(await buildHermesHarnessBootstrapHash(changed));
+  });
+
+  it("sanitizes OpenClaw skills prompt for Hermes so SKILL.md paths are not exposed as runtime instructions", async () => {
+    const blocks = await buildHermesHarnessPromptBlocks({
+      provider: "hermes",
+      modelId: "default",
+      prompt: "list skills",
+      runId: "run-123",
+      sessionId: "session-123",
+      sessionFile: "/tmp/hermes/session.json",
+      timeoutMs: 30_000,
+      workspaceDir: "/tmp/hermes",
+      skillsSnapshot: {
+        prompt: [
+          "## Skills (mandatory)",
+          "Before replying: scan <available_skills> <description> entries.",
+          "- If exactly one skill clearly applies: read its SKILL.md at <location> with `read`, then follow it.",
+          "<available_skills>",
+          "  <skill>",
+          "    <name>web_search</name>",
+          "    <description>Search the web</description>",
+          "    <location>/opt/data/home/.openclaw/workspace/skills/web_search/SKILL.md</location>",
+          "  </skill>",
+          "</available_skills>",
+        ].join("\n"),
+        skills: [{ name: "web_search" }],
+      },
+    } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0]);
+
+    const text = String(blocks[0]?.text);
+    expect(text).toContain("Available OpenClaw Skills");
+    expect(text).toContain("- web_search");
+    expect(text).not.toContain("read its SKILL.md");
+    expect(text).not.toContain("<location>");
+    expect(text).not.toContain("SKILL.md");
   });
 });
