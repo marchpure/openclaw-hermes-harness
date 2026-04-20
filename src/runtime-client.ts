@@ -8,6 +8,7 @@ import type {
 } from "openclaw/plugin-sdk/agent-harness";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient, type AcpPromptBlock } from "./acp-client.js";
+import { buildHermesHostCapabilityPrompt } from "./host-capabilities.js";
 import type { AcpSessionEvent, HermesPluginConfig } from "./types.js";
 
 const ZERO_ASSISTANT_USAGE = {
@@ -299,6 +300,7 @@ async function buildHermesHarnessPromptSections(
     workspaceContext ? `# Workspace Context\n${workspaceContext}` : undefined,
     params.extraSystemPrompt ? `# Developer Instructions\n${params.extraSystemPrompt}` : undefined,
     skillsPrompt ? `# Available OpenClaw Skills\n${skillsPrompt}` : undefined,
+    `# OpenClaw Host Capabilities\n${buildHermesHostCapabilityPrompt()}`,
     params.toolsAllow?.length ? `# OpenClaw Tool Allowlist\n${params.toolsAllow.map((tool) => `- ${tool}`).join("\n")}` : undefined,
     options.includeUserPrompt ? `# User Prompt\n${params.prompt}` : undefined,
   ].filter((section): section is string => Boolean(section && section.trim()));

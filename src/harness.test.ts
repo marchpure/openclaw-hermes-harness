@@ -114,6 +114,10 @@ describe("hermes harness", () => {
       expect(String(blocks[0].text)).toContain("Use the researcher identity.");
       expect(String(blocks[0].text)).toContain("- research");
       expect(String(blocks[0].text)).toContain("Available OpenClaw Skills");
+      expect(String(blocks[0].text)).toContain("OpenClaw Host Capabilities");
+      expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.search");
+      expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.fetch");
+      expect(String(blocks[0].text)).toContain("do not open Feishu pages in a browser");
       expect(String(blocks[0].text)).toContain("Do not enumerate Hermes image/container built-in skills");
       expect(String(blocks[0].text)).toContain("do the work");
       expect(String(blocks[0].text)).not.toContain("Context Level");
