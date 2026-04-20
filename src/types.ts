@@ -180,6 +180,8 @@ export interface HermesPluginConfig {
   hermesCommand?: string;
   hermesContainerName: string;
   hermesDataDir?: string;
+  /** Execution cwd inside Hermes. Use "/tmp" to keep OpenClaw workspace files read-only by default. */
+  runtimeCwd: string;
   /** Transport mode: "tcp" (recommended) or "stdio" (docker exec). Default: "tcp" */
   transport: TransportMode;
   /** TCP host for Hermes ACP bridge. Default: "127.0.0.1" */
@@ -198,6 +200,7 @@ export interface HermesPluginConfig {
 
 export const DEFAULT_CONFIG: HermesPluginConfig = {
   hermesContainerName: "hermes-agent",
+  runtimeCwd: "/tmp",
   transport: "tcp",
   tcpHost: "127.0.0.1",
   tcpPort: 3100,

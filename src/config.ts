@@ -61,6 +61,9 @@ function readHermesAcpPartialConfig(
     ...(readNonEmptyString(input.hermesDataDir)
       ? { hermesDataDir: readNonEmptyString(input.hermesDataDir) }
       : {}),
+    ...(readNonEmptyString(input.runtimeCwd)
+      ? { runtimeCwd: readNonEmptyString(input.runtimeCwd) }
+      : {}),
     ...(readTransport(input.transport) ? { transport: readTransport(input.transport) } : {}),
     ...(readNonEmptyString(input.tcpHost) ? { tcpHost: readNonEmptyString(input.tcpHost) } : {}),
     ...(readPort(input.tcpPort) ? { tcpPort: readPort(input.tcpPort) } : {}),

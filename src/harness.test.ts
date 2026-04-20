@@ -189,10 +189,10 @@ describe("hermes harness", () => {
           schemaVersion: 1,
           sessionFile,
           sessionId: "session-existing",
-          cwd: workspaceDir,
-          contextHash: "hash-123",
-          model: "default",
-          agentId: "agent-123",
+          cwd: "/tmp",
+          contextHash: "stale-hash",
+          model: "old-model",
+          agentId: "other-agent",
           transport: "tcp",
           tcpHost: "127.0.0.1",
           tcpPort: 3100,
@@ -232,7 +232,68 @@ describe("hermes harness", () => {
       );
 
       expect(result).toEqual({ sessionId: "session-existing", reused: true });
-      expect(resumed).toEqual([{ sessionId: "session-existing", cwd: workspaceDir }]);
+      expect(resumed).toEqual([{ sessionId: "session-existing", cwd: "/tmp" }]);
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails fast when a matching TCP Hermes session binding cannot be resumed", async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), "hermes-harness-session-fallback-"));
+    const sessionFile = join(workspaceDir, "session.json");
+    try {
+      await writeFile(
+        `${sessionFile}.hermes-acp.json`,
+        `${JSON.stringify({
+          schemaVersion: 1,
+          sessionFile,
+          sessionId: "session-stale",
+          cwd: "/tmp",
+          contextHash: "hash-123",
+          model: "default",
+          agentId: "agent-123",
+          transport: "tcp",
+          tcpHost: "127.0.0.1",
+          tcpPort: 3100,
+          containerName: "hermes-agent",
+          createdAt: "2026-04-20T00:00:00.000Z",
+          updatedAt: "2026-04-20T00:00:00.000Z",
+        })}\n`,
+        "utf8",
+      );
+
+      const calls: string[] = [];
+      const client = {
+        resumeSession: async () => {
+          calls.push("resume");
+          throw new Error("session not found");
+        },
+        newSession: async () => {
+          calls.push("new");
+          return "session-new";
+        },
+      };
+
+      await expect(
+        resolveHermesHarnessSessionForTest(
+          client as never,
+          DEFAULT_CONFIG,
+          {
+            provider: "hermes",
+            modelId: "default",
+            prompt: "same prompt",
+            runId: "run-123",
+            sessionId: "session-fallback",
+            sessionFile,
+            timeoutMs: 30_000,
+            workspaceDir,
+            agentId: "agent-123",
+          } as unknown as Parameters<typeof resolveHermesHarnessSessionForTest>[2],
+          "hash-123",
+        ),
+      ).rejects.toThrow("Hermes session resume failed for session-stale: session not found");
+
+      expect(calls).toEqual(["resume"]);
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }
@@ -271,6 +332,23 @@ describe("hermes harness", () => {
     expect(text).not.toContain("read its SKILL.md");
     expect(text).not.toContain("<location>");
     expect(text).not.toContain("SKILL.md");
+  });
+
+  it("marks OpenClaw identity files as read-only context and runs Hermes outside the workspace by default", async () => {
+    const blocks = await buildHermesHarnessPromptBlocks({
+      provider: "hermes",
+      modelId: "default",
+      prompt: "remember my name",
+      runId: "run-123",
+      sessionId: "session-123",
+      sessionFile: "/tmp/hermes/session.json",
+      timeoutMs: 30_000,
+      workspaceDir: "/tmp/hermes",
+    } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0]);
+
+    const text = String(blocks[0]?.text);
+    expect(text).toContain("SOUL.md, USER.md, AGENTS.md, MEMORY.md");
+    expect(text).toContain("read-only context");
   });
 
   it("bridges Hermes tool events to OpenClaw agent events without suppressing callbacks", async () => {

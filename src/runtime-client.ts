@@ -97,6 +97,7 @@ export async function runHermesHarnessAttempt(
   const promptBlocks = await buildHermesHarnessPromptBlocks(params);
   const finalPromptText = readTextPrompt(promptBlocks);
   const contextHash = await buildHermesHarnessBootstrapHash(params);
+  const runtimeCwd = resolveHermesRuntimeCwd(config, params.workspaceDir);
   const toolMetas = new Map<string, { toolName: string; meta?: string }>();
   let assistantStarted = false;
   let reasoningStarted = false;
@@ -123,8 +124,8 @@ export async function runHermesHarnessAttempt(
   }, timeoutMs);
 
   try {
-    await client.start({}, params.workspaceDir);
-    let session = await resolveHermesHarnessSession(client, config, params, contextHash);
+    await client.start({}, runtimeCwd);
+    let session = await resolveHermesHarnessSession(client, config, params, contextHash, runtimeCwd);
     let result;
     try {
       result = await promptHermesHarness(client, promptBlocks, session.sessionId, params, timeoutMs, timeoutController.signal, {
@@ -153,7 +154,7 @@ export async function runHermesHarnessAttempt(
         throw err;
       }
       await clearHermesHarnessBinding(params.sessionFile);
-      session = await createHermesHarnessSession(client, config, params, contextHash);
+      session = await createHermesHarnessSession(client, config, params, contextHash, runtimeCwd);
       result = await promptHermesHarness(client, promptBlocks, session.sessionId, params, timeoutMs, timeoutController.signal, {
         get assistantStarted() {
           return assistantStarted;
@@ -287,6 +288,8 @@ async function buildHermesHarnessPromptSections(
       "You are executing as the current OpenClaw agent through the Hermes ACP runtime.",
       "Preserve the active OpenClaw agent identity, workspace, session, and channel context.",
       "If Hermes has its own default assistant identity, treat it only as the execution backend; do not replace the OpenClaw agent identity with it.",
+      "OpenClaw workspace identity files (SOUL.md, USER.md, AGENTS.md, MEMORY.md) are read-only context, not a scratchpad for edits.",
+      "Do not create, overwrite, or mutate OpenClaw workspace identity or memory files unless OpenClaw explicitly requests writeback through its own mechanisms.",
       "Hermes runtime-local skills, memory, and identity are implementation details of the backend. Do not present them as capabilities of the current OpenClaw agent.",
       "Only the skills listed under # Available OpenClaw Skills are exposed to the current OpenClaw agent. If that section is absent or empty, say no OpenClaw skills were exposed.",
       "If the user asks what skills you have, list only # Available OpenClaw Skills. Do not enumerate Hermes image/container built-in skills unless OpenClaw explicitly lists them there.",
@@ -307,7 +310,13 @@ export async function resolveHermesHarnessSessionForTest(
   params: AgentHarnessAttemptParams,
   contextHash: string,
 ): Promise<{ sessionId: string; reused: boolean }> {
-  return resolveHermesHarnessSession(client, config, params, contextHash);
+  return resolveHermesHarnessSession(
+    client,
+    config,
+    params,
+    contextHash,
+    resolveHermesRuntimeCwd(config, params.workspaceDir),
+  );
 }
 
 async function resolveHermesHarnessSession(
@@ -315,30 +324,37 @@ async function resolveHermesHarnessSession(
   config: HermesPluginConfig,
   params: AgentHarnessAttemptParams,
   contextHash: string,
+  runtimeCwd: string,
 ): Promise<{ sessionId: string; reused: boolean }> {
   if (config.transport === "tcp") {
     const binding = await readHermesHarnessBinding(params.sessionFile);
     if (
       binding?.sessionId &&
-      binding.cwd === params.workspaceDir &&
-      binding.contextHash === contextHash &&
-      binding.agentId === params.agentId &&
-      binding.model === params.modelId &&
+      binding.cwd === runtimeCwd &&
       binding.transport === config.transport &&
       binding.tcpHost === config.tcpHost &&
       binding.tcpPort === config.tcpPort &&
       binding.containerName === config.hermesContainerName
     ) {
-      await client.resumeSession(binding.sessionId, params.workspaceDir);
-      await writeHermesHarnessBinding(params.sessionFile, {
-        ...binding,
-        updatedAt: new Date().toISOString(),
-      });
-      return { sessionId: binding.sessionId, reused: true };
+      try {
+        await client.resumeSession(binding.sessionId, runtimeCwd);
+        await writeHermesHarnessBinding(params.sessionFile, {
+          ...binding,
+          contextHash,
+          model: params.modelId,
+          agentId: params.agentId,
+          updatedAt: new Date().toISOString(),
+        });
+        return { sessionId: binding.sessionId, reused: true };
+      } catch (err) {
+        await clearHermesHarnessBinding(params.sessionFile);
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Hermes session resume failed for ${binding.sessionId}: ${message}`);
+      }
     }
   }
 
-  return createHermesHarnessSession(client, config, params, contextHash);
+  return createHermesHarnessSession(client, config, params, contextHash, runtimeCwd);
 }
 
 async function createHermesHarnessSession(
@@ -346,14 +362,15 @@ async function createHermesHarnessSession(
   config: HermesPluginConfig,
   params: AgentHarnessAttemptParams,
   contextHash: string,
+  runtimeCwd: string,
 ): Promise<{ sessionId: string; reused: boolean }> {
-  const sessionId = await client.newSession(params.workspaceDir);
+  const sessionId = await client.newSession(runtimeCwd);
   if (config.transport === "tcp") {
     await writeHermesHarnessBinding(params.sessionFile, {
       schemaVersion: 1,
       sessionFile: params.sessionFile,
       sessionId,
-      cwd: params.workspaceDir,
+      cwd: runtimeCwd,
       contextHash,
       model: params.modelId,
       agentId: params.agentId,
@@ -366,6 +383,14 @@ async function createHermesHarnessSession(
     });
   }
   return { sessionId, reused: false };
+}
+
+function resolveHermesRuntimeCwd(config: HermesPluginConfig, workspaceDir: string): string {
+  const configured = config.runtimeCwd?.trim();
+  if (!configured) {
+    return workspaceDir;
+  }
+  return configured;
 }
 
 async function promptHermesHarness(

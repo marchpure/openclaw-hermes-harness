@@ -39,6 +39,11 @@
         "type": "string",
         "description": "Hermes data directory on host."
       },
+      "runtimeCwd": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Execution working directory inside Hermes ACP. Default: /tmp."
+      },
       "transport": {
         "type": "string",
         "enum": [
@@ -134,6 +139,10 @@
     "transport": {
       "label": "Transport",
       "help": "Use tcp for the persistent ACP bridge or stdio for docker exec per task."
+    },
+    "runtimeCwd": {
+      "label": "Runtime CWD",
+      "help": "Hermes execution working directory. Keep this away from the OpenClaw workspace to avoid accidental edits to USER.md and similar files."
     },
     "tcpPort": {
       "label": "TCP Port",
