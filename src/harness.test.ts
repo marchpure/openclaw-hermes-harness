@@ -8,7 +8,9 @@ import {
   buildHermesHarnessBootstrapHash,
   buildHermesHarnessPromptBlocks,
   handleHarnessEvent,
+  resolveHermesHarnessSessionForTest,
 } from "./runtime-client.js";
+import { DEFAULT_CONFIG } from "./types.js";
 import type { AcpSessionEvent } from "./types.js";
 
 describe("hermes harness", () => {
@@ -175,6 +177,65 @@ describe("hermes harness", () => {
     } as unknown as Parameters<typeof buildHermesHarnessBootstrapHash>[0];
 
     expect(await buildHermesHarnessBootstrapHash(base)).not.toBe(await buildHermesHarnessBootstrapHash(changed));
+  });
+
+  it("resumes a matching TCP Hermes session binding before reuse", async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), "hermes-harness-session-"));
+    const sessionFile = join(workspaceDir, "session.json");
+    try {
+      await writeFile(
+        `${sessionFile}.hermes-acp.json`,
+        `${JSON.stringify({
+          schemaVersion: 1,
+          sessionFile,
+          sessionId: "session-existing",
+          cwd: workspaceDir,
+          contextHash: "hash-123",
+          model: "default",
+          agentId: "agent-123",
+          transport: "tcp",
+          tcpHost: "127.0.0.1",
+          tcpPort: 3100,
+          containerName: "hermes-agent",
+          createdAt: "2026-04-20T00:00:00.000Z",
+          updatedAt: "2026-04-20T00:00:00.000Z",
+        })}\n`,
+        "utf8",
+      );
+
+      const resumed: Array<{ sessionId: string; cwd: string }> = [];
+      const client = {
+        resumeSession: async (sessionId: string, cwd: string) => {
+          resumed.push({ sessionId, cwd });
+          return sessionId;
+        },
+        newSession: async () => {
+          throw new Error("newSession should not be called for a matching binding");
+        },
+      };
+
+      const result = await resolveHermesHarnessSessionForTest(
+        client as never,
+        DEFAULT_CONFIG,
+        {
+          provider: "hermes",
+          modelId: "default",
+          prompt: "same prompt",
+          runId: "run-123",
+          sessionId: "session-fallback",
+          sessionFile,
+          timeoutMs: 30_000,
+          workspaceDir,
+          agentId: "agent-123",
+        } as unknown as Parameters<typeof resolveHermesHarnessSessionForTest>[2],
+        "hash-123",
+      );
+
+      expect(result).toEqual({ sessionId: "session-existing", reused: true });
+      expect(resumed).toEqual([{ sessionId: "session-existing", cwd: workspaceDir }]);
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
   });
 
   it("sanitizes OpenClaw skills prompt for Hermes so SKILL.md paths are not exposed as runtime instructions", async () => {

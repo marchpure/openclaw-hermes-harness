@@ -64,6 +64,9 @@ type HermesHarnessBinding = {
   model?: string;
   agentId?: string;
   transport: HermesPluginConfig["transport"];
+  tcpHost?: string;
+  tcpPort?: number;
+  containerName?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -298,6 +301,15 @@ async function buildHermesHarnessPromptSections(
   ].filter((section): section is string => Boolean(section && section.trim()));
 }
 
+export async function resolveHermesHarnessSessionForTest(
+  client: HermesAcpClient,
+  config: HermesPluginConfig,
+  params: AgentHarnessAttemptParams,
+  contextHash: string,
+): Promise<{ sessionId: string; reused: boolean }> {
+  return resolveHermesHarnessSession(client, config, params, contextHash);
+}
+
 async function resolveHermesHarnessSession(
   client: HermesAcpClient,
   config: HermesPluginConfig,
@@ -311,8 +323,17 @@ async function resolveHermesHarnessSession(
       binding.cwd === params.workspaceDir &&
       binding.contextHash === contextHash &&
       binding.agentId === params.agentId &&
-      binding.model === params.modelId
+      binding.model === params.modelId &&
+      binding.transport === config.transport &&
+      binding.tcpHost === config.tcpHost &&
+      binding.tcpPort === config.tcpPort &&
+      binding.containerName === config.hermesContainerName
     ) {
+      await client.resumeSession(binding.sessionId, params.workspaceDir);
+      await writeHermesHarnessBinding(params.sessionFile, {
+        ...binding,
+        updatedAt: new Date().toISOString(),
+      });
       return { sessionId: binding.sessionId, reused: true };
     }
   }
@@ -337,6 +358,9 @@ async function createHermesHarnessSession(
       model: params.modelId,
       agentId: params.agentId,
       transport: config.transport,
+      tcpHost: config.tcpHost,
+      tcpPort: config.tcpPort,
+      containerName: config.hermesContainerName,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });

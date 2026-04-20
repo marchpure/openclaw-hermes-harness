@@ -94,6 +94,9 @@ export class HermesAcpClient extends EventEmitter {
 
     // Initialize the ACP connection (same for both transports)
     const initResult = await this.sendRequest("initialize", {
+      protocolVersion: 1,
+      clientInfo: { name: "openclaw-plugin-hermes", version: "1.0.0" },
+      clientCapabilities: {},
       protocol_version: 1,
       client_info: { name: "openclaw-plugin-hermes", version: "1.0.0" },
       client_capabilities: {},
@@ -220,6 +223,21 @@ export class HermesAcpClient extends EventEmitter {
   }
 
   /**
+   * Resume an existing ACP session.
+   * ACP method: "session/resume"
+   */
+  async resumeSession(sessionId: string, cwd: string): Promise<string> {
+    const sid = sessionId.trim();
+    if (!sid) {
+      throw new Error("sessionId is required");
+    }
+    await this.sendRequest("session/resume", { cwd, sessionId: sid, session_id: sid });
+    this.sessionId = sid;
+    this.logger.info(`Session resumed: ${this.sessionId}`);
+    return this.sessionId;
+  }
+
+  /**
    * Send a prompt and collect streaming events.
    * ACP method: "session/prompt"
    * Returns the final response text and emits events along the way.
@@ -282,6 +300,7 @@ export class HermesAcpClient extends EventEmitter {
       // Send the prompt request
       const prompt = typeof input === "string" ? [{ type: "text", text: input }] : input;
       this.sendRequest("session/prompt", {
+        sessionId: sid,
         session_id: sid,
         prompt,
       }, timeout + 10000).then((result) => {
@@ -309,7 +328,7 @@ export class HermesAcpClient extends EventEmitter {
     const sid = sessionId ?? this.sessionId;
     if (!sid) return;
     try {
-      await this.sendRequest("session/cancel", { session_id: sid });
+      await this.sendRequest("session/cancel", { sessionId: sid, session_id: sid });
     } catch {
       // Best-effort cancel
     }
@@ -322,7 +341,10 @@ export class HermesAcpClient extends EventEmitter {
     const closeSession = options?.closeSession ?? true;
     if (closeSession && this.sessionId) {
       try {
-        await this.sendRequest("session/close", { session_id: this.sessionId });
+        await this.sendRequest("session/close", {
+          sessionId: this.sessionId,
+          session_id: this.sessionId,
+        });
       } catch {
         // Best-effort
       }

@@ -6,6 +6,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { HermesAcpClient } from "./acp-client.js";
 import type { HermesPluginConfig, HealthReport } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -133,6 +134,18 @@ async function getHermesVersion(config: HermesPluginConfig): Promise<string> {
 
 async function checkAcpResponsive(config: HermesPluginConfig): Promise<boolean> {
   try {
+    if (config.transport === "tcp") {
+      const client = new HermesAcpClient(config, {
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+        debug: () => {},
+      });
+      await client.start();
+      await client.close({ closeSession: false });
+      return true;
+    }
+
     if (config.hermesCommand) {
       const parts = config.hermesCommand.split(/\s+/);
       await execFileAsync(parts[0], [...parts.slice(1), "--help"], {
@@ -150,6 +163,10 @@ async function checkAcpResponsive(config: HermesPluginConfig): Promise<boolean> 
     return false;
   }
 }
+
+export const healthTestHooks = {
+  checkAcpResponsive,
+};
 
 /**
  * Format a health report as a human-readable string.

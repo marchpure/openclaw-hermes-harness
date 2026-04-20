@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { HermesAcpClient } from "./acp-client.js";
 import { DEFAULT_CONFIG } from "./types.js";
 
@@ -52,5 +52,39 @@ describe("Hermes ACP client", () => {
       toolCallId: "tool-1",
       text: "{\"ok\":true}",
     });
+  });
+
+  it("initializes with both ACP camelCase and compatibility snake_case fields", async () => {
+    const client = new HermesAcpClient(DEFAULT_CONFIG);
+    const sendRequest = vi.fn().mockResolvedValue({});
+    (client as unknown as { startTcp: () => Promise<void>; sendRequest: typeof sendRequest }).startTcp =
+      async () => undefined;
+    (client as unknown as { sendRequest: typeof sendRequest }).sendRequest = sendRequest;
+
+    await client.start();
+
+    expect(sendRequest).toHaveBeenCalledWith("initialize", {
+      protocolVersion: 1,
+      clientInfo: { name: "openclaw-plugin-hermes", version: "1.0.0" },
+      clientCapabilities: {},
+      protocol_version: 1,
+      client_info: { name: "openclaw-plugin-hermes", version: "1.0.0" },
+      client_capabilities: {},
+    });
+  });
+
+  it("resumes sessions using both ACP camelCase and compatibility snake_case ids", async () => {
+    const client = new HermesAcpClient(DEFAULT_CONFIG);
+    const sendRequest = vi.fn().mockResolvedValue({});
+    (client as unknown as { sendRequest: typeof sendRequest }).sendRequest = sendRequest;
+
+    await client.resumeSession("session-123", "/tmp/workspace");
+
+    expect(sendRequest).toHaveBeenCalledWith("session/resume", {
+      cwd: "/tmp/workspace",
+      sessionId: "session-123",
+      session_id: "session-123",
+    });
+    expect(client.currentSessionId).toBe("session-123");
   });
 });
