@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createHermesAgentHarness } from "./harness.js";
-import { buildHermesHarnessContextHash, buildHermesHarnessPromptBlocks } from "./runtime-client.js";
+import { buildHermesHarnessBootstrapHash, buildHermesHarnessPromptBlocks } from "./runtime-client.js";
 
 describe("hermes harness", () => {
   it("maps a Hermes runtime response to an agent harness result", async () => {
@@ -105,6 +105,8 @@ describe("hermes harness", () => {
       expect(String(blocks[0].text)).toContain("Preserve the researcher runtime identity.");
       expect(String(blocks[0].text)).toContain("Use the researcher identity.");
       expect(String(blocks[0].text)).toContain("agent-specific research skill");
+      expect(String(blocks[0].text)).toContain("Available OpenClaw Skills");
+      expect(String(blocks[0].text)).toContain("Do not enumerate Hermes image/container built-in skills");
       expect(String(blocks[0].text)).toContain("do the work");
       expect(String(blocks[0].text)).not.toContain("Context Level");
       expect(blocks[1]).toMatchObject({
@@ -117,7 +119,7 @@ describe("hermes harness", () => {
     }
   });
 
-  it("includes image blocks in the harness context hash", async () => {
+  it("keeps the bootstrap session hash stable across user prompts and images", async () => {
     const base = {
       provider: "hermes",
       modelId: "default",
@@ -129,15 +131,43 @@ describe("hermes harness", () => {
       workspaceDir: "/tmp/hermes",
     } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0];
 
-    const first = await buildHermesHarnessPromptBlocks({
+    const first = {
       ...base,
+      prompt: "first prompt",
       images: [{ type: "image", mimeType: "image/png", data: "Zmlyc3Q=" }],
-    });
-    const second = await buildHermesHarnessPromptBlocks({
+    } as unknown as Parameters<typeof buildHermesHarnessBootstrapHash>[0];
+    const second = {
       ...base,
+      prompt: "second prompt",
       images: [{ type: "image", mimeType: "image/png", data: "c2Vjb25k" }],
-    });
+    } as unknown as Parameters<typeof buildHermesHarnessBootstrapHash>[0];
 
-    expect(buildHermesHarnessContextHash(first)).not.toBe(buildHermesHarnessContextHash(second));
+    expect(await buildHermesHarnessBootstrapHash(first)).toBe(await buildHermesHarnessBootstrapHash(second));
+  });
+
+  it("changes the bootstrap session hash when exposed OpenClaw skills change", async () => {
+    const base = {
+      provider: "hermes",
+      modelId: "default",
+      prompt: "same prompt",
+      runId: "run-123",
+      sessionId: "session-123",
+      sessionFile: "/tmp/hermes/session.json",
+      timeoutMs: 30_000,
+      workspaceDir: "/tmp/hermes",
+      skillsSnapshot: {
+        prompt: "- **research**: skill A",
+        skills: [{ name: "research" }],
+      },
+    } as unknown as Parameters<typeof buildHermesHarnessBootstrapHash>[0];
+    const changed = {
+      ...base,
+      skillsSnapshot: {
+        prompt: "- **write**: skill B",
+        skills: [{ name: "write" }],
+      },
+    } as unknown as Parameters<typeof buildHermesHarnessBootstrapHash>[0];
+
+    expect(await buildHermesHarnessBootstrapHash(base)).not.toBe(await buildHermesHarnessBootstrapHash(changed));
   });
 });

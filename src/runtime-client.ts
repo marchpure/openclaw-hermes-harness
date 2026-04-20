@@ -92,7 +92,7 @@ export async function runHermesHarnessAttempt(
   const timeoutMs = Math.max(1, params.timeoutMs);
   const promptBlocks = await buildHermesHarnessPromptBlocks(params);
   const finalPromptText = readTextPrompt(promptBlocks);
-  const contextHash = buildHermesHarnessContextHash(promptBlocks);
+  const contextHash = await buildHermesHarnessBootstrapHash(params);
   const toolMetas = new Map<string, { toolName: string; meta?: string }>();
   let assistantStarted = false;
   let reasoningStarted = false;
@@ -251,22 +251,7 @@ export async function runHermesHarnessAttempt(
 }
 
 export async function buildHermesHarnessPromptBlocks(params: AgentHarnessAttemptParams): Promise<AcpPromptBlock[]> {
-  const workspaceContext = await buildWorkspaceContextPrompt(params.workspaceDir);
-  const sections = [
-    "# OpenClaw Runtime",
-    [
-      "You are executing as the current OpenClaw agent through the Hermes ACP runtime.",
-      "Preserve the active OpenClaw agent identity, workspace, session, and channel context.",
-      "If Hermes has its own default assistant identity, treat it only as the execution backend; do not replace the OpenClaw agent identity with it.",
-      "Use Hermes tools for execution. If OpenClaw dynamic tools are unavailable through ACP, explain the limitation instead of pretending to call them.",
-    ].join("\n"),
-    params.agentId ? `# Agent\nagentId: ${params.agentId}` : undefined,
-    workspaceContext ? `# Workspace Context\n${workspaceContext}` : undefined,
-    params.extraSystemPrompt ? `# Developer Instructions\n${params.extraSystemPrompt}` : undefined,
-    params.skillsSnapshot?.prompt ? `# Available Skills\n${params.skillsSnapshot.prompt}` : undefined,
-    params.toolsAllow?.length ? `# OpenClaw Tool Allowlist\n${params.toolsAllow.map((tool) => `- ${tool}`).join("\n")}` : undefined,
-    `# User Prompt\n${params.prompt}`,
-  ].filter((section): section is string => Boolean(section && section.trim()));
+  const sections = await buildHermesHarnessPromptSections(params, { includeUserPrompt: true });
 
   const blocks: AcpPromptBlock[] = [{ type: "text", text: sections.join("\n\n---\n\n") }];
   for (const image of params.images ?? []) {
@@ -279,6 +264,36 @@ export async function buildHermesHarnessPromptBlocks(params: AgentHarnessAttempt
     });
   }
   return blocks;
+}
+
+export async function buildHermesHarnessBootstrapHash(params: AgentHarnessAttemptParams): Promise<string> {
+  const sections = await buildHermesHarnessPromptSections(params, { includeUserPrompt: false });
+  return hashHermesHarnessSections(sections);
+}
+
+async function buildHermesHarnessPromptSections(
+  params: AgentHarnessAttemptParams,
+  options: { includeUserPrompt: boolean },
+): Promise<string[]> {
+  const workspaceContext = await buildWorkspaceContextPrompt(params.workspaceDir);
+  return [
+    "# OpenClaw Runtime",
+    [
+      "You are executing as the current OpenClaw agent through the Hermes ACP runtime.",
+      "Preserve the active OpenClaw agent identity, workspace, session, and channel context.",
+      "If Hermes has its own default assistant identity, treat it only as the execution backend; do not replace the OpenClaw agent identity with it.",
+      "Hermes runtime-local skills, memory, and identity are implementation details of the backend. Do not present them as capabilities of the current OpenClaw agent.",
+      "Only the skills listed under # Available OpenClaw Skills are exposed to the current OpenClaw agent. If that section is absent or empty, say no OpenClaw skills were exposed.",
+      "If the user asks what skills you have, list only # Available OpenClaw Skills. Do not enumerate Hermes image/container built-in skills unless OpenClaw explicitly lists them there.",
+      "Use Hermes tools for execution. If OpenClaw dynamic tools are unavailable through ACP, explain the limitation instead of pretending to call them.",
+    ].join("\n"),
+    params.agentId ? `# Agent\nagentId: ${params.agentId}` : undefined,
+    workspaceContext ? `# Workspace Context\n${workspaceContext}` : undefined,
+    params.extraSystemPrompt ? `# Developer Instructions\n${params.extraSystemPrompt}` : undefined,
+    params.skillsSnapshot?.prompt ? `# Available OpenClaw Skills\n${params.skillsSnapshot.prompt}` : undefined,
+    params.toolsAllow?.length ? `# OpenClaw Tool Allowlist\n${params.toolsAllow.map((tool) => `- ${tool}`).join("\n")}` : undefined,
+    options.includeUserPrompt ? `# User Prompt\n${params.prompt}` : undefined,
+  ].filter((section): section is string => Boolean(section && section.trim()));
 }
 
 async function resolveHermesHarnessSession(
@@ -529,13 +544,8 @@ function truncateForHarnessPrompt(text: string, maxChars: number): string {
   ].join("");
 }
 
-export function buildHermesHarnessContextHash(blocks: AcpPromptBlock[]): string {
-  const hash = createHash("sha256");
-  for (const block of blocks) {
-    hash.update(JSON.stringify(block));
-    hash.update("\n");
-  }
-  return hash.digest("hex");
+function hashHermesHarnessSections(sections: string[]): string {
+  return createHash("sha256").update(sections.join("\n\n---\n\n")).digest("hex");
 }
 
 function resolveHermesHarnessBindingPath(sessionFile: string): string {
