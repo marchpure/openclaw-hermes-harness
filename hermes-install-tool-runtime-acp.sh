@@ -88,7 +88,11 @@ new_cfg = """        jq --arg cn "${CONTAINER_NAME}" --arg dm "${DEFAULT_MODEL_V
            }
            | .plugins.entries[$pk].enabled = true
            | del(.plugins.entries[$pk].config.runtimeMode)
-           | del(.agents.defaults.models["hermes/default"])
+           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
+               "hermes/default": {
+                 "alias": "hermes"
+               }
+             })
            | .models.providers.hermes = {
                "baseUrl": "http://127.0.0.1/hermes-runtime",
                "apiKey": "hermes-runtime",
@@ -136,9 +140,10 @@ hermes['config'] = {
 }
 hermes['config'].pop('runtimeMode', None)
 agents = d.setdefault('agents', {}).setdefault('defaults', {})
-models = agents.get('models')
-if isinstance(models, dict):
-    models.pop('hermes/default', None)
+allow_models = agents.setdefault('models', {})
+allow_models['hermes/default'] = {
+    'alias': 'hermes'
+}
 providers = d.setdefault('models', {}).setdefault('providers', {})
 providers['hermes'] = {
     'baseUrl': 'http://127.0.0.1/hermes-runtime',
