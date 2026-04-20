@@ -289,6 +289,7 @@ async function buildHermesHarnessPromptSections(
       "You are executing as the current OpenClaw agent through the Hermes ACP runtime.",
       "Preserve the active OpenClaw agent identity, workspace, session, and channel context.",
       "If Hermes has its own default assistant identity, treat it only as the execution backend; do not replace the OpenClaw agent identity with it.",
+      "Treat each prompt as part of the current OpenClaw session. If the user sends a short follow-up such as 'help me think about it', resolve it against the immediately preceding OpenClaw conversation when available instead of treating it as a brand-new unrelated task.",
       "OpenClaw workspace identity files (SOUL.md, USER.md, AGENTS.md, MEMORY.md) are read-only context, not a scratchpad for edits.",
       "Do not create, overwrite, or mutate OpenClaw workspace identity or memory files unless OpenClaw explicitly requests writeback through its own mechanisms.",
       "Hermes runtime-local skills, memory, and identity are implementation details of the backend. Do not present them as capabilities of the current OpenClaw agent.",
@@ -558,6 +559,7 @@ function formatHermesToolOutput(text: string | undefined): string {
       const record = parsed as Record<string, unknown>;
       const output = readString(record.output);
       const error = readString(record.error);
+      const nestedError = readNestedError(record.error);
       const exitCode = record.exit_code ?? record.exitCode;
       const parts: string[] = [];
       const title = readString(record.title);
@@ -586,6 +588,8 @@ function formatHermesToolOutput(text: string | undefined): string {
       }
       if (error) {
         parts.push(`error: ${error}`);
+      } else if (nestedError) {
+        parts.push(`error: ${nestedError}`);
       }
       if (typeof exitCode === "number" && exitCode !== 0) {
         parts.push(`exit_code: ${exitCode}`);
@@ -622,7 +626,11 @@ function isHermesToolError(text: string | undefined): boolean {
       return true;
     }
     const error = record.error;
-    return typeof error === "string" && error.trim().length > 0;
+    return Boolean(
+      (typeof error === "string" && error.trim().length > 0) ||
+        readNestedError(error) ||
+        record.success === false,
+    );
   } catch {
     return false;
   }
@@ -630,6 +638,19 @@ function isHermesToolError(text: string | undefined): boolean {
 
 function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function readNestedError(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const message = readString(record.message) ?? readString(record.error) ?? readString(record.msg);
+  const statusCode = record.statusCode ?? record.code;
+  if (message && (typeof statusCode === "number" || typeof statusCode === "string")) {
+    return `${message} (code=${statusCode})`;
+  }
+  return message;
 }
 
 function truncateVisibleToolText(text: string, maxChars = 1200): string {

@@ -6,6 +6,15 @@ import { HERMES_HOST_CAPABILITIES } from "./host-capabilities.js";
 const execFileAsync = promisify(execFile);
 const LARK_QUERY_MAX_LENGTH = 50;
 const HOST_TOOL_TIMEOUT_MS = 30_000;
+const LARK_UPDATE_MODES = new Set([
+  "append",
+  "overwrite",
+  "replace_range",
+  "replace_all",
+  "insert_before",
+  "insert_after",
+  "delete_range",
+]);
 
 type ExecFileLike = (
   file: string,
@@ -60,11 +69,57 @@ export async function executeHermesHostTool(
     return executeLarkCli(tool, ["docs", "+search", "--query", query, "--as", "user", "--format", "json"], deps);
   }
 
-  const doc = readStringArg(args, "doc");
-  if (!doc) {
-    return hostToolError(tool, "invalid_arguments", "lark.docs.fetch requires a non-empty doc string");
+  if (tool === "lark.docs.fetch") {
+    const doc = readStringArg(args, "doc");
+    if (!doc) {
+      return hostToolError(tool, "invalid_arguments", "lark.docs.fetch requires a non-empty doc string");
+    }
+    return executeLarkCli(tool, ["docs", "+fetch", "--doc", doc, "--as", "user", "--format", "json"], deps);
   }
-  return executeLarkCli(tool, ["docs", "+fetch", "--doc", doc, "--as", "user", "--format", "json"], deps);
+
+  if (tool === "lark.docs.create") {
+    const title = readStringArg(args, "title");
+    const markdown = readStringArg(args, "markdown");
+    if (!title || !markdown) {
+      return hostToolError(tool, "invalid_arguments", "lark.docs.create requires non-empty title and markdown strings");
+    }
+    const cliArgs = ["docs", "+create", "--title", title, "--markdown", markdown, "--as", "user"];
+    const folderToken = readStringArg(args, "folderToken");
+    if (folderToken) {
+      cliArgs.push("--folder-token", folderToken);
+    }
+    return executeLarkCli(tool, cliArgs, deps);
+  }
+
+  const doc = readStringArg(args, "doc");
+  const mode = readStringArg(args, "mode");
+  if (!doc || !mode) {
+    return hostToolError(tool, "invalid_arguments", "lark.docs.update requires non-empty doc and mode strings");
+  }
+  if (!LARK_UPDATE_MODES.has(mode)) {
+    return hostToolError(tool, "invalid_arguments", `Unsupported lark.docs.update mode: ${mode}`);
+  }
+  const cliArgs = ["docs", "+update", "--doc", doc, "--mode", mode, "--as", "user"];
+  const markdown = readStringArg(args, "markdown");
+  if (mode !== "delete_range" && !markdown) {
+    return hostToolError(tool, "invalid_arguments", `lark.docs.update mode ${mode} requires markdown`);
+  }
+  if (markdown) {
+    cliArgs.push("--markdown", markdown);
+  }
+  const selectionWithEllipsis = readStringArg(args, "selectionWithEllipsis");
+  const selectionByTitle = readStringArg(args, "selectionByTitle");
+  if (selectionWithEllipsis) {
+    cliArgs.push("--selection-with-ellipsis", selectionWithEllipsis);
+  }
+  if (selectionByTitle) {
+    cliArgs.push("--selection-by-title", selectionByTitle);
+  }
+  const newTitle = readStringArg(args, "newTitle");
+  if (newTitle) {
+    cliArgs.push("--new-title", newTitle);
+  }
+  return executeLarkCli(tool, cliArgs, deps);
 }
 
 function isHostCapabilityName(tool: string): tool is HostCapability["name"] {
@@ -112,6 +167,16 @@ function parseLarkCliResult(tool: HostCapability["name"], stdout: string): HostT
       tool,
       contentType: "text/markdown",
       content: markdown,
+      raw,
+    };
+  }
+
+  if (tool === "lark.docs.create" || tool === "lark.docs.update") {
+    return {
+      ok: true,
+      tool,
+      contentType: "application/json",
+      content: JSON.stringify(raw, null, 2),
       raw,
     };
   }

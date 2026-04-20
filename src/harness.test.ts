@@ -117,7 +117,10 @@ describe("hermes harness", () => {
       expect(String(blocks[0].text)).toContain("OpenClaw Host Capabilities");
       expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.search");
       expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.fetch");
+      expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.create");
+      expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.update");
       expect(String(blocks[0].text)).toContain("do not open Feishu pages in a browser");
+      expect(String(blocks[0].text)).toContain("part of the current OpenClaw session");
       expect(String(blocks[0].text)).toContain("Do not enumerate Hermes image/container built-in skills");
       expect(String(blocks[0].text)).toContain("do the work");
       expect(String(blocks[0].text)).not.toContain("Context Level");
@@ -413,5 +416,51 @@ describe("hermes harness", () => {
     } finally {
       setHermesHarnessAgentEventEmitterForTest(undefined);
     }
+  });
+
+  it("summarizes nested tool error JSON instead of surfacing raw success false payloads", async () => {
+    const toolResults: Array<{ text?: string }> = [];
+    const toolMetas = new Map<string, { toolName: string; meta?: string }>([
+      ["tool-1", { toolName: "gold_price" }],
+    ]);
+
+    await handleHarnessEvent(
+      {
+        type: "tool_result",
+        toolName: "gold_price",
+        toolCallId: "tool-1",
+        text: JSON.stringify({
+          success: false,
+          error: {
+            statusCode: 102,
+            message: "User did not supply an access key",
+          },
+        }),
+      },
+      {
+        provider: "hermes",
+        modelId: "default",
+        prompt: "gold",
+        runId: "run-error",
+        sessionId: "session-error",
+        sessionFile: "/tmp/hermes/session.json",
+        timeoutMs: 30_000,
+        workspaceDir: "/tmp/hermes",
+        onToolResult: (payload: { text?: string }) => {
+          toolResults.push(payload);
+        },
+      } as unknown as Parameters<typeof handleHarnessEvent>[1],
+      {
+        markAssistantStarted: async () => undefined,
+        markReasoningStarted: () => undefined,
+        markReasoningEnded: async () => undefined,
+        toolMetas,
+      },
+    );
+
+    expect(toolResults).toEqual([
+      { text: "success: false\nerror: User did not supply an access key (code=102)" },
+    ]);
+    expect(toolMetas.get("tool-1")?.meta).toContain("User did not supply an access key");
   });
 });
