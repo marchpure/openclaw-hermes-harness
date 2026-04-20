@@ -188,6 +188,12 @@ export interface HermesPluginConfig {
   tcpHost: string;
   /** TCP port for Hermes ACP bridge. Default: 3100 */
   tcpPort: number;
+  /** Enable the host-side read-only capability bridge used by openclaw-host-tool. */
+  hostBridgeEnabled: boolean;
+  /** Host interface for the host capability bridge. Default: 127.0.0.1. */
+  hostBridgeHost: string;
+  /** Port for the host capability bridge. Default: 3199. */
+  hostBridgePort: number;
   defaultModel?: string;
   defaultContextLevel: ContextLevel;
   defaultCredentialScope: CredentialScopeMode;
@@ -204,6 +210,9 @@ export const DEFAULT_CONFIG: HermesPluginConfig = {
   transport: "tcp",
   tcpHost: "127.0.0.1",
   tcpPort: 3100,
+  hostBridgeEnabled: true,
+  hostBridgeHost: "127.0.0.1",
+  hostBridgePort: 3199,
   defaultContextLevel: "L1",
   defaultCredentialScope: "none",
   defaultWriteback: "W1",
