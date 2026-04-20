@@ -89,7 +89,22 @@ new_cfg = """        jq --arg cn "${CONTAINER_NAME}" --arg dm "${DEFAULT_MODEL_V
            | .plugins.entries[$pk].enabled = true
            | del(.plugins.entries[$pk].config.runtimeMode)
            | del(.agents.defaults.models["hermes/default"])
-           | del(.models.providers.hermes)' "${OPENCLAW_CONFIG}" > "${tmp}" \\
+           | .models.providers.hermes = {
+               "baseUrl": "http://127.0.0.1/hermes-runtime",
+               "apiKey": "hermes-runtime",
+               "auth": "token",
+               "api": "openai-responses",
+               "models": [
+                 {
+                   "id": "default",
+                   "name": "default",
+                   "reasoning": true,
+                   "input": ["text", "image"],
+                   "contextWindow": 200000,
+                   "maxTokens": 32000
+                 }
+               ]
+             }' "${OPENCLAW_CONFIG}" > "${tmp}" \\
            && mv "${tmp}" "${OPENCLAW_CONFIG}"
 """
 if old_cfg not in src:
@@ -125,8 +140,22 @@ models = agents.get('models')
 if isinstance(models, dict):
     models.pop('hermes/default', None)
 providers = d.setdefault('models', {}).setdefault('providers', {})
-if isinstance(providers, dict):
-    providers.pop('hermes', None)
+providers['hermes'] = {
+    'baseUrl': 'http://127.0.0.1/hermes-runtime',
+    'apiKey': 'hermes-runtime',
+    'auth': 'token',
+    'api': 'openai-responses',
+    'models': [
+        {
+            'id': 'default',
+            'name': 'default',
+            'reasoning': True,
+            'input': ['text', 'image'],
+            'contextWindow': 200000,
+            'maxTokens': 32000
+        }
+    ]
+}
 with open(cf, 'w') as f:
     json.dump(d, f, indent=2, ensure_ascii=False)
 """
