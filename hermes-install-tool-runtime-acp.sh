@@ -25,8 +25,10 @@ main() {
   local work_dir
   local base_script
   local patched_script
+  local repo_dir
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/hermes-install-tool-runtime-acp.XXXXXX")"
   trap "rm -rf '${work_dir}'" EXIT
+  repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   base_script="${work_dir}/hermes-install-base.sh"
   patched_script="${work_dir}/hermes-install-patched.sh"
 
@@ -84,6 +86,9 @@ new_cfg = """        jq --arg cn "${CONTAINER_NAME}" --arg dm "${DEFAULT_MODEL_V
                "defaultModel": $dm,
                "autoStrategy": true,
                "enableLayeredProtocol": false,
+               "hostBridgeEnabled": true,
+               "hostBridgeHost": "0.0.0.0",
+               "hostBridgePort": 3199,
                "timeout": 1800
            }
            | .plugins.entries[$pk].enabled = true
@@ -136,6 +141,9 @@ hermes['config'] = {
     'defaultModel': dm,
     'autoStrategy': True,
     'enableLayeredProtocol': False,
+    'hostBridgeEnabled': True,
+    'hostBridgeHost': '0.0.0.0',
+    'hostBridgePort': 3199,
     'timeout': 1800
 }
 hermes['config'].pop('runtimeMode', None)
@@ -178,6 +186,14 @@ PY
 
   log "Starting base installer with Hermes ACP plugin artifact"
   bash "${patched_script}" "$@"
+
+  if [[ -x "${repo_dir}/bin/openclaw-host-tool" ]]; then
+    log "Installing openclaw-host-tool wrapper into Hermes container"
+    docker cp "${repo_dir}/bin/openclaw-host-tool" hermes-agent:/usr/local/bin/openclaw-host-tool
+    docker exec hermes-agent chmod +x /usr/local/bin/openclaw-host-tool
+  else
+    log "WARN: openclaw-host-tool wrapper not found next to installer; skipping wrapper install"
+  fi
 }
 
 main "$@"

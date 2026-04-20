@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+set -eu
+
+tool="${1:-}"
+arguments="${2:-}"
+
+if [ -z "$tool" ] || [ -z "$arguments" ]; then
+  printf '%s\n' 'usage: openclaw-host-tool <tool> <json-arguments>' >&2
+  exit 64
+fi
+
+endpoint="${OPENCLAW_HOST_TOOL_URL:-http://host.docker.internal:3199/__openclaw/hermes-host-tool}"
+
+exec curl -fsSL \
+  -X POST \
+  -H 'content-type: application/json' \
+  --data "{\"tool\":\"$tool\",\"arguments\":$arguments}" \
+  "$endpoint"

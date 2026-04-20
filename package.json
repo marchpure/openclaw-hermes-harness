@@ -4,6 +4,9 @@
   "type": "module",
   "description": "OpenClaw plugin — delegate heavy tasks to containerized Hermes Agent via ACP",
   "main": "src/index.ts",
+  "bin": {
+    "openclaw-host-tool": "bin/openclaw-host-tool"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
