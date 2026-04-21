@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 BASE_INSTALL_SCRIPT_URL="${BASE_INSTALL_SCRIPT_URL:-https://zhuhaoliang-test.tos-cn-beijing.volces.com/hermes-install-0417.sh}"
 TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://zhuhaoliang-test.tos-cn-beijing.volces.com/hermes-agent-image.tar.gz}"
-TOS_PLUGIN_URL="${TOS_PLUGIN_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com/openclaw-plugin-hermes-1.0.0-acp-stabilize-20260421-084430.tgz}"
+TOS_PLUGIN_URL="${TOS_PLUGIN_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com/openclaw-plugin-hermes-1.0.0-acp-stabilize-20260421-092314.tgz}"
 
 log() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"

@@ -517,7 +517,20 @@ describe("hermes harness", () => {
       expect(emitted.every((event) => event.runId === "run-bridge")).toBe(true);
       expect(emitted.every((event) => event.sessionKey === "main")).toBe(true);
       expect(callbackEvents.map((event) => event.stream)).toEqual(["tool", "item", "tool", "item"]);
-      expect(toolResults).toEqual([{ text: "title: result title\nurl: https://example.com\nsuccess: true" }]);
+      expect(toolResults).toEqual([]);
+      expect(emitted[2]?.data).toMatchObject({
+        phase: "result",
+        name: "web_search",
+        toolCallId: "tool-1",
+        isError: false,
+        result: { content: [] },
+      });
+      expect(emitted[3]?.data).toMatchObject({
+        itemId: "tool-1",
+        phase: "end",
+        status: "completed",
+        title: "web_search",
+      });
     } finally {
       setHermesHarnessAgentEventEmitterForTest(undefined);
     }
@@ -636,7 +649,7 @@ describe("hermes harness", () => {
     expect(result).toMatchObject({ assistantText: "done" });
   });
 
-  it("summarizes nested tool error JSON instead of surfacing raw success false payloads", async () => {
+  it("suppresses nested tool error JSON from user-visible tool output while keeping internal meta", async () => {
     const toolResults: Array<{ text?: string }> = [];
     const toolMetas = new Map<string, { toolName: string; meta?: string }>([
       ["tool-1", { toolName: "gold_price" }],
@@ -676,9 +689,59 @@ describe("hermes harness", () => {
       },
     );
 
-    expect(toolResults).toEqual([
-      { text: "success: false\nerror: User did not supply an access key (code=102)" },
-    ]);
+    expect(toolResults).toEqual([]);
     expect(toolMetas.get("tool-1")?.meta).toContain("User did not supply an access key");
+  });
+
+  it("suppresses timed-out tool results from visible output while preserving failure state", async () => {
+    const toolResults: Array<{ text?: string }> = [];
+    const emitted: Array<{ runId: string; stream: string; data: Record<string, unknown>; sessionKey?: string }> = [];
+    setHermesHarnessAgentEventEmitterForTest((event) => emitted.push(event));
+    try {
+      await handleHarnessEvent(
+        {
+          type: "tool_result",
+          toolName: "browser",
+          toolCallId: "tool-timeout",
+          text: "success: false\nerror: Command timed out after 60 seconds",
+        },
+        {
+          provider: "hermes",
+          modelId: "default",
+          prompt: "latest news",
+          runId: "run-timeout",
+          sessionId: "session-timeout",
+          sessionFile: "/tmp/hermes/session.json",
+          timeoutMs: 30_000,
+          workspaceDir: "/tmp/hermes",
+          onToolResult: (payload: { text?: string }) => {
+            toolResults.push(payload);
+          },
+        } as unknown as Parameters<typeof handleHarnessEvent>[1],
+        {
+          markAssistantStarted: async () => undefined,
+          markReasoningStarted: () => undefined,
+          markReasoningEnded: async () => undefined,
+          toolMetas: new Map([["tool-timeout", { toolName: "browser" }]]),
+        },
+      );
+
+      expect(toolResults).toEqual([]);
+      expect(emitted.at(-2)?.data).toMatchObject({
+        phase: "result",
+        name: "browser",
+        toolCallId: "tool-timeout",
+        isError: true,
+        result: { content: [] },
+      });
+      expect(emitted.at(-1)?.data).toMatchObject({
+        itemId: "tool-timeout",
+        phase: "end",
+        status: "failed",
+        title: "browser: failed",
+      });
+    } finally {
+      setHermesHarnessAgentEventEmitterForTest(undefined);
+    }
   });
 });

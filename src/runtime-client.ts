@@ -625,6 +625,12 @@ export async function handleHarnessEvent(
     const toolName = event.toolName || existing?.toolName || "hermes_tool";
     const outputText = formatHermesToolOutput(event.text);
     const isError = isHermesToolError(event.text);
+    const lowSignal = isLowSignalHermesToolOutput({
+      rawText: event.text,
+      outputText,
+      isError,
+    });
+    const visibleOutputText = lowSignal ? "" : outputText;
     state.toolMetas.set(id, {
       toolName,
       ...(outputText ? { meta: outputText.slice(0, 200) } : {}),
@@ -637,7 +643,7 @@ export async function handleHarnessEvent(
         toolCallId: id,
         isError,
         result: {
-          content: outputText ? [{ type: "text", text: outputText }] : [],
+          content: visibleOutputText ? [{ type: "text", text: visibleOutputText }] : [],
         },
       },
     });
@@ -647,15 +653,17 @@ export async function handleHarnessEvent(
         itemId: id,
         phase: "end",
         kind: "tool",
-        title: buildHermesToolItemTitle(toolName, outputText),
+        title: buildHermesToolItemTitle(toolName, visibleOutputText, isError),
         status: isError ? "failed" : "completed",
         name: toolName,
         toolCallId: id,
         endedAt: Date.now(),
-        ...(outputText ? { summary: outputText, progressText: outputText } : {}),
+        ...(visibleOutputText ? { summary: visibleOutputText, progressText: visibleOutputText } : {}),
       },
     });
-    notifyHarnessCallback("onToolResult", () => params.onToolResult?.({ text: outputText } as never));
+    if (visibleOutputText) {
+      notifyHarnessCallback("onToolResult", () => params.onToolResult?.({ text: visibleOutputText } as never));
+    }
     return;
   }
 
@@ -690,10 +698,10 @@ function formatCallbackError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function buildHermesToolItemTitle(toolName: string, outputText: string): string {
+function buildHermesToolItemTitle(toolName: string, outputText: string, isError: boolean): string {
   const firstLine = outputText.split(/\r?\n/, 1)[0]?.trim();
   if (!firstLine) {
-    return toolName;
+    return isError ? `${toolName}: failed` : toolName;
   }
   return `${toolName}: ${firstLine.slice(0, 120)}`;
 }
@@ -785,7 +793,75 @@ function isHermesToolError(text: string | undefined): boolean {
         record.success === false,
     );
   } catch {
-    return false;
+    const normalized = text.trim().toLowerCase();
+    return (
+      /\bsuccess:\s*false\b/.test(normalized) ||
+      /^error:\s+/m.test(normalized) ||
+      /\bcommand timed out after \d+ seconds\b/.test(normalized) ||
+      /\bexit_code:\s*[1-9]\d*\b/.test(normalized)
+    );
+  }
+}
+
+function isLowSignalHermesToolOutput(params: {
+  rawText: string | undefined;
+  outputText: string;
+  isError: boolean;
+}): boolean {
+  const trimmedOutput = params.outputText.trim();
+  if (!trimmedOutput) {
+    return true;
+  }
+
+  const timeoutPattern = /\bCommand timed out after 60 seconds\b/i;
+  if (timeoutPattern.test(trimmedOutput) || timeoutPattern.test(params.rawText ?? "")) {
+    return true;
+  }
+
+  const parsed = tryParseJsonRecord(params.rawText);
+  if (parsed) {
+    const output = readString(parsed.output);
+    if (output) {
+      return false;
+    }
+    if (parsed.success === true) {
+      return true;
+    }
+    if (params.isError) {
+      return true;
+    }
+  }
+
+  const lines = trimmedOutput
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return true;
+  }
+
+  const metadataOnly = lines.every((line) =>
+    /^(title|url|success|error|message|command|exit_code):\s+/i.test(line),
+  );
+  if (metadataOnly) {
+    return true;
+  }
+
+  return false;
+}
+
+function tryParseJsonRecord(text: string | undefined): Record<string, unknown> | undefined {
+  if (!text) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return undefined;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
   }
 }
 
