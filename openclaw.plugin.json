@@ -20,6 +20,18 @@
         "type": "string",
         "description": "Hermes data directory on host (mounted as /opt/data)"
       },
+      "execEnvRootDir": {
+        "type": "string",
+        "description": "Host root directory for task-scoped Hermes execution environments"
+      },
+      "runtimeExecEnvRootDir": {
+        "type": "string",
+        "description": "Runtime-visible root directory for Hermes execution environments"
+      },
+      "projectionVersion": {
+        "type": "string",
+        "description": "Stable projection version used for session binding and execenv manifests"
+      },
       "defaultModel": {
         "type": "string",
         "description": "Default LLM model for Hermes tasks"
@@ -66,6 +78,38 @@
         "type": "boolean",
         "description": "Enable the layered dispatch protocol (L/C/W). When disabled, tasks are sent directly to Hermes without strategy inference, context assembly, or credential injection. Default: true"
       },
+      "skillProjection": {
+        "type": "object",
+        "description": "Controls which OpenClaw workspace skills are exposed to Hermes",
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": ["strict", "permissive"]
+          },
+          "allowExecutableAssets": {
+            "type": "boolean"
+          },
+          "hostBackedDenylist": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "descriptiveOnlyAllowlist": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "execEnvCleanup": {
+        "type": "object",
+        "description": "Cleanup policy for old projected execution environments",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "maxAgeHours": { "type": "number", "minimum": 1 },
+          "maxCount": { "type": "number", "minimum": 1 }
+        }
+      },
       "transport": {
         "type": "string",
         "enum": [
@@ -98,6 +142,14 @@
     "hermesDataDir": {
       "label": "Data Directory",
       "help": "Host path to Hermes persistent data (config, memories, skills)."
+    },
+    "execEnvRootDir": {
+      "label": "ExecEnv Root",
+      "help": "Host path where the plugin writes task-scoped projected execution environments."
+    },
+    "runtimeExecEnvRootDir": {
+      "label": "Runtime ExecEnv Root",
+      "help": "Path visible from Hermes runtime for the same projected execution environments."
     },
     "defaultModel": {
       "label": "Default Model",

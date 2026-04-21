@@ -10,15 +10,10 @@
  */
 
 import { HermesAcpClient } from "./acp-client.js";
-import {
-  assembleProjectedContext,
-  serializeProjectedContextForPrompt,
-} from "./context-assembler.js";
 import { injectCredentials, buildDockerEnvFlags } from "./credential-injector.js";
 import { processResult, applyWriteback } from "./result-processor.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
-import { classifyWorkspaceSkills } from "./skill-classifier.js";
-import { buildExecEnv } from "./execenv-builder.js";
+import { prepareProjectedExecutionEnv } from "./runtime-client.js";
 import type {
   DispatchRequest,
   DispatchResult,
@@ -28,9 +23,7 @@ import type {
   CredentialScope,
   WritebackLevel,
   AcpSessionEvent,
-  ExecEnvInput,
 } from "./types.js";
-import { createHash } from "node:crypto";
 
 // ─── Logger ─────────────────────────────────────────────────────────────────
 
@@ -38,24 +31,6 @@ interface Logger {
   info(msg: string, ...args: unknown[]): void;
   warn(msg: string, ...args: unknown[]): void;
   error(msg: string, ...args: unknown[]): void;
-}
-
-function computeSessionBindingHash(input: {
-  workspaceDir: string;
-  runtimeExecEnvPath: string;
-  projectionVersion: string;
-  skillNames: string[];
-}): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify({
-        workspaceDir: input.workspaceDir,
-        runtimeExecEnvPath: input.runtimeExecEnvPath,
-        projectionVersion: input.projectionVersion,
-        skills: input.skillNames,
-      }),
-    )
-    .digest("hex");
 }
 
 // ─── Dispatcher ─────────────────────────────────────────────────────────────
@@ -123,10 +98,14 @@ export async function dispatchToHermes(
 
   // ── Step 2: Assemble Context ────────────────────────────────────────
 
-  let projectedContext;
+  let execution;
   try {
-    projectedContext = await assembleProjectedContext(request.task, strategy.context, {
+    execution = await prepareProjectedExecutionEnv({
+      task: request.task,
+      taskId: `task-${Date.now()}`,
       workspaceDir,
+      contextLevel: strategy.context,
+      model: request.model,
       config,
     });
   } catch (err) {
@@ -135,30 +114,7 @@ export async function dispatchToHermes(
     return makeErrorResult("Context assembly failed: " + msg, strategy, startTime);
   }
 
-  const classifiedSkills = classifyWorkspaceSkills(projectedContext.discoveredSkills, config);
-  const taskId = `task-${Date.now()}`;
-  const runtimeExecEnvPathHint = `${config.runtimeExecEnvRootDir ?? config.execEnvRootDir ?? config.hermesDataDir ?? "/var/cache/hermes-agent/execenv"}/${taskId}`;
-  const sessionBindingHash = computeSessionBindingHash({
-    workspaceDir,
-    runtimeExecEnvPath: runtimeExecEnvPathHint,
-    projectionVersion: config.projectionVersion,
-    skillNames: classifiedSkills.projectableLocalSkills.map((skill) => skill.name),
-  });
-  const execEnvInput: ExecEnvInput = {
-    taskId,
-    workspaceDir,
-    runtimeRootDir: config.runtimeExecEnvRootDir ?? config.execEnvRootDir ?? config.hermesDataDir ?? "/var/cache/hermes-agent/execenv",
-    contextFiles: projectedContext.files,
-    projectedSkills: classifiedSkills.projectableLocalSkills,
-    runtimeConfig: {
-      model: request.model ?? config.defaultModel ?? "minimax-m2.5",
-      contextLevel: strategy.context,
-      projectionVersion: config.projectionVersion,
-    },
-  };
-  const execEnv = await buildExecEnv(config, execEnvInput, sessionBindingHash);
-
-  const promptText = serializeProjectedContextForPrompt(projectedContext, execEnv.projectedSkills);
+  const promptText = execution.bootstrapPrompt;
 
   // ── Step 3: Inject Credentials ──────────────────────────────────────
 
@@ -177,10 +133,10 @@ export async function dispatchToHermes(
 
   try {
     // Start ACP connection with injected credentials
-    await acpClient.start(credentialResult.envVars, execEnv.runtimeExecEnvPath);
+    await acpClient.start(credentialResult.envVars, execution.execEnv.runtimeExecEnvPath);
 
     // Create session
-    const sessionId = await acpClient.newSession(execEnv.runtimeExecEnvPath);
+    const sessionId = await acpClient.newSession(execution.execEnv.runtimeExecEnvPath);
 
     // Send the prompt
     const timeout = (request.timeout ?? config.timeout) * 1000;
@@ -297,35 +253,16 @@ async function dispatchDirectly(
   let tokensUsed = 0;
 
   try {
-    const projectedContext = await assembleProjectedContext(request.task, "L0", {
+    const execution = await prepareProjectedExecutionEnv({
+      task: request.task,
+      taskId: `task-${Date.now()}`,
       workspaceDir,
+      contextLevel: "L0",
+      model: request.model,
       config,
     });
-    const taskId = `task-${Date.now()}`;
-    const sessionBindingHash = computeSessionBindingHash({
-      workspaceDir,
-      runtimeExecEnvPath: `${config.runtimeExecEnvRootDir ?? config.execEnvRootDir ?? config.hermesDataDir ?? "/var/cache/hermes-agent/execenv"}/${taskId}`,
-      projectionVersion: config.projectionVersion,
-      skillNames: [],
-    });
-    const execEnv = await buildExecEnv(
-      config,
-      {
-        taskId,
-        workspaceDir,
-        runtimeRootDir: config.runtimeExecEnvRootDir ?? config.execEnvRootDir ?? config.hermesDataDir ?? "/var/cache/hermes-agent/execenv",
-        contextFiles: projectedContext.files,
-        projectedSkills: [],
-        runtimeConfig: {
-          model: request.model ?? config.defaultModel ?? "minimax-m2.5",
-          contextLevel: "L0",
-          projectionVersion: config.projectionVersion,
-        },
-      },
-      sessionBindingHash,
-    );
-    await acpClient.start({}, execEnv.runtimeExecEnvPath);
-    const sessionId = await acpClient.newSession(execEnv.runtimeExecEnvPath);
+    await acpClient.start({}, execution.execEnv.runtimeExecEnvPath);
+    const sessionId = await acpClient.newSession(execution.execEnv.runtimeExecEnvPath);
     const timeout = (request.timeout ?? config.timeout) * 1000;
     const result = await acpClient.prompt(request.task, sessionId, { timeout });
 

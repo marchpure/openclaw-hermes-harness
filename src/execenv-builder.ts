@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import type {
@@ -132,7 +132,7 @@ export async function buildExecEnv(
 
 export async function cleanupExecEnvs(config: HermesPluginConfig): Promise<void> {
   if (!config.execEnvCleanup.enabled) return;
-  const root = config.execEnvRootDir ?? config.hermesDataDir;
+  const root = config.execEnvRootDir ?? (config.hermesDataDir ? join(config.hermesDataDir, "execenv") : undefined);
   if (!root) return;
 
   try {
@@ -142,7 +142,15 @@ export async function cleanupExecEnvs(config: HermesPluginConfig): Promise<void>
     return;
   }
 
-  // Cleanup is intentionally conservative in the first iteration.
+  const entries = await readdir(root, { withFileTypes: true });
+  const taskDirs = entries.filter((entry) => entry.isDirectory());
+  if (taskDirs.length <= config.execEnvCleanup.maxCount) return;
+
+  const overflow = taskDirs.length - config.execEnvCleanup.maxCount;
+  const sorted = [...taskDirs].sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of sorted.slice(0, overflow)) {
+    await rm(join(root, entry.name), { recursive: true, force: true });
+  }
 }
 
 export async function readProjectedSkillFile(path: string): Promise<string> {

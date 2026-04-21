@@ -14,6 +14,7 @@ import { checkHealth, formatHealthReport } from "./health.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
 import type { HermesPluginConfig, DispatchRequest, HealthReport } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
+import { cleanupExecEnvs } from "./execenv-builder.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
@@ -84,6 +85,11 @@ const plugin = {
       warn: (msg: string, ...args: unknown[]) => api.logger?.warn?.(msg, ...args) ?? console.warn(`[hermes] ${msg}`),
       error: (msg: string, ...args: unknown[]) => api.logger?.error?.(msg, ...args) ?? console.error(`[hermes] ${msg}`),
     };
+
+    void cleanupExecEnvs(config).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`execenv cleanup skipped: ${msg}`);
+    });
 
     // ── Tool: hermes_dispatch ───────────────────────────────────────────
 
