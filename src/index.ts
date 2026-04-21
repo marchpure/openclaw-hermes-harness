@@ -16,7 +16,6 @@ import { checkHealth, formatHealthReport } from "./health.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
 import type { DispatchRequest, HermesPluginConfig } from "./types.js";
 import { resolveHermesAcpConfig } from "./config.js";
-import { startHermesHostToolServer } from "./host-tool-server.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
@@ -43,11 +42,6 @@ const plugin = {
       warn: (msg: string, ...args: unknown[]) => api.logger?.warn?.(msg, ...args) ?? console.warn(`[hermes] ${msg}`),
       error: (msg: string, ...args: unknown[]) => api.logger?.error?.(msg, ...args) ?? console.error(`[hermes] ${msg}`),
     };
-
-    void startHermesHostToolServer(config, logger).catch((err) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.warn(`Hermes host tool bridge failed to start: ${msg}`);
-    });
 
     // ── Tool: hermes_dispatch ───────────────────────────────────────────
 
@@ -242,7 +236,7 @@ const plugin = {
     });
 
     logger.info(
-      "Hermes Agent plugin registered (provider, harness, host bridge, and 3 tools: hermes_dispatch, hermes_status, hermes_strategy)",
+      "Hermes Agent plugin registered (provider, harness, and 3 tools: hermes_dispatch, hermes_status, hermes_strategy)",
     );
   },
 };

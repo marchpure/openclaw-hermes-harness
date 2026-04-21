@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
   AgentHarnessAttemptParams,
@@ -8,7 +8,6 @@ import type {
 } from "openclaw/plugin-sdk/agent-harness";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient, type AcpPromptBlock } from "./acp-client.js";
-import { buildHermesHostCapabilityPrompt } from "./host-capabilities.js";
 import type { AcpSessionEvent, HermesPluginConfig } from "./types.js";
 
 const ZERO_ASSISTANT_USAGE = {
@@ -407,7 +406,7 @@ async function buildHermesHarnessPromptSections(
   options: { includeUserPrompt: boolean },
 ): Promise<string[]> {
   const workspaceContext = await buildWorkspaceContextPrompt(params.workspaceDir);
-  const skillsPrompt = buildHermesSkillsPrompt(params.skillsSnapshot);
+  const skillsPrompt = await buildHermesSkillsPrompt(params.skillsSnapshot, params.workspaceDir);
   return [
     "# OpenClaw Runtime",
     [
@@ -427,7 +426,6 @@ async function buildHermesHarnessPromptSections(
     workspaceContext ? `# Workspace Context\n${workspaceContext}` : undefined,
     params.extraSystemPrompt ? `# Developer Instructions\n${params.extraSystemPrompt}` : undefined,
     skillsPrompt ? `# Available OpenClaw Skills\n${skillsPrompt}` : undefined,
-    `# OpenClaw Host Capabilities\n${buildHermesHostCapabilityPrompt()}`,
     params.toolsAllow?.length ? `# OpenClaw Tool Allowlist\n${params.toolsAllow.map((tool) => `- ${tool}`).join("\n")}` : undefined,
     options.includeUserPrompt ? `# User Prompt\n${params.prompt}` : undefined,
   ].filter((section): section is string => Boolean(section && section.trim()));
@@ -847,9 +845,12 @@ function summarizeJsonToolResult(record: Record<string, unknown>): string {
   return lines.length > 0 ? truncateVisibleToolText(lines.join("\n")) : "";
 }
 
-function buildHermesSkillsPrompt(snapshot: AgentHarnessAttemptParams["skillsSnapshot"]): string {
+async function buildHermesSkillsPrompt(
+  snapshot: AgentHarnessAttemptParams["skillsSnapshot"],
+  workspaceDir: string,
+): Promise<string> {
   if (!snapshot) {
-    return "";
+    return readWorkspaceSkillsPrompt(workspaceDir);
   }
   const resolvedSkills = snapshot.resolvedSkills ?? [];
   if (resolvedSkills.length > 0) {
@@ -877,9 +878,9 @@ function buildHermesSkillsPrompt(snapshot: AgentHarnessAttemptParams["skillsSnap
 
   const prompt = snapshot.prompt?.trim() ?? "";
   if (!prompt) {
-    return "";
+    return readWorkspaceSkillsPrompt(workspaceDir);
   }
-  return prompt
+  const sanitized = prompt
     .split("\n")
     .map((line) => line.trim())
     .filter(
@@ -892,6 +893,32 @@ function buildHermesSkillsPrompt(snapshot: AgentHarnessAttemptParams["skillsSnap
         !line.includes("Before replying: scan <available_skills>"),
     )
     .join("\n");
+  return sanitized || readWorkspaceSkillsPrompt(workspaceDir);
+}
+
+async function readWorkspaceSkillsPrompt(workspaceDir: string): Promise<string> {
+  const skillsDir = join(workspaceDir, "skills");
+  const lines: string[] = [];
+  try {
+    const entries = await readdir(skillsDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const skillPath = join(skillsDir, entry.name, "SKILL.md");
+      try {
+        await stat(skillPath);
+        const content = (await readFile(skillPath, "utf8")).trim();
+        if (!content) continue;
+        const descMatch = content.match(/^#\s+.*\n\n(.+)/m);
+        const description = descMatch?.[1]?.trim() ?? "(no description)";
+        lines.push(`- ${entry.name}: ${description}`);
+      } catch {
+        // Skip skills without a readable SKILL.md.
+      }
+    }
+  } catch {
+    return "";
+  }
+  return lines.join("\n");
 }
 
 function buildUserMessage(params: AgentHarnessAttemptParams): HarnessMessage {

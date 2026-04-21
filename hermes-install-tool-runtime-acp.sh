@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 BASE_INSTALL_SCRIPT_URL="${BASE_INSTALL_SCRIPT_URL:-https://zhuhaoliang-test.tos-cn-beijing.volces.com/hermes-install-0417.sh}"
 TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://zhuhaoliang-test.tos-cn-beijing.volces.com/hermes-agent-image.tar.gz}"
-TOS_PLUGIN_URL="${TOS_PLUGIN_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com/openclaw-plugin-hermes-1.0.0-acp-stabilize-20260420-224523.tgz}"
+TOS_PLUGIN_URL="${TOS_PLUGIN_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com/openclaw-plugin-hermes-1.0.0-acp-stabilize-20260421-074930.tgz}"
 
 log() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -25,10 +25,8 @@ main() {
   local work_dir
   local base_script
   local patched_script
-  local repo_dir
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/hermes-install-tool-runtime-acp.XXXXXX")"
   trap "rm -rf '${work_dir}'" EXIT
-  repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   base_script="${work_dir}/hermes-install-base.sh"
   patched_script="${work_dir}/hermes-install-patched.sh"
 
@@ -86,15 +84,17 @@ new_cfg = """        jq --arg cn "${CONTAINER_NAME}" --arg dm "${DEFAULT_MODEL_V
                "defaultModel": $dm,
                "autoStrategy": true,
                "enableLayeredProtocol": false,
-               "hostBridgeEnabled": true,
-               "hostBridgeHost": "0.0.0.0",
-               "hostBridgePort": 3199,
                "timeout": 1800
            }
            | .plugins.entries[$pk].enabled = true
            | del(.plugins.entries[$pk].config.runtimeMode)
+           | .agents.defaults.model.primary = ("hermes/" + $dm)
+           | .agents.defaults.embeddedHarness = {
+               "runtime": "hermes",
+               "fallback": "none"
+             }
            | .agents.defaults.models = ((.agents.defaults.models // {}) + {
-               "hermes/default": {
+               ("hermes/" + $dm): {
                  "alias": "hermes"
                }
              })
@@ -105,8 +105,8 @@ new_cfg = """        jq --arg cn "${CONTAINER_NAME}" --arg dm "${DEFAULT_MODEL_V
                "api": "openai-responses",
                "models": [
                  {
-                   "id": "default",
-                   "name": "default",
+                   "id": $dm,
+                   "name": $dm,
                    "reasoning": true,
                    "input": ["text", "image"],
                    "contextWindow": 200000,
@@ -141,15 +141,17 @@ hermes['config'] = {
     'defaultModel': dm,
     'autoStrategy': True,
     'enableLayeredProtocol': False,
-    'hostBridgeEnabled': True,
-    'hostBridgeHost': '0.0.0.0',
-    'hostBridgePort': 3199,
     'timeout': 1800
 }
 hermes['config'].pop('runtimeMode', None)
 agents = d.setdefault('agents', {}).setdefault('defaults', {})
+agents['model'] = {'primary': f'hermes/{dm}'}
+agents['embeddedHarness'] = {
+    'runtime': 'hermes',
+    'fallback': 'none'
+}
 allow_models = agents.setdefault('models', {})
-allow_models['hermes/default'] = {
+allow_models[f'hermes/{dm}'] = {
     'alias': 'hermes'
 }
 providers = d.setdefault('models', {}).setdefault('providers', {})
@@ -160,8 +162,8 @@ providers['hermes'] = {
     'api': 'openai-responses',
     'models': [
         {
-            'id': 'default',
-            'name': 'default',
+            'id': dm,
+            'name': dm,
             'reasoning': True,
             'input': ['text', 'image'],
             'contextWindow': 200000,
@@ -186,14 +188,6 @@ PY
 
   log "Starting base installer with Hermes ACP plugin artifact"
   bash "${patched_script}" "$@"
-
-  if [[ -x "${repo_dir}/bin/openclaw-host-tool" ]]; then
-    log "Installing openclaw-host-tool wrapper into Hermes container"
-    docker cp "${repo_dir}/bin/openclaw-host-tool" hermes-agent:/usr/local/bin/openclaw-host-tool
-    docker exec hermes-agent chmod +x /usr/local/bin/openclaw-host-tool
-  else
-    log "WARN: openclaw-host-tool wrapper not found next to installer; skipping wrapper install"
-  fi
 }
 
 main "$@"

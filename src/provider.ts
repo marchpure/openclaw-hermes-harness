@@ -9,7 +9,7 @@ import { readHermesPluginConfig } from "./config.js";
 const PROVIDER_ID = "hermes";
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 32_000;
-const FALLBACK_HERMES_MODELS = ["default"];
+const FALLBACK_HERMES_MODEL = "doubao-seed-2-0-pro-260215";
 
 export function buildHermesProvider(options: { pluginConfig?: unknown } = {}): ProviderPlugin {
   return {
@@ -46,7 +46,9 @@ export async function buildHermesProviderCatalog(
   const configuredModels =
     config.discovery?.enabled === false ? config.discovery.models : config.discovery?.models;
   const modelIds =
-    configuredModels && configuredModels.length > 0 ? configuredModels : FALLBACK_HERMES_MODELS;
+    configuredModels && configuredModels.length > 0
+      ? configuredModels
+      : [config.defaultModel ?? FALLBACK_HERMES_MODEL];
   return {
     provider: {
       baseUrl: "http://127.0.0.1/hermes-runtime",

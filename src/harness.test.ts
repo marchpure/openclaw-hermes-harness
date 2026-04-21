@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -120,12 +120,8 @@ describe("hermes harness", () => {
       expect(String(blocks[0].text)).toContain("Use the researcher identity.");
       expect(String(blocks[0].text)).toContain("- research");
       expect(String(blocks[0].text)).toContain("Available OpenClaw Skills");
-      expect(String(blocks[0].text)).toContain("OpenClaw Host Capabilities");
-      expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.search");
-      expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.fetch");
-      expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.create");
-      expect(String(blocks[0].text)).toContain("openclaw-host-tool lark.docs.update");
-      expect(String(blocks[0].text)).toContain("do not open Feishu pages in a browser");
+      expect(String(blocks[0].text)).not.toContain("OpenClaw Host Capabilities");
+      expect(String(blocks[0].text)).not.toContain("openclaw-host-tool");
       expect(String(blocks[0].text)).toContain("part of the current OpenClaw session");
       expect(String(blocks[0].text)).toContain("live external data");
       expect(String(blocks[0].text)).toContain("do not expose raw internal JSON errors");
@@ -139,6 +135,108 @@ describe("hermes harness", () => {
       });
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips missing workspace identity files without surfacing file-not-found errors", async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), "hermes-harness-missing-identity-"));
+    try {
+      await writeFile(join(workspaceDir, "AGENTS.md"), "Only agent instructions exist.", "utf8");
+
+      const blocks = await buildHermesHarnessPromptBlocks({
+        provider: "hermes",
+        modelId: "default",
+        prompt: "hello",
+        runId: "run-missing-identity",
+        sessionId: "session-missing-identity",
+        sessionFile: "/tmp/hermes/session.json",
+        timeoutMs: 30_000,
+        workspaceDir,
+      } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0]);
+
+      const text = String(blocks[0]?.text);
+      expect(text).toContain("Only agent instructions exist.");
+      expect(text).not.toContain("File not found");
+      expect(text).not.toContain("/root/.openclaw/workspace/SOUL.md");
+      expect(text).not.toContain("/root/.openclaw/workspace/USER.md");
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads available skills from the specified workspace when no skills snapshot is provided", async () => {
+    const workspaceDir = await mkdtemp(join(tmpdir(), "hermes-harness-skills-"));
+    try {
+      const skillDir = join(workspaceDir, "skills", "pressure-helper");
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(join(workspaceDir, "AGENTS.md"), "Use workspace-local skills.", "utf8");
+      await writeFile(
+        join(skillDir, "SKILL.md"),
+        "# pressure-helper\n\nWhen the user mentions pressure, first offer three coping suggestions.\n",
+        "utf8",
+      );
+
+      const blocks = await buildHermesHarnessPromptBlocks({
+        provider: "hermes",
+        modelId: "default",
+        prompt: "work pressure is high",
+        runId: "run-local-skills",
+        sessionId: "session-local-skills",
+        sessionFile: "/tmp/hermes/session.json",
+        timeoutMs: 30_000,
+        workspaceDir,
+      } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0]);
+
+      const text = String(blocks[0]?.text);
+      expect(text).toContain("Available OpenClaw Skills");
+      expect(text).toContain("pressure-helper");
+      expect(text).toContain("offer three coping suggestions");
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  it("changes workspace context when the workspaceDir changes", async () => {
+    const workspaceA = await mkdtemp(join(tmpdir(), "hermes-harness-workspace-a-"));
+    const workspaceB = await mkdtemp(join(tmpdir(), "hermes-harness-workspace-b-"));
+    try {
+      await writeFile(join(workspaceA, "SOUL.md"), "I am workspace A.", "utf8");
+      await writeFile(join(workspaceB, "SOUL.md"), "I am workspace B.", "utf8");
+
+      const [blocksA, blocksB] = await Promise.all([
+        buildHermesHarnessPromptBlocks({
+          provider: "hermes",
+          modelId: "default",
+          prompt: "who are you",
+          runId: "run-workspace-a",
+          sessionId: "session-workspace-a",
+          sessionFile: join(workspaceA, "session.json"),
+          timeoutMs: 30_000,
+          workspaceDir: workspaceA,
+        } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0]),
+        buildHermesHarnessPromptBlocks({
+          provider: "hermes",
+          modelId: "default",
+          prompt: "who are you",
+          runId: "run-workspace-b",
+          sessionId: "session-workspace-b",
+          sessionFile: join(workspaceB, "session.json"),
+          timeoutMs: 30_000,
+          workspaceDir: workspaceB,
+        } as unknown as Parameters<typeof buildHermesHarnessPromptBlocks>[0]),
+      ]);
+
+      const textA = String(blocksA[0]?.text);
+      const textB = String(blocksB[0]?.text);
+      expect(textA).toContain("I am workspace A.");
+      expect(textA).not.toContain("I am workspace B.");
+      expect(textB).toContain("I am workspace B.");
+      expect(textB).not.toContain("I am workspace A.");
+    } finally {
+      await Promise.all([
+        rm(workspaceA, { recursive: true, force: true }),
+        rm(workspaceB, { recursive: true, force: true }),
+      ]);
     }
   });
 

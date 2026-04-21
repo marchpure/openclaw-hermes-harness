@@ -5,7 +5,6 @@
  */
 
 import { execFile } from "node:child_process";
-import { request } from "node:http";
 import { promisify } from "node:util";
 import { HermesAcpClient } from "./acp-client.js";
 import type { HermesPluginConfig, HealthReport } from "./types.js";
@@ -32,9 +31,6 @@ export async function checkHealth(config: HermesPluginConfig): Promise<HealthRep
     healthy: false,
     containerRunning: false,
     acpResponsive: false,
-    hostBridgeAvailable: false,
-    larkDocsSearchAvailable: false,
-    larkDocsFetchAvailable: false,
     errors: [],
   };
 
@@ -76,26 +72,7 @@ export async function checkHealth(config: HermesPluginConfig): Promise<HealthRep
     report.errors.push(`ACP check failed: ${msg}`);
   }
 
-  // 5. Check the host capability bridge wrapper inside Hermes.
-  try {
-    report.hostBridgeAvailable = await checkHostBridgeAvailable(config);
-    report.larkDocsSearchAvailable = report.hostBridgeAvailable;
-    report.larkDocsFetchAvailable = report.hostBridgeAvailable;
-    if (!report.hostBridgeAvailable) {
-      report.errors.push("Host bridge check failed: openclaw-host-tool is not available in Hermes container");
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    report.errors.push(`Host bridge check failed: ${msg}`);
-  }
-
-  report.healthy =
-    report.containerRunning &&
-    report.acpResponsive &&
-    report.hostBridgeAvailable &&
-    report.larkDocsSearchAvailable &&
-    report.larkDocsFetchAvailable &&
-    report.errors.length === 0;
+  report.healthy = report.containerRunning && report.acpResponsive && report.errors.length === 0;
   return report;
 }
 
@@ -187,60 +164,8 @@ async function checkAcpResponsive(config: HermesPluginConfig): Promise<boolean> 
   }
 }
 
-async function checkHostBridgeAvailable(config: HermesPluginConfig): Promise<boolean> {
-  if (!config.hostBridgeEnabled) {
-    return false;
-  }
-  try {
-    const bridgeHost = config.hostBridgeHost === "0.0.0.0" ? "127.0.0.1" : config.hostBridgeHost;
-    const endpoint = `http://${bridgeHost}:${config.hostBridgePort}/__openclaw/hermes-host-tool`;
-    const checkScript = [
-      "command -v openclaw-host-tool >/dev/null 2>&1",
-      `test -n ${JSON.stringify(endpoint)}`,
-    ].join(" && ");
-    await execFileAsync(
-      "docker",
-      ["exec", "-e", `OPENCLAW_HOST_TOOL_URL=${endpoint}`, config.hermesContainerName, "sh", "-c", checkScript],
-      { timeout: EXEC_TIMEOUT },
-    );
-    return checkHostBridgeEndpoint(bridgeHost, config.hostBridgePort);
-  } catch {
-    return false;
-  }
-}
-
-async function checkHostBridgeEndpoint(host: string, port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const req = request(
-      {
-        hostname: host,
-        port,
-        path: "/__openclaw/hermes-host-tool",
-        method: "POST",
-        timeout: EXEC_TIMEOUT,
-        headers: {
-          "content-type": "application/json",
-        },
-      },
-      (res) => {
-        res.resume();
-        res.on("end", () => {
-          resolve(res.statusCode === 400 || res.statusCode === 404);
-        });
-      },
-    );
-    req.on("timeout", () => {
-      req.destroy();
-      resolve(false);
-    });
-    req.on("error", () => resolve(false));
-    req.end(JSON.stringify({ tool: "lark.docs.search", arguments: { query: "" } }));
-  });
-}
-
 export const healthTestHooks = {
   checkAcpResponsive,
-  checkHostBridgeAvailable,
 };
 
 /**
@@ -251,9 +176,6 @@ export function formatHealthReport(report: HealthReport): string {
   lines.push(`Hermes Health: ${report.healthy ? "✅ Healthy" : "❌ Unhealthy"}`);
   lines.push(`  Container: ${report.containerRunning ? "✅ Running" : "❌ Not Running"}`);
   lines.push(`  ACP: ${report.acpResponsive ? "✅ Responsive" : "❌ Not Responsive"}`);
-  lines.push(`  Host Bridge: ${report.hostBridgeAvailable ? "✅ Available" : "❌ Unavailable"}`);
-  lines.push(`  Lark Docs Search: ${report.larkDocsSearchAvailable ? "✅ Available" : "❌ Unavailable"}`);
-  lines.push(`  Lark Docs Fetch: ${report.larkDocsFetchAvailable ? "✅ Available" : "❌ Unavailable"}`);
 
   if (report.hermesVersion) {
     lines.push(`  Version: ${report.hermesVersion}`);

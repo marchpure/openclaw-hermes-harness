@@ -23,21 +23,18 @@ describe("hermes health", () => {
     }
   });
 
-  it("formats host bridge and lark docs capability status", () => {
+  it("formats basic Hermes health status", () => {
     const report: HealthReport = {
       healthy: true,
       containerRunning: true,
       acpResponsive: true,
-      hostBridgeAvailable: true,
-      larkDocsSearchAvailable: true,
-      larkDocsFetchAvailable: true,
       errors: [],
     };
 
     const text = formatHealthReport(report);
 
-    expect(text).toContain("Host Bridge: ✅ Available");
-    expect(text).toContain("Lark Docs Search: ✅ Available");
-    expect(text).toContain("Lark Docs Fetch: ✅ Available");
+    expect(text).toContain("Hermes Health: ✅ Healthy");
+    expect(text).toContain("Container: ✅ Running");
+    expect(text).toContain("ACP: ✅ Responsive");
   });
 });

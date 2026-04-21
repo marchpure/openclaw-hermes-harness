@@ -17,10 +17,22 @@ describe("hermes provider", () => {
     ]);
   });
 
-  it("falls back to hermes/default", async () => {
+  it("falls back to the Hermes runtime default model", async () => {
     const result = await buildHermesProviderCatalog();
 
-    expect(result.provider.models.map((model) => model.id)).toEqual(["default"]);
+    expect(result.provider.models.map((model) => model.id)).toEqual([
+      "doubao-seed-2-0-pro-260215",
+    ]);
+  });
+
+  it("uses plugin defaultModel for the fallback catalog", async () => {
+    const result = await buildHermesProviderCatalog({
+      pluginConfig: {
+        defaultModel: "custom-hermes-model",
+      },
+    });
+
+    expect(result.provider.models.map((model) => model.id)).toEqual(["custom-hermes-model"]);
   });
 
   it("resolves arbitrary Hermes model ids", () => {

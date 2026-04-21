@@ -62,21 +62,6 @@
         "maximum": 65535,
         "description": "TCP port for Hermes ACP bridge. Default: 3100."
       },
-      "hostBridgeEnabled": {
-        "type": "boolean",
-        "description": "Enable the local read-only host capability bridge for Hermes openclaw-host-tool. Default: true."
-      },
-      "hostBridgeHost": {
-        "type": "string",
-        "minLength": 1,
-        "description": "Host interface for the host capability bridge. Default: 127.0.0.1."
-      },
-      "hostBridgePort": {
-        "type": "number",
-        "minimum": 1,
-        "maximum": 65535,
-        "description": "Port for the host capability bridge. Default: 3199."
-      },
       "defaultModel": {
         "type": "string",
         "description": "Default LLM model for Hermes tasks."
@@ -162,14 +147,6 @@
     "tcpPort": {
       "label": "TCP Port",
       "help": "Hermes ACP bridge port."
-    },
-    "hostBridgeEnabled": {
-      "label": "Host Bridge",
-      "help": "Enable the read-only OpenClaw host capability bridge used by Hermes."
-    },
-    "hostBridgePort": {
-      "label": "Host Bridge Port",
-      "help": "Local HTTP port for openclaw-host-tool requests."
     },
     "defaultModel": {
       "label": "Default Model",

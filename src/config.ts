@@ -67,13 +67,6 @@ function readHermesAcpPartialConfig(
     ...(readTransport(input.transport) ? { transport: readTransport(input.transport) } : {}),
     ...(readNonEmptyString(input.tcpHost) ? { tcpHost: readNonEmptyString(input.tcpHost) } : {}),
     ...(readPort(input.tcpPort) ? { tcpPort: readPort(input.tcpPort) } : {}),
-    ...(typeof input.hostBridgeEnabled === "boolean"
-      ? { hostBridgeEnabled: input.hostBridgeEnabled }
-      : {}),
-    ...(readNonEmptyString(input.hostBridgeHost)
-      ? { hostBridgeHost: readNonEmptyString(input.hostBridgeHost) }
-      : {}),
-    ...(readPort(input.hostBridgePort) ? { hostBridgePort: readPort(input.hostBridgePort) } : {}),
     ...(readNonEmptyString(input.defaultModel)
       ? { defaultModel: readNonEmptyString(input.defaultModel) }
       : {}),
