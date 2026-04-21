@@ -15,7 +15,16 @@ export interface PreparedExecution {
   projectedContext: ProjectedContext;
   exposedSkills: ProjectedSkill[];
   bootstrapPrompt: string;
+  sessionBindingHash: string;
 }
+
+export interface SessionBindingRecord {
+  sessionId: string;
+  runtimeExecEnvPath: string;
+  bindingHash: string;
+}
+
+const sessionBindings = new Map<string, SessionBindingRecord>();
 
 function computeSessionBindingHash(input: {
   workspaceDir: string;
@@ -85,5 +94,18 @@ export async function prepareProjectedExecutionEnv(params: {
     projectedContext,
     exposedSkills: execEnv.projectedSkills,
     bootstrapPrompt: serializeProjectedContextForPrompt(projectedContext, execEnv.projectedSkills),
+    sessionBindingHash,
   };
+}
+
+export function readSessionBinding(bindingHash: string): SessionBindingRecord | undefined {
+  return sessionBindings.get(bindingHash);
+}
+
+export function writeSessionBinding(bindingHash: string, record: SessionBindingRecord): void {
+  sessionBindings.set(bindingHash, record);
+}
+
+export function clearSessionBinding(bindingHash: string): void {
+  sessionBindings.delete(bindingHash);
 }

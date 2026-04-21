@@ -216,6 +216,21 @@ export class HermesAcpClient extends EventEmitter {
   }
 
   /**
+   * Resume an existing ACP session.
+   * ACP method: "session/resume"
+   */
+  async resumeSession(sessionId: string, cwd: string): Promise<string> {
+    const result = (await this.sendRequest("session/resume", {
+      session_id: sessionId,
+      cwd,
+      mcpServers: [],
+    })) as { session_id?: string; sessionId?: string };
+    this.sessionId = result.session_id ?? result.sessionId ?? sessionId;
+    this.logger.info(`Session resumed: ${this.sessionId}`);
+    return this.sessionId;
+  }
+
+  /**
    * Send a prompt and collect streaming events.
    * ACP method: "session/prompt"
    * Returns the final response text and emits events along the way.

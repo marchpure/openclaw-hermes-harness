@@ -13,7 +13,12 @@ import { HermesAcpClient } from "./acp-client.js";
 import { injectCredentials, buildDockerEnvFlags } from "./credential-injector.js";
 import { processResult, applyWriteback } from "./result-processor.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
-import { prepareProjectedExecutionEnv } from "./runtime-client.js";
+import {
+  clearSessionBinding,
+  prepareProjectedExecutionEnv,
+  readSessionBinding,
+  writeSessionBinding,
+} from "./runtime-client.js";
 import type {
   DispatchRequest,
   DispatchResult,
@@ -31,6 +36,41 @@ interface Logger {
   info(msg: string, ...args: unknown[]): void;
   warn(msg: string, ...args: unknown[]): void;
   error(msg: string, ...args: unknown[]): void;
+}
+
+async function resumeOrCreateSession(params: {
+  acpClient: HermesAcpClient;
+  runtimeExecEnvPath: string;
+  bindingHash: string;
+  logger?: Logger;
+}): Promise<string> {
+  const existingBinding = readSessionBinding(params.bindingHash);
+  if (existingBinding && existingBinding.runtimeExecEnvPath === params.runtimeExecEnvPath) {
+    try {
+      const resumed = await params.acpClient.resumeSession(
+        existingBinding.sessionId,
+        params.runtimeExecEnvPath,
+      );
+      writeSessionBinding(params.bindingHash, {
+        sessionId: resumed,
+        runtimeExecEnvPath: params.runtimeExecEnvPath,
+        bindingHash: params.bindingHash,
+      });
+      return resumed;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      params.logger?.warn(`Session resume failed; creating a new session instead: ${msg}`);
+      clearSessionBinding(params.bindingHash);
+    }
+  }
+
+  const created = await params.acpClient.newSession(params.runtimeExecEnvPath);
+  writeSessionBinding(params.bindingHash, {
+    sessionId: created,
+    runtimeExecEnvPath: params.runtimeExecEnvPath,
+    bindingHash: params.bindingHash,
+  });
+  return created;
 }
 
 // ─── Dispatcher ─────────────────────────────────────────────────────────────
@@ -135,8 +175,13 @@ export async function dispatchToHermes(
     // Start ACP connection with injected credentials
     await acpClient.start(credentialResult.envVars, execution.execEnv.runtimeExecEnvPath);
 
-    // Create session
-    const sessionId = await acpClient.newSession(execution.execEnv.runtimeExecEnvPath);
+    // Resume or create session based on execenv binding.
+    const sessionId = await resumeOrCreateSession({
+      acpClient,
+      runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
+      bindingHash: execution.sessionBindingHash,
+      logger,
+    });
 
     // Send the prompt
     const timeout = (request.timeout ?? config.timeout) * 1000;
@@ -155,6 +200,7 @@ export async function dispatchToHermes(
     if (msg.includes("timed out")) {
       return makeTimeoutResult(msg, strategy, startTime);
     }
+    clearSessionBinding(execution.sessionBindingHash);
     return makeErrorResult("Hermes execution failed: " + msg, strategy, startTime);
   } finally {
     await acpClient.close().catch(() => {});
@@ -251,6 +297,7 @@ async function dispatchDirectly(
   const acpClient = new HermesAcpClient(config, logger as any);
   let acpText = "";
   let tokensUsed = 0;
+  let bindingHash: string | null = null;
 
   try {
     const execution = await prepareProjectedExecutionEnv({
@@ -261,8 +308,14 @@ async function dispatchDirectly(
       model: request.model,
       config,
     });
+    bindingHash = execution.sessionBindingHash;
     await acpClient.start({}, execution.execEnv.runtimeExecEnvPath);
-    const sessionId = await acpClient.newSession(execution.execEnv.runtimeExecEnvPath);
+    const sessionId = await resumeOrCreateSession({
+      acpClient,
+      runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
+      bindingHash: execution.sessionBindingHash,
+      logger,
+    });
     const timeout = (request.timeout ?? config.timeout) * 1000;
     const result = await acpClient.prompt(request.task, sessionId, { timeout });
 
@@ -277,6 +330,7 @@ async function dispatchDirectly(
     if (msg.includes("timed out")) {
       return makeTimeoutResult(msg, bypassStrategy, startTime);
     }
+    if (bindingHash) clearSessionBinding(bindingHash);
     return makeErrorResult("Direct dispatch failed: " + msg, bypassStrategy, startTime);
   } finally {
     await acpClient.close().catch(() => {});
