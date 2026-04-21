@@ -11,8 +11,15 @@
  */
 
 import { readFile, readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import type { ContextLevel, ContextPayload, HermesPluginConfig } from "./types.js";
+import { join } from "node:path";
+import type {
+  ContextLevel,
+  ContextPayload,
+  HermesPluginConfig,
+  ProjectedContext,
+  ProjectedSkill,
+  SkillManifestEntry,
+} from "./types.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -198,10 +205,8 @@ export async function assembleContext(
 /**
  * Scan the skills directory and build a manifest of available skills.
  */
-async function readSkillsManifest(
-  skillsDir: string,
-): Promise<Array<{ name: string; path: string; description?: string }>> {
-  const skills: Array<{ name: string; path: string; description?: string }> = [];
+export async function readSkillsManifest(skillsDir: string): Promise<SkillManifestEntry[]> {
+  const skills: SkillManifestEntry[] = [];
 
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true });
@@ -227,6 +232,37 @@ async function readSkillsManifest(
   }
 
   return skills;
+}
+
+/**
+ * Build a projected context object that can be materialized into an execution workdir.
+ */
+export async function assembleProjectedContext(
+  task: string,
+  level: ContextLevel,
+  options: AssemblerOptions,
+): Promise<ProjectedContext> {
+  const payload = await assembleContext(task, level, options);
+  return {
+    files: {
+      soul: payload.identity?.soul,
+      user: payload.identity?.user,
+      agent: payload.identity?.agents,
+      task: payload.task,
+    },
+    memory: payload.memory,
+    commandAllowlist: payload.toolConfig?.commandAllowlist,
+    discoveredSkills: payload.skills ?? [],
+  };
+}
+
+function formatProjectedSkill(skill: ProjectedSkill): string {
+  const label = skill.classification === "projectable-local"
+    ? "available"
+    : skill.classification === "descriptive-only"
+      ? "descriptive"
+      : skill.classification;
+  return `- **${skill.name}** (${label}): ${skill.description ?? "(no description)"}`;
 }
 
 /**
@@ -269,6 +305,52 @@ export function serializeContextForPrompt(payload: ContextPayload): string {
       .join("\n");
     parts.push(`# Available Skills\n${skillList}`);
   }
+
+  return parts.join("\n\n---\n\n");
+}
+
+export function serializeProjectedContextForPrompt(
+  projected: ProjectedContext,
+  exposedSkills: ProjectedSkill[],
+): string {
+  const parts: string[] = [];
+
+  if (projected.files.task) {
+    parts.push(`# Task\n${projected.files.task}`);
+  }
+  if (projected.files.soul) {
+    parts.push(`# Identity (SOUL)\n${projected.files.soul}`);
+  }
+  if (projected.files.user) {
+    parts.push(`# User Profile\n${projected.files.user}`);
+  }
+  if (projected.files.agent) {
+    parts.push(`# Workspace Instructions\n${projected.files.agent}`);
+  }
+  if (projected.memory?.longTerm) {
+    parts.push(`# Long-term Memory\n${projected.memory.longTerm}`);
+  }
+  if (projected.memory?.daily) {
+    parts.push(`# Today's Notes\n${projected.memory.daily}`);
+  }
+  if (projected.memory?.summary) {
+    parts.push(`> ${projected.memory.summary}`);
+  }
+  if (projected.commandAllowlist?.length) {
+    parts.push(`# Allowed Commands\n${projected.commandAllowlist.map((c) => `- ${c}`).join("\n")}`);
+  }
+  if (exposedSkills.length > 0) {
+    parts.push(`# Available OpenClaw Skills\n${exposedSkills.map(formatProjectedSkill).join("\n")}`);
+  }
+
+  parts.push(
+    [
+      "# Runtime Contract",
+      "Only use the skills listed under # Available OpenClaw Skills as OpenClaw-provided capabilities.",
+      "If a capability is not listed there, do not claim it is available from the current OpenClaw workspace.",
+      "If realtime or browser-based work is requested but no matching OpenClaw skill is listed, explain the limitation naturally instead of exposing internal errors.",
+    ].join("\n"),
+  );
 
   return parts.join("\n\n---\n\n");
 }
