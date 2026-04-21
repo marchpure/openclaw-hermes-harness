@@ -23,7 +23,9 @@ export function publishHermesHarnessAgentEvent(
   params: AgentHarnessAttemptParams,
   event: HarnessAgentEvent,
 ): void {
-  void emitHermesHarnessAgentEvent(params, event);
+  if (shouldUseDirectAgentEventBridge()) {
+    void emitHermesHarnessAgentEvent(params, event);
+  }
   try {
     void Promise.resolve(params.onAgentEvent?.(event)).catch(() => {});
   } catch {
@@ -122,4 +124,11 @@ async function tryLoadEmitter(modulePath: string): Promise<EmitAgentEvent | unde
 
 function readNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function shouldUseDirectAgentEventBridge(): boolean {
+  // The SDK callback is the supported harness path. Directly loading
+  // OpenClaw internals is kept as an opt-in debug bridge only because it can
+  // bypass chat run mapping in websocket surfaces.
+  return process.env.OPENCLAW_HERMES_DIRECT_AGENT_EVENTS === "1";
 }

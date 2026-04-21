@@ -464,74 +464,138 @@ describe("hermes harness", () => {
   });
 
   it("bridges Hermes tool events to OpenClaw agent events without suppressing callbacks", async () => {
-    const emitted: Array<{ runId: string; stream: string; data: Record<string, unknown>; sessionKey?: string }> = [];
     const callbackEvents: Array<{ stream: string; data: Record<string, unknown> }> = [];
     const toolResults: Array<{ text?: string }> = [];
+    const params = {
+      provider: "hermes",
+      modelId: "default",
+      prompt: "run tool",
+      runId: "run-bridge",
+      sessionId: "session-bridge",
+      sessionKey: "main",
+      sessionFile: "/tmp/hermes/session.json",
+      timeoutMs: 30_000,
+      workspaceDir: "/tmp/hermes",
+      onAgentEvent: (event: { stream: string; data: Record<string, unknown> }) => {
+        callbackEvents.push(event);
+      },
+      onToolResult: (payload: { text?: string }) => {
+        toolResults.push(payload);
+      },
+    } as unknown as Parameters<typeof handleHarnessEvent>[1];
+
+    await handleHarnessEvent(
+      { type: "tool_progress", toolName: "web_search", toolCallId: "tool-1" },
+      params,
+      {
+        markAssistantStarted: async () => undefined,
+        markReasoningStarted: () => undefined,
+        markReasoningEnded: async () => undefined,
+        toolMetas: new Map(),
+      },
+    );
+    await handleHarnessEvent(
+      {
+        type: "tool_result",
+        toolName: "web_search",
+        toolCallId: "tool-1",
+        text: JSON.stringify({ success: true, title: "result title", url: "https://example.com" }),
+      },
+      params,
+      {
+        markAssistantStarted: async () => undefined,
+        markReasoningStarted: () => undefined,
+        markReasoningEnded: async () => undefined,
+        toolMetas: new Map([["tool-1", { toolName: "web_search" }]]),
+      },
+    );
+
+    expect(callbackEvents.map((event) => event.stream)).toEqual(["tool", "item", "tool", "item"]);
+    expect(toolResults).toEqual([]);
+    expect(callbackEvents[2]?.data).toMatchObject({
+      phase: "result",
+      name: "web_search",
+      toolCallId: "tool-1",
+      isError: false,
+      result: { content: [] },
+    });
+    expect(callbackEvents[3]?.data).toMatchObject({
+      itemId: "tool-1",
+      phase: "end",
+      status: "completed",
+      title: "web_search",
+    });
+  });
+
+  it("uses the SDK agent-event callback without directly emitting OpenClaw internals by default", () => {
+    const emitted: Array<{ runId: string; stream: string; data: Record<string, unknown>; sessionKey?: string }> = [];
+    const callbackEvents: Array<{ stream: string; data: Record<string, unknown> }> = [];
+    const previous = process.env.OPENCLAW_HERMES_DIRECT_AGENT_EVENTS;
+    delete process.env.OPENCLAW_HERMES_DIRECT_AGENT_EVENTS;
     setHermesHarnessAgentEventEmitterForTest((event) => emitted.push(event));
     try {
-      const params = {
-        provider: "hermes",
-        modelId: "default",
-        prompt: "run tool",
-        runId: "run-bridge",
-        sessionId: "session-bridge",
-        sessionKey: "main",
-        sessionFile: "/tmp/hermes/session.json",
-        timeoutMs: 30_000,
-        workspaceDir: "/tmp/hermes",
-        onAgentEvent: (event: { stream: string; data: Record<string, unknown> }) => {
-          callbackEvents.push(event);
-        },
-        onToolResult: (payload: { text?: string }) => {
-          toolResults.push(payload);
-        },
-      } as unknown as Parameters<typeof handleHarnessEvent>[1];
-
-      await handleHarnessEvent(
-        { type: "tool_progress", toolName: "web_search", toolCallId: "tool-1" },
-        params,
+      publishHermesHarnessAgentEvent(
         {
-          markAssistantStarted: async () => undefined,
-          markReasoningStarted: () => undefined,
-          markReasoningEnded: async () => undefined,
-          toolMetas: new Map(),
-        },
-      );
-      await handleHarnessEvent(
-        {
-          type: "tool_result",
-          toolName: "web_search",
-          toolCallId: "tool-1",
-          text: JSON.stringify({ success: true, title: "result title", url: "https://example.com" }),
-        },
-        params,
-        {
-          markAssistantStarted: async () => undefined,
-          markReasoningStarted: () => undefined,
-          markReasoningEnded: async () => undefined,
-          toolMetas: new Map([["tool-1", { toolName: "web_search" }]]),
-        },
+          runId: "run-sdk-only",
+          sessionKey: "main",
+          onAgentEvent: (event: { stream: string; data: Record<string, unknown> }) => {
+            callbackEvents.push(event);
+          },
+        } as unknown as Parameters<typeof publishHermesHarnessAgentEvent>[0],
+        { stream: "item", data: { phase: "start", itemId: "item-1" } },
       );
 
-      expect(emitted.map((event) => event.stream)).toEqual(["tool", "item", "tool", "item"]);
-      expect(emitted.every((event) => event.runId === "run-bridge")).toBe(true);
-      expect(emitted.every((event) => event.sessionKey === "main")).toBe(true);
-      expect(callbackEvents.map((event) => event.stream)).toEqual(["tool", "item", "tool", "item"]);
-      expect(toolResults).toEqual([]);
-      expect(emitted[2]?.data).toMatchObject({
-        phase: "result",
-        name: "web_search",
-        toolCallId: "tool-1",
-        isError: false,
-        result: { content: [] },
-      });
-      expect(emitted[3]?.data).toMatchObject({
-        itemId: "tool-1",
-        phase: "end",
-        status: "completed",
-        title: "web_search",
-      });
+      expect(callbackEvents).toEqual([
+        { stream: "item", data: { phase: "start", itemId: "item-1" } },
+      ]);
+      expect(emitted).toEqual([]);
     } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCLAW_HERMES_DIRECT_AGENT_EVENTS;
+      } else {
+        process.env.OPENCLAW_HERMES_DIRECT_AGENT_EVENTS = previous;
+      }
+      setHermesHarnessAgentEventEmitterForTest(undefined);
+    }
+  });
+
+  it("keeps the direct OpenClaw agent-event bridge opt-in for diagnostics", async () => {
+    const emitted: Array<{ runId: string; stream: string; data: Record<string, unknown>; sessionKey?: string }> = [];
+    const callbackEvents: Array<{ stream: string; data: Record<string, unknown> }> = [];
+    const previous = process.env.OPENCLAW_HERMES_DIRECT_AGENT_EVENTS;
+    process.env.OPENCLAW_HERMES_DIRECT_AGENT_EVENTS = "1";
+    setHermesHarnessAgentEventEmitterForTest((event) => emitted.push(event));
+    try {
+      publishHermesHarnessAgentEvent(
+        {
+          runId: "run-direct-opt-in",
+          sessionKey: "main",
+          onAgentEvent: (event: { stream: string; data: Record<string, unknown> }) => {
+            callbackEvents.push(event);
+          },
+        } as unknown as Parameters<typeof publishHermesHarnessAgentEvent>[0],
+        { stream: "tool", data: { phase: "start", toolCallId: "tool-1" } },
+      );
+
+      await vi.waitFor(() => {
+        expect(emitted).toEqual([
+          {
+            runId: "run-direct-opt-in",
+            sessionKey: "main",
+            stream: "tool",
+            data: { phase: "start", toolCallId: "tool-1" },
+          },
+        ]);
+      });
+      expect(callbackEvents).toEqual([
+        { stream: "tool", data: { phase: "start", toolCallId: "tool-1" } },
+      ]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCLAW_HERMES_DIRECT_AGENT_EVENTS;
+      } else {
+        process.env.OPENCLAW_HERMES_DIRECT_AGENT_EVENTS = previous;
+      }
       setHermesHarnessAgentEventEmitterForTest(undefined);
     }
   });
@@ -695,53 +759,51 @@ describe("hermes harness", () => {
 
   it("suppresses timed-out tool results from visible output while preserving failure state", async () => {
     const toolResults: Array<{ text?: string }> = [];
-    const emitted: Array<{ runId: string; stream: string; data: Record<string, unknown>; sessionKey?: string }> = [];
-    setHermesHarnessAgentEventEmitterForTest((event) => emitted.push(event));
-    try {
-      await handleHarnessEvent(
-        {
-          type: "tool_result",
-          toolName: "browser",
-          toolCallId: "tool-timeout",
-          text: "success: false\nerror: Command timed out after 60 seconds",
-        },
-        {
-          provider: "hermes",
-          modelId: "default",
-          prompt: "latest news",
-          runId: "run-timeout",
-          sessionId: "session-timeout",
-          sessionFile: "/tmp/hermes/session.json",
-          timeoutMs: 30_000,
-          workspaceDir: "/tmp/hermes",
-          onToolResult: (payload: { text?: string }) => {
-            toolResults.push(payload);
-          },
-        } as unknown as Parameters<typeof handleHarnessEvent>[1],
-        {
-          markAssistantStarted: async () => undefined,
-          markReasoningStarted: () => undefined,
-          markReasoningEnded: async () => undefined,
-          toolMetas: new Map([["tool-timeout", { toolName: "browser" }]]),
-        },
-      );
-
-      expect(toolResults).toEqual([]);
-      expect(emitted.at(-2)?.data).toMatchObject({
-        phase: "result",
-        name: "browser",
+    const callbackEvents: Array<{ stream: string; data: Record<string, unknown> }> = [];
+    await handleHarnessEvent(
+      {
+        type: "tool_result",
+        toolName: "browser",
         toolCallId: "tool-timeout",
-        isError: true,
-        result: { content: [] },
-      });
-      expect(emitted.at(-1)?.data).toMatchObject({
-        itemId: "tool-timeout",
-        phase: "end",
-        status: "failed",
-        title: "browser: failed",
-      });
-    } finally {
-      setHermesHarnessAgentEventEmitterForTest(undefined);
-    }
+        text: "success: false\nerror: Command timed out after 60 seconds",
+      },
+      {
+        provider: "hermes",
+        modelId: "default",
+        prompt: "latest news",
+        runId: "run-timeout",
+        sessionId: "session-timeout",
+        sessionFile: "/tmp/hermes/session.json",
+        timeoutMs: 30_000,
+        workspaceDir: "/tmp/hermes",
+        onAgentEvent: (event: { stream: string; data: Record<string, unknown> }) => {
+          callbackEvents.push(event);
+        },
+        onToolResult: (payload: { text?: string }) => {
+          toolResults.push(payload);
+        },
+      } as unknown as Parameters<typeof handleHarnessEvent>[1],
+      {
+        markAssistantStarted: async () => undefined,
+        markReasoningStarted: () => undefined,
+        markReasoningEnded: async () => undefined,
+        toolMetas: new Map([["tool-timeout", { toolName: "browser" }]]),
+      },
+    );
+
+    expect(toolResults).toEqual([]);
+    expect(callbackEvents.at(-2)?.data).toMatchObject({
+      phase: "result",
+      name: "browser",
+      toolCallId: "tool-timeout",
+      isError: true,
+      result: { content: [] },
+    });
+    expect(callbackEvents.at(-1)?.data).toMatchObject({
+      itemId: "tool-timeout",
+      phase: "end",
+      status: "failed",
+      title: "browser: failed",
+    });
   });
 });
