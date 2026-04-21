@@ -174,6 +174,9 @@ export interface HermesPluginConfig {
   hermesCommand?: string;
   hermesContainerName: string;
   hermesDataDir?: string;
+  acpAgentAlias?: string;
+  acpAgentCommand?: string;
+  acpAgentEnabled?: boolean;
   /** Transport mode: "tcp" (recommended) or "stdio" (docker exec). Default: "tcp" */
   transport: TransportMode;
   /** TCP host for Hermes ACP bridge. Default: "127.0.0.1" */
@@ -192,6 +195,8 @@ export interface HermesPluginConfig {
 
 export const DEFAULT_CONFIG: HermesPluginConfig = {
   hermesContainerName: "hermes-agent",
+  acpAgentAlias: "hermes",
+  acpAgentEnabled: true,
   transport: "tcp",
   tcpHost: "127.0.0.1",
   tcpPort: 3100,

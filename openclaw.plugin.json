@@ -20,6 +20,20 @@
         "type": "string",
         "description": "Hermes data directory on host (mounted as /opt/data)"
       },
+      "acpAgentAlias": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Custom ACP agent alias exposed through the acpx backend. Default: hermes"
+      },
+      "acpAgentCommand": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Custom command written into ~/.acpx/config.json for the Hermes ACP agent alias"
+      },
+      "acpAgentEnabled": {
+        "type": "boolean",
+        "description": "Whether the installer should register Hermes as an ACP agent alias for /acp spawn hermes. Default: true"
+      },
       "defaultModel": {
         "type": "string",
         "description": "Default LLM model for Hermes tasks"
@@ -98,6 +112,18 @@
     "hermesDataDir": {
       "label": "Data Directory",
       "help": "Host path to Hermes persistent data (config, memories, skills)."
+    },
+    "acpAgentAlias": {
+      "label": "ACP Agent Alias",
+      "help": "Alias added to the acpx backend so OpenClaw can route /acp spawn <alias> to Hermes."
+    },
+    "acpAgentCommand": {
+      "label": "ACP Agent Command",
+      "help": "Override the command written into ~/.acpx/config.json for the Hermes ACP agent alias."
+    },
+    "acpAgentEnabled": {
+      "label": "ACP Agent Alias Enabled",
+      "help": "When enabled, installers should register Hermes as an acpx custom agent alias."
     },
     "defaultModel": {
       "label": "Default Model",

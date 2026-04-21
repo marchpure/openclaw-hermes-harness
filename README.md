@@ -8,6 +8,18 @@ OpenClaw 插件 — 将重型任务委派给容器化的 [Hermes Agent](https://
 
 这个插件让 OpenClaw 可以把需要终端、浏览器、代码执行等重型能力的任务委派给运行在 Docker 容器中的 Hermes Agent。通过 ACP (Agent Client Protocol) 通信，Hermes 在隔离的容器环境中执行任务，结果回传给 OpenClaw。
 
+除了保留 `hermes_dispatch` 工具式委派，这个插件也支持被安装脚本配置为 **OpenClaw ACP agent alias**：
+
+- `/acp spawn hermes --bind here`
+- `/acp spawn hermes --thread auto`
+- `sessions_spawn({ runtime: "acp", agentId: "hermes" })`
+
+这部分能力依赖：
+
+- OpenClaw 自带 `acpx` ACP backend 插件
+- `~/.acpx/config.json` 中存在 `agents.hermes.command`
+- `openclaw.json` 中启用 ACP、允许 `hermes` agent、并打开支持的 channel thread binding
+
 ### 核心设计：三维传递协议
 
 每次任务委派沿三个正交维度控制：
@@ -140,6 +152,16 @@ hermes_strategy({ task: "创建一个 GitHub Actions CI 技能" })
   Confidence: 80%
   Reasoning: Task involves skill/MCP/cron management; Task needs credentials for: github; Task creates skills, cron jobs, or config changes
 ```
+
+### `hermes_acp_agent`
+
+输出 Hermes 作为 ACP agent alias 时需要的配置片段和当前状态检查，包括：
+
+- 当前 alias
+- 当前 command
+- `~/.acpx/config.json` 片段
+- `openclaw.json` 片段
+- 是否已检测到 alias 已被写入
 
 ## 架构
 

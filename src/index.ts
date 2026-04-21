@@ -14,6 +14,12 @@ import { checkHealth, formatHealthReport } from "./health.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
 import type { HermesPluginConfig, DispatchRequest, HealthReport } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
+import {
+  buildAcpxConfigFragment,
+  buildOpenClawConfigFragment,
+  formatHermesAcpAgentHelp,
+  inspectHermesAcpAgent,
+} from "./acp-agent.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
@@ -23,6 +29,9 @@ function resolveConfig(raw: unknown): HermesPluginConfig {
     hermesCommand: (input.hermesCommand as string) ?? undefined,
     hermesContainerName: (input.hermesContainerName as string) ?? DEFAULT_CONFIG.hermesContainerName,
     hermesDataDir: (input.hermesDataDir as string) ?? undefined,
+    acpAgentAlias: (input.acpAgentAlias as string) ?? DEFAULT_CONFIG.acpAgentAlias,
+    acpAgentCommand: (input.acpAgentCommand as string) ?? undefined,
+    acpAgentEnabled: (input.acpAgentEnabled as boolean) ?? DEFAULT_CONFIG.acpAgentEnabled,
     defaultModel: (input.defaultModel as string) ?? undefined,
     defaultContextLevel:
       (input.defaultContextLevel as HermesPluginConfig["defaultContextLevel"]) ??
@@ -253,7 +262,40 @@ const plugin = {
       },
     });
 
-    logger.info("Hermes Agent plugin registered (3 tools: hermes_dispatch, hermes_status, hermes_strategy)");
+    api.registerTool({
+      name: "hermes_acp_agent",
+      description: "Show the ACP agent alias, command, and recommended configuration snippets for using Hermes with /acp spawn hermes and sessions_spawn({ runtime: \"acp\" }).",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+
+      async execute() {
+        const details = await inspectHermesAcpAgent(config);
+        const lines = [
+          formatHermesAcpAgentHelp(config),
+          "",
+          `acpx config path: ${details.acpxConfigPath}`,
+          `acpx config present: ${details.acpxConfigPresent ? "yes" : "no"}`,
+          `alias configured: ${details.aliasConfigured ? "yes" : "no"}`,
+          "",
+          "Recommended ~/.acpx/config.json fragment:",
+          "```json",
+          JSON.stringify(buildAcpxConfigFragment(config), null, 2),
+          "```",
+          "",
+          "Recommended openclaw.json fragment:",
+          "```json",
+          JSON.stringify(buildOpenClawConfigFragment(config), null, 2),
+          "```",
+        ];
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+        };
+      },
+    });
+
+    logger.info("Hermes Agent plugin registered (4 tools: hermes_dispatch, hermes_status, hermes_strategy, hermes_acp_agent)");
   },
 };
 
