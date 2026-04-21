@@ -19,10 +19,15 @@ import { DEFAULT_CONFIG } from "./types.js";
 
 function resolveConfig(raw: unknown): HermesPluginConfig {
   const input = (raw ?? {}) as Record<string, unknown>;
+  const skillProjection = (input.skillProjection ?? {}) as Record<string, unknown>;
+  const execEnvCleanup = (input.execEnvCleanup ?? {}) as Record<string, unknown>;
   return {
     hermesCommand: (input.hermesCommand as string) ?? undefined,
     hermesContainerName: (input.hermesContainerName as string) ?? DEFAULT_CONFIG.hermesContainerName,
     hermesDataDir: (input.hermesDataDir as string) ?? undefined,
+    execEnvRootDir: (input.execEnvRootDir as string) ?? undefined,
+    runtimeExecEnvRootDir: (input.runtimeExecEnvRootDir as string) ?? undefined,
+    projectionVersion: (input.projectionVersion as string) ?? DEFAULT_CONFIG.projectionVersion,
     defaultModel: (input.defaultModel as string) ?? undefined,
     defaultContextLevel:
       (input.defaultContextLevel as HermesPluginConfig["defaultContextLevel"]) ??
@@ -41,6 +46,25 @@ function resolveConfig(raw: unknown): HermesPluginConfig {
     timeout: (input.timeout as number) ?? DEFAULT_CONFIG.timeout,
     autoStrategy: (input.autoStrategy as boolean) ?? DEFAULT_CONFIG.autoStrategy,
     enableLayeredProtocol: (input.enableLayeredProtocol as boolean) ?? DEFAULT_CONFIG.enableLayeredProtocol,
+    skillProjection: {
+      mode:
+        (skillProjection.mode as HermesPluginConfig["skillProjection"]["mode"]) ??
+        DEFAULT_CONFIG.skillProjection.mode,
+      allowExecutableAssets:
+        (skillProjection.allowExecutableAssets as boolean) ??
+        DEFAULT_CONFIG.skillProjection.allowExecutableAssets,
+      hostBackedDenylist:
+        (skillProjection.hostBackedDenylist as string[]) ??
+        DEFAULT_CONFIG.skillProjection.hostBackedDenylist,
+      descriptiveOnlyAllowlist:
+        (skillProjection.descriptiveOnlyAllowlist as string[]) ??
+        DEFAULT_CONFIG.skillProjection.descriptiveOnlyAllowlist,
+    },
+    execEnvCleanup: {
+      enabled: (execEnvCleanup.enabled as boolean) ?? DEFAULT_CONFIG.execEnvCleanup.enabled,
+      maxAgeHours: (execEnvCleanup.maxAgeHours as number) ?? DEFAULT_CONFIG.execEnvCleanup.maxAgeHours,
+      maxCount: (execEnvCleanup.maxCount as number) ?? DEFAULT_CONFIG.execEnvCleanup.maxCount,
+    },
   };
 }
 
