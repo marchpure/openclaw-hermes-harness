@@ -360,14 +360,20 @@ check_openclaw_compatibility() {
     fi
     log_info "OpenClaw 版本检查通过: ${version_output}"
 
-    if ! openclaw plugins --help 2>&1 | grep -Eq '(^|[[:space:]])install([[:space:]]|$)'; then
-        die "当前 OpenClaw 不支持 plugins install，无法升级插件"
+    # 2026.4.8 版本的 --help 输出格式异常，grep 无法匹配子命令关键词，但命令实际可用，更高版本已修复
+    local skip_help_check_version
+    skip_help_check_version="$(version_to_number "2026.4.8")" || skip_help_check_version=99999999
+    if (( version_num == skip_help_check_version )); then
+        log_info "OpenClaw ${version_output} 为 2026.4.8，跳过 --help 子命令探测（该版本 --help 输出格式不包含子命令关键词，但命令实际可用）"
+    else
+        if ! openclaw plugins --help 2>&1 | grep -Eq '(^|[[:space:]])install([[:space:]]|$)'; then
+            die "当前 OpenClaw 不支持 plugins install，无法升级插件"
+        fi
+        if ! openclaw gateway --help 2>&1 | grep -Eq '(^|[[:space:]])restart([[:space:]]|$)'; then
+            die "当前 OpenClaw 不支持 gateway restart，无法自动重载插件"
+        fi
+        log_info "OpenClaw 能力探测通过 (plugins install / gateway restart)"
     fi
-    if ! openclaw gateway --help 2>&1 | grep -Eq '(^|[[:space:]])restart([[:space:]]|$)'; then
-        die "当前 OpenClaw 不支持 gateway restart，无法自动重载插件"
-    fi
-
-    log_info "OpenClaw 能力探测通过 (plugins install / gateway restart)"
 }
 
 collect_plugin_dir_candidates() {
