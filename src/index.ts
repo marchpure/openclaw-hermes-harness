@@ -9,64 +9,19 @@
  * OpenClaw is the brain, Hermes is the hands.
  */
 
+import { resolveHermesAcpConfig } from "./config.js";
 import { dispatchToHermes } from "./dispatcher.js";
+import { createHermesAgentHarness } from "./harness.js";
 import { checkHealth, formatHealthReport } from "./health.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
-import type { HermesPluginConfig, DispatchRequest, HealthReport } from "./types.js";
-import { DEFAULT_CONFIG } from "./types.js";
+import { buildHermesProvider } from "./provider.js";
+import type { HermesPluginConfig, DispatchRequest } from "./types.js";
 import { cleanupExecEnvs } from "./execenv-builder.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
 function resolveConfig(raw: unknown): HermesPluginConfig {
-  const input = (raw ?? {}) as Record<string, unknown>;
-  const skillProjection = (input.skillProjection ?? {}) as Record<string, unknown>;
-  const execEnvCleanup = (input.execEnvCleanup ?? {}) as Record<string, unknown>;
-  return {
-    hermesCommand: (input.hermesCommand as string) ?? undefined,
-    hermesContainerName: (input.hermesContainerName as string) ?? DEFAULT_CONFIG.hermesContainerName,
-    hermesDataDir: (input.hermesDataDir as string) ?? undefined,
-    execEnvRootDir: (input.execEnvRootDir as string) ?? undefined,
-    runtimeExecEnvRootDir: (input.runtimeExecEnvRootDir as string) ?? undefined,
-    projectionVersion: (input.projectionVersion as string) ?? DEFAULT_CONFIG.projectionVersion,
-    defaultModel: (input.defaultModel as string) ?? undefined,
-    defaultContextLevel:
-      (input.defaultContextLevel as HermesPluginConfig["defaultContextLevel"]) ??
-      DEFAULT_CONFIG.defaultContextLevel,
-    defaultCredentialScope:
-      (input.defaultCredentialScope as HermesPluginConfig["defaultCredentialScope"]) ??
-      DEFAULT_CONFIG.defaultCredentialScope,
-    defaultWriteback:
-      (input.defaultWriteback as HermesPluginConfig["defaultWriteback"]) ??
-      DEFAULT_CONFIG.defaultWriteback,
-    transport:
-      (input.transport as HermesPluginConfig["transport"]) ??
-      DEFAULT_CONFIG.transport,
-    tcpHost: (input.tcpHost as string) ?? DEFAULT_CONFIG.tcpHost,
-    tcpPort: (input.tcpPort as number) ?? DEFAULT_CONFIG.tcpPort,
-    timeout: (input.timeout as number) ?? DEFAULT_CONFIG.timeout,
-    autoStrategy: (input.autoStrategy as boolean) ?? DEFAULT_CONFIG.autoStrategy,
-    enableLayeredProtocol: (input.enableLayeredProtocol as boolean) ?? DEFAULT_CONFIG.enableLayeredProtocol,
-    skillProjection: {
-      mode:
-        (skillProjection.mode as HermesPluginConfig["skillProjection"]["mode"]) ??
-        DEFAULT_CONFIG.skillProjection.mode,
-      allowExecutableAssets:
-        (skillProjection.allowExecutableAssets as boolean) ??
-        DEFAULT_CONFIG.skillProjection.allowExecutableAssets,
-      hostBackedDenylist:
-        (skillProjection.hostBackedDenylist as string[]) ??
-        DEFAULT_CONFIG.skillProjection.hostBackedDenylist,
-      descriptiveOnlyAllowlist:
-        (skillProjection.descriptiveOnlyAllowlist as string[]) ??
-        DEFAULT_CONFIG.skillProjection.descriptiveOnlyAllowlist,
-    },
-    execEnvCleanup: {
-      enabled: (execEnvCleanup.enabled as boolean) ?? DEFAULT_CONFIG.execEnvCleanup.enabled,
-      maxAgeHours: (execEnvCleanup.maxAgeHours as number) ?? DEFAULT_CONFIG.execEnvCleanup.maxAgeHours,
-      maxCount: (execEnvCleanup.maxCount as number) ?? DEFAULT_CONFIG.execEnvCleanup.maxCount,
-    },
-  };
+  return resolveHermesAcpConfig(raw);
 }
 
 // ─── Plugin Definition ──────────────────────────────────────────────────────
@@ -79,6 +34,9 @@ const plugin = {
   register(api: any) {
     const config = resolveConfig(api.pluginConfig);
     const workspaceDir = api.workspaceDir ?? process.cwd();
+
+    api.registerProvider?.(buildHermesProvider({ pluginConfig: api.pluginConfig }));
+    api.registerAgentHarness?.(createHermesAgentHarness({ pluginConfig: api.pluginConfig }));
 
     const logger = {
       info: (msg: string, ...args: unknown[]) => api.logger?.info?.(msg, ...args) ?? console.log(`[hermes] ${msg}`),
@@ -283,7 +241,9 @@ const plugin = {
       },
     });
 
-    logger.info("Hermes Agent plugin registered (3 tools: hermes_dispatch, hermes_status, hermes_strategy)");
+    logger.info(
+      "Hermes Agent plugin registered (provider, harness, and 3 tools: hermes_dispatch, hermes_status, hermes_strategy)",
+    );
   },
 };
 
