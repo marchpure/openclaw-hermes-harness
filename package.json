@@ -11,8 +11,7 @@
     "README.md",
     "AGENTS.md",
     "RUNTIME-REGRESSION.md",
-    "tsconfig.json",
-    "hermes-data/"
+    "tsconfig.json"
   ],
   "openclaw": {
     "extensions": [
