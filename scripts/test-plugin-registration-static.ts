@@ -29,8 +29,10 @@ async function main() {
     "harness must claim the hermes provider",
   );
   assert(
-    harness.includes("dispatchToHermes("),
-    "harness must execute through Hermes ACP dispatch",
+    harness.includes("createHermesRuntimeClient(") &&
+      harness.includes("client.runAttempt(params)") &&
+      harness.includes("clearHermesHarnessBinding"),
+    "harness must execute through the Hermes runtime client and expose reset binding cleanup",
   );
 
   console.log("plugin registration static test: ok");
