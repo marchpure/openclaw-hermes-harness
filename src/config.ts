@@ -1,13 +1,10 @@
 import { DEFAULT_CONFIG, type HermesPluginConfig as HermesAcpPluginConfig } from "./types.js";
 
-export type HermesPluginConfig = {
+export type HermesPluginConfig = Partial<HermesAcpPluginConfig> & {
   discovery?: {
-    enabled?: boolean;
     models?: string[];
   };
-  acp?: Partial<HermesAcpPluginConfig>;
-  runtime?: Partial<HermesAcpPluginConfig>;
-} & Partial<HermesAcpPluginConfig>;
+};
 
 export function readHermesPluginConfig(value: unknown): HermesPluginConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -15,13 +12,12 @@ export function readHermesPluginConfig(value: unknown): HermesPluginConfig {
   }
   const input = value as Record<string, unknown>;
   const discovery = readObject(input.discovery);
-  const acp = readObject(input.acp);
-  const runtime = readObject(input.runtime);
   return {
+    // Keep provider catalog parsing narrow: current deployments configure Hermes
+    // at the top level and only use discovery.models as an optional override.
     ...(discovery
       ? {
           discovery: {
-            ...(typeof discovery.enabled === "boolean" ? { enabled: discovery.enabled } : {}),
             ...(Array.isArray(discovery.models)
               ? {
                   models: discovery.models
@@ -32,8 +28,6 @@ export function readHermesPluginConfig(value: unknown): HermesPluginConfig {
           },
         }
       : {}),
-    ...(acp ? { acp: readHermesAcpPartialConfig(acp) } : {}),
-    ...(runtime ? { runtime: readHermesAcpPartialConfig(runtime) } : {}),
     ...readHermesAcpPartialConfig(input),
   };
 }
@@ -42,8 +36,6 @@ export function resolveHermesAcpConfig(pluginConfig?: unknown): HermesAcpPluginC
   const parsed = readHermesPluginConfig(pluginConfig);
   return {
     ...DEFAULT_CONFIG,
-    ...(parsed.runtime ?? {}),
-    ...(parsed.acp ?? {}),
     ...readHermesAcpPartialConfig(parsed),
   };
 }

@@ -43,10 +43,12 @@ export async function buildHermesProviderCatalog(
   };
 }> {
   const config = readHermesPluginConfig(options.pluginConfig);
-  const configuredModels =
-    config.discovery?.enabled === false ? config.discovery.models : config.discovery?.models;
+  // The provider surface is synthetic: it only advertises model ids so
+  // OpenClaw can route `hermes/<model>` refs into the harness path.
   const modelIds =
-    configuredModels && configuredModels.length > 0 ? configuredModels : FALLBACK_HERMES_MODELS;
+    config.discovery?.models && config.discovery.models.length > 0
+      ? config.discovery.models
+      : FALLBACK_HERMES_MODELS;
   return {
     provider: {
       baseUrl: "http://127.0.0.1/hermes-runtime",
@@ -63,6 +65,8 @@ function resolveHermesDynamicModel(modelId: string): ProviderRuntimeModel | unde
   if (!id) {
     return undefined;
   }
+  // Dynamic resolution keeps custom ids routable without needing a full remote
+  // model discovery round-trip.
   return normalizeModelCompat({
     ...buildModelDefinition(id),
     provider: PROVIDER_ID,
