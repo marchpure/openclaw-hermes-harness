@@ -41,6 +41,8 @@ const defaultLogger: Logger = {
   debug: (msg, ...args) => console.debug(`[hermes-acp] DEBUG ${msg}`, ...args),
 };
 
+const STREAM_IDLE_FINALIZE_MS = 2500;
+
 // ─── ACP Client ─────────────────────────────────────────────────────────────
 
 export class HermesAcpClient extends EventEmitter {
@@ -256,11 +258,35 @@ export class HermesAcpClient extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       let settled = false;
-      const timeoutTimer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new Error(`Hermes prompt timed out after ${timeout / 1000}s`));
+      let promptAcked = false;
+      let promptResponseText = "";
+      let idleFinalizeTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearIdleFinalizeTimer = (): void => {
+        if (idleFinalizeTimer) {
+          clearTimeout(idleFinalizeTimer);
+          idleFinalizeTimer = undefined;
         }
+      };
+      const settle = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
+        clearIdleFinalizeTimer();
+        this.off("session-event-raw", eventHandler);
+        fn();
+      };
+      const scheduleIdleFinalize = (): void => {
+        if (!finalText && !promptResponseText) return;
+        clearIdleFinalizeTimer();
+        idleFinalizeTimer = setTimeout(() => {
+          this.logger.warn(
+            `No ACP terminal event received for ${STREAM_IDLE_FINALIZE_MS}ms after stream output; finalizing prompt from accumulated text`,
+          );
+          settle(() => resolve({ text: finalText || promptResponseText, events, usage }));
+        }, STREAM_IDLE_FINALIZE_MS);
+      };
+      const timeoutTimer = setTimeout(() => {
+        settle(() => reject(new Error(`Hermes prompt timed out after ${timeout / 1000}s`)));
       }, timeout);
 
       // Set up a temporary line handler for streaming events
@@ -275,20 +301,15 @@ export class HermesAcpClient extends EventEmitter {
 
         if (event.type === "text" && event.text) {
           finalText += event.text;
+          scheduleIdleFinalize();
+        } else if (finalText || promptResponseText) {
+          scheduleIdleFinalize();
         }
         if (event.type === "done") {
-          clearTimeout(timeoutTimer);
-          if (!settled) {
-            settled = true;
-            resolve({ text: finalText, events, usage });
-          }
+          settle(() => resolve({ text: finalText || promptResponseText, events, usage }));
         }
         if (event.type === "error") {
-          clearTimeout(timeoutTimer);
-          if (!settled) {
-            settled = true;
-            reject(new Error(event.message ?? "Hermes returned an error"));
-          }
+          settle(() => reject(new Error(event.message ?? "Hermes returned an error")));
         }
       };
 
@@ -297,12 +318,8 @@ export class HermesAcpClient extends EventEmitter {
       // Handle abort signal
       if (options?.signal) {
         options.signal.addEventListener("abort", () => {
-          clearTimeout(timeoutTimer);
-          if (!settled) {
-            settled = true;
-            this.cancel(sid).catch(() => {});
-            reject(new Error("Prompt aborted"));
-          }
+          this.cancel(sid).catch(() => {});
+          settle(() => reject(new Error("Prompt aborted")));
         }, { once: true });
       }
 
@@ -312,6 +329,7 @@ export class HermesAcpClient extends EventEmitter {
         prompt: [{ type: "text", text }],
       }).then((result) => {
         const promptResult = result as Record<string, unknown>;
+        promptAcked = true;
         if (promptResult.usage) {
           const u = promptResult.usage as Record<string, number>;
           usage = {
@@ -320,17 +338,28 @@ export class HermesAcpClient extends EventEmitter {
             total_tokens: u.total_tokens ?? u.totalTokens ?? 0,
           };
         }
-        if (!settled) {
-          clearTimeout(timeoutTimer);
-          settled = true;
-          resolve({ text: finalText, events, usage });
+        promptResponseText =
+          extractAcpText(promptResult.output) ??
+          extractAcpText(promptResult.content) ??
+          extractAcpText(promptResult.result) ??
+          (typeof promptResult.text === "string" ? promptResult.text : "");
+        const hasTerminalPayload = Boolean(promptResponseText) || promptResult.done === true;
+        if (hasTerminalPayload) {
+          if (!finalText && promptResponseText) {
+            finalText = promptResponseText;
+          }
+          settle(() => resolve({ text: finalText, events, usage }));
+          return;
         }
+        // Some Hermes ACP servers ACK session/prompt immediately and stream the
+        // actual turn via session updates afterwards. In that case keep the
+        // connection open until a terminal event arrives or timeout fires.
       }).catch((err) => {
-        clearTimeout(timeoutTimer);
-        if (!settled) {
-          settled = true;
-          reject(err);
+        if (promptAcked && !settled && (finalText || promptResponseText)) {
+          settle(() => resolve({ text: finalText || promptResponseText, events, usage }));
+          return;
         }
+        settle(() => reject(err));
       });
     });
   }

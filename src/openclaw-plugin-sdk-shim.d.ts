@@ -109,3 +109,20 @@ declare module "openclaw/plugin-sdk/agent-harness" {
     reset?: (params: { sessionFile?: string }) => Promise<void>;
   };
 }
+
+declare module "openclaw/plugin-sdk/nostr" {
+  export type PluginRuntimeGatewayRequestScope = {
+    context?: {
+      broadcast: (event: string, payload: unknown, options?: { dropIfSlow?: boolean }) => void;
+      nodeSendToSession: (sessionKey: string, event: string, payload: unknown) => void;
+      agentRunSeq: Map<string, number>;
+    };
+    client?: unknown;
+    isWebchatConnect: (params: unknown) => boolean;
+    pluginId?: string;
+  };
+
+  export function getPluginRuntimeGatewayRequestScope():
+    | PluginRuntimeGatewayRequestScope
+    | undefined;
+}

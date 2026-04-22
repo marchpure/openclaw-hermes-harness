@@ -20,6 +20,15 @@
         "type": "string",
         "description": "Hermes data directory on host (mounted as /opt/data)"
       },
+      "runtimeMode": {
+        "type": "string",
+        "enum": [
+          "acp",
+          "app-server",
+          "appserver"
+        ],
+        "description": "Hermes runtime mode. Use acp for harness runtime streaming."
+      },
       "execEnvRootDir": {
         "type": "string",
         "description": "Host root directory for task-scoped Hermes execution environments"
@@ -142,6 +151,10 @@
     "hermesDataDir": {
       "label": "Data Directory",
       "help": "Host path to Hermes persistent data (config, memories, skills)."
+    },
+    "runtimeMode": {
+      "label": "Runtime Mode",
+      "help": "Hermes runtime mode. Prefer acp for harness runtime event streaming."
     },
     "execEnvRootDir": {
       "label": "ExecEnv Root",

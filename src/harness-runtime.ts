@@ -5,6 +5,7 @@ import type {
 } from "openclaw/plugin-sdk/agent-harness";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
+import { createWebUiEventBridge } from "./webui-event-bridge.js";
 import {
   clearSessionBinding,
   prepareProjectedExecutionEnv,
@@ -12,7 +13,7 @@ import {
   resolveStableSessionAnchor,
   writeSessionBinding,
 } from "./runtime-client.js";
-import type { AcpSessionEvent, ContextLevel, HermesPluginConfig } from "./types.js";
+import type { AcpSessionEvent, HermesPluginConfig } from "./types.js";
 
 type HarnessMessage = NonNullable<AgentHarnessAttemptResult["messagesSnapshot"]>[number];
 
@@ -50,11 +51,6 @@ const ZERO_ASSISTANT_USAGE = {
   total: 0,
 };
 
-function maxContextLevel(a: ContextLevel, b: ContextLevel): ContextLevel {
-  const order: ContextLevel[] = ["L0", "L1", "L2", "L3"];
-  return order[Math.max(order.indexOf(a), order.indexOf(b))] ?? a;
-}
-
 export function createHermesRuntimeClient(options: {
   config: HermesPluginConfig;
 }): HermesRuntimeClient {
@@ -79,9 +75,12 @@ export async function runHermesHarnessAttempt(
   const client = new HermesAcpClient(config, logger);
   const timeoutMs = Math.max(1, params.timeoutMs);
   const toolMetas = new Map<string, { toolName: string; meta?: string }>();
+  const webui = createWebUiEventBridge(params);
+  let assistantTextSoFar = "";
   let assistantStarted = false;
   let reasoningStarted = false;
   let reasoningEnded = false;
+  let lifecycleEnded = false;
   const sessionAnchor = resolveStableSessionAnchor({
     workspaceDir: params.workspaceDir,
     sessionKey: params.sessionKey,
@@ -97,8 +96,7 @@ export async function runHermesHarnessAttempt(
     task: params.prompt,
     taskId: sessionAnchor,
     workspaceDir: params.workspaceDir,
-    contextLevel: maxContextLevel(config.defaultContextLevel, config.runtimeMinContextLevel),
-    includeWorkspaceSkills: config.runtimeProjectWorkspaceSkills,
+    contextLevel: config.defaultContextLevel,
     model: params.modelId,
     config,
     sessionAnchor,
@@ -106,6 +104,11 @@ export async function runHermesHarnessAttempt(
 
   try {
     await client.start({}, execution.execEnv.runtimeExecEnvPath);
+    webui.lifecycleStart({ startedAt: Date.now() });
+    publishHermesHarnessAgentEvent(params, {
+      stream: "lifecycle",
+      data: { phase: "start", startedAt: Date.now() },
+    });
     const sessionId = await resumeOrCreateSession({
       client,
       runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
@@ -133,6 +136,11 @@ export async function runHermesHarnessAttempt(
             void params.onReasoningEnd?.();
           },
           toolMetas,
+          webui,
+          appendAssistantText: (delta) => {
+            assistantTextSoFar += delta;
+            return assistantTextSoFar;
+          },
         });
       },
     });
@@ -140,6 +148,7 @@ export async function runHermesHarnessAttempt(
     if (reasoningStarted && !reasoningEnded) {
       reasoningEnded = true;
       void params.onReasoningEnd?.();
+      webui.thinkingEnd();
     }
 
     const usage = normalizeAcpUsage(result.usage);
@@ -177,6 +186,15 @@ export async function runHermesHarnessAttempt(
       },
     };
   } catch (err) {
+    webui.lifecycleError(err instanceof Error ? err.message : String(err));
+    publishHermesHarnessAgentEvent(params, {
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        error: err instanceof Error ? err.message : String(err),
+        endedAt: Date.now(),
+      },
+    });
     clearSessionBinding(execution.sessionBindingHash);
     const lastAssistant = buildAssistantMessage(params, "", undefined, {
       aborted: Boolean(params.abortSignal?.aborted),
@@ -205,6 +223,17 @@ export async function runHermesHarnessAttempt(
       },
     };
   } finally {
+    if (reasoningStarted && !reasoningEnded) {
+      webui.thinkingEnd();
+    }
+    if (!lifecycleEnded) {
+      lifecycleEnded = true;
+      webui.lifecycleEnd({ endedAt: Date.now() });
+      publishHermesHarnessAgentEvent(params, {
+        stream: "lifecycle",
+        data: { phase: "end", endedAt: Date.now() },
+      });
+    }
     await client.close().catch(() => {});
   }
 }
@@ -246,20 +275,30 @@ async function handleHarnessEvent(
     markReasoningStarted: () => Promise<void>;
     markReasoningEnded: () => Promise<void>;
     toolMetas: Map<string, { toolName: string; meta?: string }>;
+    webui: ReturnType<typeof createWebUiEventBridge>;
+    appendAssistantText: (delta: string) => string;
   },
 ): Promise<void> {
   if (event.type === "text" && event.text) {
     await state.markAssistantStarted();
+    const text = state.appendAssistantText(event.text);
+    state.webui.assistantDelta(event.text);
+    publishHermesHarnessAgentEvent(params, {
+      stream: "assistant",
+      data: { text, delta: event.text },
+    });
     void params.onPartialReply?.({ text: event.text });
     return;
   }
 
   if (event.type === "thinking" && event.text) {
     await state.markReasoningStarted();
+    state.webui.thinkingStart();
     publishHermesHarnessAgentEvent(params, {
       stream: "thinking",
       data: { text: event.text, delta: event.text },
     });
+    state.webui.thinkingDelta(event.text);
     void params.onReasoningStream?.({ text: event.text });
     return;
   }
@@ -268,6 +307,7 @@ async function handleHarnessEvent(
     const id = event.toolCallId || `${event.toolName || "tool"}:${state.toolMetas.size}`;
     const toolName = event.toolName || "hermes_tool";
     state.toolMetas.set(id, { toolName });
+    state.webui.toolStart(toolName, id);
     publishHermesHarnessAgentEvent(params, {
       stream: "tool",
       data: { phase: "start", name: toolName, toolCallId: id },
@@ -283,10 +323,29 @@ async function handleHarnessEvent(
       toolName,
       ...(outputText ? { meta: outputText.slice(0, 200) } : {}),
     });
+    state.webui.toolResult(toolName, id, outputText || undefined, false);
+    publishHermesHarnessAgentEvent(params, {
+      stream: "tool",
+      data: {
+        phase: "result",
+        name: toolName,
+        toolCallId: id,
+        ...(outputText
+          ? {
+              result: {
+                content: [{ type: "text", text: outputText }],
+              },
+              summary: outputText,
+            }
+          : {}),
+      },
+    });
+    void params.onToolResult?.({ text: outputText });
     return;
   }
 
   if (event.type === "done") {
+    state.webui.thinkingEnd();
     await state.markReasoningEnded();
   }
 }

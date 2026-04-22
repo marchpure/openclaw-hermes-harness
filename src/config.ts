@@ -54,6 +54,7 @@ function readHermesAcpPartialConfig(
   const skillProjection = readObject(input.skillProjection);
   const execEnvCleanup = readObject(input.execEnvCleanup);
   return {
+    ...(readRuntimeMode(input.runtimeMode) ? { runtimeMode: readRuntimeMode(input.runtimeMode) } : {}),
     ...(readNonEmptyString(input.hermesCommand)
       ? { hermesCommand: readNonEmptyString(input.hermesCommand) }
       : {}),
@@ -169,6 +170,10 @@ function readPort(value: unknown): number | undefined {
 
 function readTransport(value: unknown): HermesAcpPluginConfig["transport"] | undefined {
   return value === "tcp" || value === "stdio" ? value : undefined;
+}
+
+function readRuntimeMode(value: unknown): HermesAcpPluginConfig["runtimeMode"] | undefined {
+  return value === "acp" || value === "app-server" || value === "appserver" ? value : undefined;
 }
 
 function readContextLevel(

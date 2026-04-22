@@ -169,6 +169,7 @@ export interface DispatchResult {
 // ─── Plugin Config ──────────────────────────────────────────────────────────
 
 export type TransportMode = "tcp" | "stdio";
+export type HermesRuntimeMode = "acp" | "app-server" | "appserver";
 export type SkillProjectionMode = "strict" | "permissive";
 export type ProjectedCapabilityClass =
   | "projectable-local"
@@ -177,6 +178,7 @@ export type ProjectedCapabilityClass =
   | "unsupported";
 
 export interface HermesPluginConfig {
+  runtimeMode?: HermesRuntimeMode;
   hermesCommand?: string;
   hermesContainerName: string;
   hermesDataDir?: string;
