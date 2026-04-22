@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AgentHarnessAttemptParams } from "openclaw/plugin-sdk/agent-harness";
 
@@ -28,16 +29,24 @@ function loadScopeReader(): (() => GatewayRequestScope | undefined) | null {
     const pkgRoot = dirname(dirname(sdkEntry));
     candidates.push(join(pkgRoot, "plugin-sdk", "nostr.js"));
     candidates.push(join(pkgRoot, "plugins", "runtime", "gateway-request-scope.js"));
+    candidates.push(join(pkgRoot, "gateway-request-scope.js"));
+    candidates.push(...findBundledGatewayRequestScopeModules(pkgRoot));
   } catch {
     // Ignore resolution failures and keep best-effort behavior.
   }
+  candidates.push(...findBundledGatewayRequestScopeModules("/usr/lib/node_modules/openclaw/dist"));
+  candidates.push(...findBundledGatewayRequestScopeModules("/usr/local/lib/node_modules/openclaw/dist"));
   for (const candidate of candidates) {
     try {
       const mod = require(candidate) as
-        | { getPluginRuntimeGatewayRequestScope?: () => GatewayRequestScope | undefined }
+        | {
+            getPluginRuntimeGatewayRequestScope?: () => GatewayRequestScope | undefined;
+            t?: () => GatewayRequestScope | undefined;
+          }
         | undefined;
-      if (typeof mod?.getPluginRuntimeGatewayRequestScope === "function") {
-        cachedScopeReader = () => mod.getPluginRuntimeGatewayRequestScope?.();
+      const reader = mod?.getPluginRuntimeGatewayRequestScope ?? mod?.t;
+      if (typeof reader === "function") {
+        cachedScopeReader = () => reader();
         return cachedScopeReader;
       }
     } catch {
@@ -46,6 +55,16 @@ function loadScopeReader(): (() => GatewayRequestScope | undefined) | null {
   }
   cachedScopeReader = null;
   return cachedScopeReader;
+}
+
+function findBundledGatewayRequestScopeModules(distRoot: string): string[] {
+  try {
+    return readdirSync(distRoot)
+      .filter((entry) => /^gateway-request-scope-[\w-]+\.js$/.test(entry))
+      .map((entry) => join(distRoot, entry));
+  } catch {
+    return [];
+  }
 }
 
 type WebUiBridgeState = {

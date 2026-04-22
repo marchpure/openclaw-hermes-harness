@@ -332,10 +332,12 @@ export class HermesAcpClient extends EventEmitter {
         promptAcked = true;
         if (promptResult.usage) {
           const u = promptResult.usage as Record<string, number>;
+          const inputTokens = u.input_tokens ?? u.inputTokens ?? 0;
+          const outputTokens = u.output_tokens ?? u.outputTokens ?? 0;
           usage = {
-            input_tokens: u.input_tokens ?? u.inputTokens ?? 0,
-            output_tokens: u.output_tokens ?? u.outputTokens ?? 0,
-            total_tokens: u.total_tokens ?? u.totalTokens ?? 0,
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
+            total_tokens: u.total_tokens ?? u.totalTokens ?? (inputTokens + outputTokens),
           };
         }
         promptResponseText =
@@ -343,7 +345,11 @@ export class HermesAcpClient extends EventEmitter {
           extractAcpText(promptResult.content) ??
           extractAcpText(promptResult.result) ??
           (typeof promptResult.text === "string" ? promptResult.text : "");
-        const hasTerminalPayload = Boolean(promptResponseText) || promptResult.done === true;
+        const stopReason = typeof promptResult.stopReason === "string" ? promptResult.stopReason : "";
+        const hasTerminalPayload =
+          Boolean(promptResponseText) ||
+          promptResult.done === true ||
+          isTerminalStopReason(stopReason);
         if (hasTerminalPayload) {
           if (!finalText && promptResponseText) {
             finalText = promptResponseText;
@@ -660,4 +666,11 @@ function stringifyAcpToolOutput(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function isTerminalStopReason(value: string): boolean {
+  return value === "end_turn" ||
+    value === "stop" ||
+    value === "cancelled" ||
+    value === "max_tokens";
 }
