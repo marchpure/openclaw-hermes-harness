@@ -4,7 +4,12 @@ import type {
   AgentHarnessAttemptParams,
   AgentHarnessAttemptResult,
 } from "openclaw/plugin-sdk/agent-harness";
-import { dispatchToHermes } from "./dispatcher.js";
+import {
+  clearHermesHarnessBinding,
+  createHermesRuntimeClient,
+  type HermesRunResponse,
+  type HermesRuntimeClient,
+} from "./harness-runtime.js";
 import { resolveHermesAcpConfig } from "./config.js";
 
 const DEFAULT_HERMES_HARNESS_PROVIDER_IDS = new Set(["hermes"]);
@@ -14,6 +19,7 @@ export function createHermesAgentHarness(options?: {
   label?: string;
   providerIds?: Iterable<string>;
   pluginConfig?: unknown;
+  client?: HermesRuntimeClient;
 }): AgentHarness {
   const providerIds = new Set(
     [...(options?.providerIds ?? DEFAULT_HERMES_HARNESS_PROVIDER_IDS)].map((id) =>
@@ -34,26 +40,20 @@ export function createHermesAgentHarness(options?: {
       };
     },
     runAttempt: async (params) => {
-      const config = resolveHermesAcpConfig(options?.pluginConfig);
-      const response = await dispatchToHermes(
-        {
-          task: params.prompt,
-          model: params.modelId,
-          timeout: Math.max(1, Math.ceil(params.timeoutMs / 1000)),
-          contextLevel: config.defaultContextLevel,
-          credentialScope: { mode: config.defaultCredentialScope },
-          writeback: config.defaultWriteback,
-          explicitStrategy: true,
-        },
-        {
-          config,
-          workspaceDir: params.workspaceDir,
-        },
-      );
-      return buildHermesAttemptResult(params, response.result);
+      const client =
+        options?.client ??
+        createHermesRuntimeClient({
+          config: resolveHermesAcpConfig(options?.pluginConfig),
+        });
+      const response = await client.runAttempt(params);
+      return buildHermesAttemptResult(params, response);
     },
     compact: async () => buildUnsupportedCompactResult(),
-    reset: async () => {},
+    reset: async (params) => {
+      if (params.sessionFile) {
+        await clearHermesHarnessBinding(params.sessionFile);
+      }
+    },
   };
 }
 
@@ -61,49 +61,51 @@ function buildUnsupportedCompactResult(): AgentHarnessCompactResult {
   return {
     ok: false,
     compacted: false,
-    reason:
-      "Hermes ACP runtime does not expose an OpenClaw-compatible compaction API yet.",
+    reason: "Hermes ACP runtime does not expose an OpenClaw-compatible compaction API yet; reset clears the session binding.",
   };
 }
 
 function buildHermesAttemptResult(
   params: AgentHarnessAttemptParams,
-  assistantText: string,
+  response: HermesRunResponse,
 ): AgentHarnessAttemptResult {
-  const safeText = assistantText.trim();
-  void params.onAssistantMessageStart?.();
-  if (safeText) {
-    void params.onPartialReply?.({ text: safeText });
-  }
+  const assistantTexts =
+    response.assistantTexts && response.assistantTexts.length > 0
+      ? response.assistantTexts
+      : response.assistantText
+        ? [response.assistantText]
+        : [];
+  const hadPotentialSideEffects = response.hadPotentialSideEffects === true;
   return {
-    aborted: false,
-    externalAbort: false,
-    timedOut: false,
+    aborted: response.aborted ?? false,
+    externalAbort: response.externalAbort ?? false,
+    timedOut: response.timedOut ?? false,
     idleTimedOut: false,
     timedOutDuringCompaction: false,
-    promptError: null,
-    promptErrorSource: null,
-    sessionIdUsed: params.sessionId,
+    promptError: response.promptError ?? null,
+    promptErrorSource: response.promptErrorSource ?? null,
+    sessionIdUsed: response.sessionId ?? params.sessionId,
     bootstrapPromptWarningSignaturesSeen: params.bootstrapPromptWarningSignaturesSeen,
     bootstrapPromptWarningSignature: params.bootstrapPromptWarningSignature,
-    finalPromptText: params.prompt,
-    messagesSnapshot: [],
-    assistantTexts: safeText ? [safeText] : [],
-    toolMetas: [],
-    lastAssistant: undefined as never,
-    currentAttemptAssistant: undefined as never,
+    finalPromptText: response.finalPromptText,
+    messagesSnapshot: response.messagesSnapshot ?? [],
+    assistantTexts,
+    toolMetas: response.toolMetas ?? [],
+    lastAssistant: response.lastAssistant as never,
+    currentAttemptAssistant: response.currentAttemptAssistant as never,
     didSendViaMessagingTool: false,
     messagingToolSentTexts: [],
     messagingToolSentMediaUrls: [],
     messagingToolSentTargets: [],
     cloudCodeAssistFormatError: false,
+    attemptUsage: response.usage,
     replayMetadata: {
-      hadPotentialSideEffects: false,
-      replaySafe: true,
+      hadPotentialSideEffects,
+      replaySafe: response.replaySafe ?? !hadPotentialSideEffects,
     },
-    itemLifecycle: {
-      startedCount: safeText ? 1 : 0,
-      completedCount: safeText ? 1 : 0,
+    itemLifecycle: response.itemLifecycle ?? {
+      startedCount: assistantTexts.length > 0 ? 1 : 0,
+      completedCount: assistantTexts.length > 0 ? 1 : 0,
       activeCount: 0,
     },
   };

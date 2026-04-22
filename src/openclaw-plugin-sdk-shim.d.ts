@@ -19,18 +19,78 @@ declare module "openclaw/plugin-sdk/provider-model-shared" {
 }
 
 declare module "openclaw/plugin-sdk/agent-harness" {
+  export type AgentHarnessMessage = Record<string, unknown>;
+  export type NormalizedUsage = {
+    input: number;
+    output: number;
+    total: number;
+  };
   export type AgentHarnessAttemptParams = {
     prompt: string;
     modelId?: string;
     timeoutMs: number;
     workspaceDir: string;
     sessionId?: string;
+    sessionFile?: string;
+    runId?: string;
+    sessionKey?: string;
+    agentId?: string;
+    abortSignal?: AbortSignal;
+    images?: Array<{ data: string; mimeType: string }>;
+    extraSystemPrompt?: string;
+    toolsAllow?: string[];
+    skillsSnapshot?: {
+      prompt?: string;
+      skills?: Array<{ name: string; primaryEnv?: string; requiredEnv?: string[] }>;
+      resolvedSkills?: Array<{ name?: string; description?: string; path?: string; source?: string }>;
+      skillFilter?: string[];
+      version?: number;
+    };
+    model?: { api?: string };
+    provider?: string;
     bootstrapPromptWarningSignaturesSeen?: string[];
     bootstrapPromptWarningSignature?: string;
     onAssistantMessageStart?: () => void | Promise<void>;
     onPartialReply?: (payload: { text: string }) => void | Promise<void>;
+    onReasoningStart?: () => void | Promise<void>;
+    onReasoningStream?: (payload: { text: string }) => void | Promise<void>;
+    onReasoningEnd?: () => void | Promise<void>;
+    onToolResult?: (payload: { text: string }) => void | Promise<void>;
+    onAgentEvent?: (event: { stream: string; data: Record<string, unknown> }) => void | Promise<void>;
   };
-  export type AgentHarnessAttemptResult = Record<string, unknown>;
+  export type AgentHarnessAttemptResult = {
+    aborted?: boolean;
+    externalAbort?: boolean;
+    timedOut?: boolean;
+    idleTimedOut?: boolean;
+    timedOutDuringCompaction?: boolean;
+    promptError?: unknown;
+    promptErrorSource?: string | null;
+    sessionIdUsed?: string;
+    bootstrapPromptWarningSignaturesSeen?: string[];
+    bootstrapPromptWarningSignature?: string;
+    finalPromptText?: string;
+    messagesSnapshot?: AgentHarnessMessage[];
+    assistantTexts?: string[];
+    toolMetas?: Array<{ toolName: string; meta?: string }>;
+    lastAssistant?: AgentHarnessMessage;
+    currentAttemptAssistant?: AgentHarnessMessage;
+    didSendViaMessagingTool?: boolean;
+    messagingToolSentTexts?: string[];
+    messagingToolSentMediaUrls?: string[];
+    messagingToolSentTargets?: string[];
+    cloudCodeAssistFormatError?: boolean;
+    attemptUsage?: NormalizedUsage;
+    replayMetadata?: {
+      hadPotentialSideEffects: boolean;
+      replaySafe: boolean;
+    };
+    itemLifecycle?: {
+      startedCount: number;
+      completedCount: number;
+      activeCount: number;
+    };
+  };
   export type AgentHarnessCompactResult = {
     ok: boolean;
     compacted: boolean;
