@@ -41,6 +41,8 @@ const defaultLogger: Logger = {
   debug: (msg, ...args) => console.debug(`[hermes-acp] DEBUG ${msg}`, ...args),
 };
 
+const STREAM_IDLE_FINALIZE_MS = 2500;
+
 // ─── ACP Client ─────────────────────────────────────────────────────────────
 
 export class HermesAcpClient extends EventEmitter {
@@ -227,7 +229,11 @@ export class HermesAcpClient extends EventEmitter {
   async prompt(
     text: string,
     sessionId?: string,
-    options?: { timeout?: number; signal?: AbortSignal },
+    options?: {
+      timeout?: number;
+      signal?: AbortSignal;
+      onEvent?: (event: AcpSessionEvent) => void | Promise<void>;
+    },
   ): Promise<{
     text: string;
     events: AcpSessionEvent[];
@@ -245,34 +251,58 @@ export class HermesAcpClient extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       let settled = false;
-      const timeoutTimer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(new Error(`Hermes prompt timed out after ${timeout / 1000}s`));
+      let promptAcked = false;
+      let promptResponseText = "";
+      let idleFinalizeTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearIdleFinalizeTimer = (): void => {
+        if (idleFinalizeTimer) {
+          clearTimeout(idleFinalizeTimer);
+          idleFinalizeTimer = undefined;
         }
+      };
+      const settle = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
+        clearIdleFinalizeTimer();
+        this.off("session-event-raw", eventHandler);
+        fn();
+      };
+      const scheduleIdleFinalize = (): void => {
+        if (!finalText && !promptResponseText) return;
+        clearIdleFinalizeTimer();
+        idleFinalizeTimer = setTimeout(() => {
+          this.logger.warn(
+            `No ACP terminal event received for ${STREAM_IDLE_FINALIZE_MS}ms after stream output; finalizing prompt from accumulated text`,
+          );
+          settle(() => resolve({ text: finalText || promptResponseText, events, usage }));
+        }, STREAM_IDLE_FINALIZE_MS);
+      };
+      const timeoutTimer = setTimeout(() => {
+        settle(() => reject(new Error(`Hermes prompt timed out after ${timeout / 1000}s`)));
       }, timeout);
 
       // Set up a temporary line handler for streaming events
       const eventHandler = (event: AcpSessionEvent) => {
         events.push(event);
         this.emit("session-event", event);
+        try {
+          void Promise.resolve(options?.onEvent?.(event)).catch(() => {});
+        } catch {
+          // Best effort only.
+        }
 
         if (event.type === "text" && event.text) {
           finalText += event.text;
+          scheduleIdleFinalize();
+        } else if (finalText || promptResponseText) {
+          scheduleIdleFinalize();
         }
         if (event.type === "done") {
-          clearTimeout(timeoutTimer);
-          if (!settled) {
-            settled = true;
-            resolve({ text: finalText, events, usage });
-          }
+          settle(() => resolve({ text: finalText || promptResponseText, events, usage }));
         }
         if (event.type === "error") {
-          clearTimeout(timeoutTimer);
-          if (!settled) {
-            settled = true;
-            reject(new Error(event.message ?? "Hermes returned an error"));
-          }
+          settle(() => reject(new Error(event.message ?? "Hermes returned an error")));
         }
       };
 
@@ -284,11 +314,8 @@ export class HermesAcpClient extends EventEmitter {
           "abort",
           () => {
             clearTimeout(timeoutTimer);
-            if (!settled) {
-              settled = true;
-              this.cancel(sid).catch(() => {});
-              reject(new Error("Prompt aborted"));
-            }
+            this.cancel(sid).catch(() => {});
+            settle(() => reject(new Error("Prompt aborted")));
           },
           { once: true },
         );
@@ -301,26 +328,42 @@ export class HermesAcpClient extends EventEmitter {
       })
         .then((result) => {
           const promptResult = result as Record<string, unknown>;
+          promptAcked = true;
           if (promptResult.usage) {
             const u = promptResult.usage as Record<string, number>;
+            const inputTokens = u.input_tokens ?? u.inputTokens ?? 0;
+            const outputTokens = u.output_tokens ?? u.outputTokens ?? 0;
             usage = {
-              input_tokens: u.input_tokens ?? u.inputTokens ?? 0,
-              output_tokens: u.output_tokens ?? u.outputTokens ?? 0,
-              total_tokens: u.total_tokens ?? u.totalTokens ?? 0,
+              input_tokens: inputTokens,
+              output_tokens: outputTokens,
+              total_tokens: u.total_tokens ?? u.totalTokens ?? inputTokens + outputTokens,
             };
           }
-          if (!settled) {
-            clearTimeout(timeoutTimer);
-            settled = true;
-            resolve({ text: finalText, events, usage });
+          promptResponseText =
+            extractAcpText(promptResult.output) ??
+            extractAcpText(promptResult.content) ??
+            extractAcpText(promptResult.result) ??
+            (typeof promptResult.text === "string" ? promptResult.text : "");
+          const stopReason = typeof promptResult.stopReason === "string" ? promptResult.stopReason : "";
+          const hasTerminalPayload =
+            Boolean(promptResponseText) ||
+            promptResult.done === true ||
+            isTerminalStopReason(stopReason);
+          if (hasTerminalPayload) {
+            if (!finalText && promptResponseText) {
+              finalText = promptResponseText;
+            }
+            settle(() => resolve({ text: finalText, events, usage }));
           }
+          // Some ACP servers ACK session/prompt immediately and stream the
+          // turn later through notifications. Keep waiting in that case.
         })
         .catch((err) => {
-          clearTimeout(timeoutTimer);
-          if (!settled) {
-            settled = true;
-            reject(err);
+          if (promptAcked && !settled && (finalText || promptResponseText)) {
+            settle(() => resolve({ text: finalText || promptResponseText, events, usage }));
+            return;
           }
+          settle(() => reject(err));
         });
     });
   }
@@ -518,6 +561,19 @@ export class HermesAcpClient extends EventEmitter {
       if (event) {
         this.emit("session-event-raw", event);
       }
+      return;
+    }
+
+    if (method === "session/request_permission") {
+      const toolCall = (params.toolCall ?? {}) as Record<string, unknown>;
+      const event = this.parseSessionEvent({
+        ...toolCall,
+        sessionUpdate: "tool_call_update",
+        status: "pending",
+      });
+      if (event) {
+        this.emit("session-event-raw", event);
+      }
     }
   }
 
@@ -530,8 +586,7 @@ export class HermesAcpClient extends EventEmitter {
       sessionUpdate === "agentMessageText" ||
       sessionUpdate === "agent_message_chunk"
     ) {
-      const content = data.content as Record<string, unknown> | undefined;
-      const text = (content?.text as string) ?? (data.text as string) ?? "";
+      const text = extractAcpText(data.content) ?? (data.text as string) ?? "";
       return { type: "text", text };
     }
 
@@ -542,14 +597,14 @@ export class HermesAcpClient extends EventEmitter {
       sessionUpdate === "agent_thought_chunk" ||
       type === "thinking"
     ) {
-      const content = data.content as Record<string, unknown> | undefined;
-      const text = (content?.text as string) ?? (data.text as string) ?? "";
+      const text = extractAcpText(data.content) ?? (data.text as string) ?? "";
       return { type: "thinking", text };
     }
 
     if (
       sessionUpdate === "tool_call_begin" ||
       sessionUpdate === "toolCallBegin" ||
+      sessionUpdate === "tool_call" ||
       type === "tool_call"
     ) {
       return {
@@ -562,12 +617,22 @@ export class HermesAcpClient extends EventEmitter {
     if (
       sessionUpdate === "tool_call_end" ||
       sessionUpdate === "toolCallEnd" ||
+      sessionUpdate === "tool_call_update" ||
       type === "tool_result"
     ) {
+      const status = data.status as string | undefined;
+      if (status === "pending" || status === "in_progress") {
+        return {
+          type: "tool_progress",
+          toolName: (data.name as string) ?? (data.toolName as string) ?? (data.title as string) ?? "",
+          toolCallId: (data.id as string) ?? (data.toolCallId as string) ?? "",
+        };
+      }
       return {
         type: "tool_result",
+        toolName: (data.name as string) ?? (data.toolName as string) ?? (data.title as string) ?? "",
         toolCallId: (data.id as string) ?? (data.toolCallId as string) ?? "",
-        text: (data.output as string) ?? (data.text as string) ?? "",
+        text: stringifyAcpToolOutput(data.rawOutput ?? data.output ?? data.content ?? data.text),
       };
     }
 
@@ -592,4 +657,39 @@ export class HermesAcpClient extends EventEmitter {
     }
     this.pendingRequests.clear();
   }
+}
+
+function extractAcpText(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map((item) => extractAcpText(item))
+      .filter((item): item is string => typeof item === "string" && item.length > 0);
+    return parts.length > 0 ? parts.join("") : undefined;
+  }
+  if (content && typeof content === "object") {
+    const block = content as Record<string, unknown>;
+    if (typeof block.text === "string") return block.text;
+    if (typeof block.content === "string") return block.content;
+  }
+  return undefined;
+}
+
+function stringifyAcpToolOutput(value: unknown): string {
+  const text = extractAcpText(value);
+  if (text !== undefined) return text;
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function isTerminalStopReason(value: string): boolean {
+  return value === "end_turn" ||
+    value === "stop" ||
+    value === "cancelled" ||
+    value === "max_tokens";
 }
