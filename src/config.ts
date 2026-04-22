@@ -69,6 +69,9 @@ function readHermesAcpPartialConfig(
     ...(readNonEmptyString(input.runtimeExecEnvRootDir)
       ? { runtimeExecEnvRootDir: readNonEmptyString(input.runtimeExecEnvRootDir) }
       : {}),
+    ...(typeof input.mirrorExecEnvToContainer === "boolean"
+      ? { mirrorExecEnvToContainer: input.mirrorExecEnvToContainer }
+      : {}),
     ...(readNonEmptyString(input.projectionVersion)
       ? { projectionVersion: readNonEmptyString(input.projectionVersion) }
       : {}),
@@ -80,6 +83,12 @@ function readHermesAcpPartialConfig(
       : {}),
     ...(readContextLevel(input.defaultContextLevel)
       ? { defaultContextLevel: readContextLevel(input.defaultContextLevel) }
+      : {}),
+    ...(readContextLevel(input.runtimeMinContextLevel)
+      ? { runtimeMinContextLevel: readContextLevel(input.runtimeMinContextLevel) }
+      : {}),
+    ...(typeof input.runtimeProjectWorkspaceSkills === "boolean"
+      ? { runtimeProjectWorkspaceSkills: input.runtimeProjectWorkspaceSkills }
       : {}),
     ...(readCredentialScopeMode(input.defaultCredentialScope)
       ? { defaultCredentialScope: readCredentialScopeMode(input.defaultCredentialScope) }

@@ -1,6 +1,7 @@
 import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import type {
   ExecEnvBuildResult,
   ExecEnvInput,
@@ -17,7 +18,11 @@ function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-async function copyProjectedSkill(hostExecEnvPath: string, skill: ProjectedSkill): Promise<ProjectedSkill> {
+async function copyProjectedSkill(
+  hostExecEnvPath: string,
+  runtimeExecEnvPath: string,
+  skill: ProjectedSkill,
+): Promise<ProjectedSkill> {
   if (!skill.sourcePath) return skill;
 
   const skillDir = join(hostExecEnvPath, "skills", skill.name);
@@ -28,7 +33,7 @@ async function copyProjectedSkill(hostExecEnvPath: string, skill: ProjectedSkill
 
   return {
     ...skill,
-    projectedPath: targetSkillPath,
+    projectedPath: join(runtimeExecEnvPath, "skills", skill.name, "SKILL.md"),
   };
 }
 
@@ -62,7 +67,7 @@ function buildManifest(input: {
     files: {
       soul: input.execEnvInput.contextFiles.soul ? "SOUL.md" : undefined,
       user: input.execEnvInput.contextFiles.user ? "USER.md" : undefined,
-      agent: input.execEnvInput.contextFiles.agent ? "AGENT.md" : undefined,
+      agent: input.execEnvInput.contextFiles.agent ? "AGENTS.md" : undefined,
       task: input.execEnvInput.contextFiles.task ? "TASK.md" : undefined,
     },
     skills: input.projectedSkills,
@@ -75,6 +80,114 @@ function buildManifest(input: {
   };
 }
 
+function runCommand(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`${command} ${args.join(" ")} failed with exit ${code}: ${stderr.trim()}`));
+    });
+  });
+}
+
+function streamDirectoryToContainer(hostExecEnvPath: string, container: string, runtimeExecEnvPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tarCreate = spawn("tar", ["-C", hostExecEnvPath, "-cf", "-", "."], {
+      env: {
+        ...process.env,
+        COPYFILE_DISABLE: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const tarExtract = spawn("docker", [
+      "exec",
+      "-i",
+      container,
+      "tar",
+      "-C",
+      runtimeExecEnvPath,
+      "-xf",
+      "-",
+    ], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderr = "";
+    tarCreate.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    tarExtract.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    tarCreate.stdout.pipe(tarExtract.stdin);
+
+    let createDone = false;
+    let extractDone = false;
+    let failed = false;
+
+    const finishIfDone = () => {
+      if (!failed && createDone && extractDone) {
+        resolve();
+      }
+    };
+
+    const fail = (err: Error) => {
+      if (failed) return;
+      failed = true;
+      tarCreate.kill();
+      tarExtract.kill();
+      reject(err);
+    };
+
+    tarCreate.on("error", (err) => fail(err));
+    tarExtract.on("error", (err) => fail(err));
+
+    tarCreate.on("exit", (code) => {
+      if (code !== 0) {
+        fail(new Error(`tar create failed with exit ${code}: ${stderr.trim()}`));
+        return;
+      }
+      createDone = true;
+      finishIfDone();
+    });
+
+    tarExtract.on("exit", (code) => {
+      if (code !== 0) {
+        fail(new Error(`docker exec tar extract failed with exit ${code}: ${stderr.trim()}`));
+        return;
+      }
+      extractDone = true;
+      finishIfDone();
+    });
+  });
+}
+
+async function mirrorExecEnvToContainer(config: HermesPluginConfig, hostExecEnvPath: string, runtimeExecEnvPath: string): Promise<void> {
+  if (!config.mirrorExecEnvToContainer) return;
+  if (config.transport !== "tcp") return;
+  if (!runtimeExecEnvPath.startsWith("/")) return;
+
+  const container = config.hermesContainerName;
+  const runtimeParent = runtimeExecEnvPath.slice(0, Math.max(runtimeExecEnvPath.lastIndexOf("/"), 1));
+  await runCommand("docker", [
+    "exec",
+    container,
+    "sh",
+    "-lc",
+    `mkdir -p ${JSON.stringify(runtimeParent)} && rm -rf ${JSON.stringify(runtimeExecEnvPath)} && mkdir -p ${JSON.stringify(runtimeExecEnvPath)}`,
+  ]);
+  await streamDirectoryToContainer(hostExecEnvPath, container, runtimeExecEnvPath);
+}
+
 export async function buildExecEnv(
   config: HermesPluginConfig,
   input: ExecEnvInput,
@@ -83,8 +196,18 @@ export async function buildExecEnv(
   const hostExecEnvPath = resolveExecEnvHostPath(config, input.taskId);
   const runtimeExecEnvPath = resolveExecEnvRuntimePath(config, input.taskId);
 
-  await rm(hostExecEnvPath, { recursive: true, force: true });
   await mkdir(hostExecEnvPath, { recursive: true });
+
+  // Preserve Hermes-owned runtime state in stable execenv directories so ACP
+  // session resume can reuse the same workdir across turns.
+  await rm(join(hostExecEnvPath, "skills"), { recursive: true, force: true });
+  await rm(join(hostExecEnvPath, "SOUL.md"), { force: true });
+  await rm(join(hostExecEnvPath, "USER.md"), { force: true });
+  await rm(join(hostExecEnvPath, "AGENT.md"), { force: true });
+  await rm(join(hostExecEnvPath, "AGENTS.md"), { force: true });
+  await rm(join(hostExecEnvPath, "TASK.md"), { force: true });
+  await rm(join(hostExecEnvPath, "runtime-config.json"), { force: true });
+  await rm(join(hostExecEnvPath, "projection.json"), { force: true });
   await mkdir(join(hostExecEnvPath, "skills"), { recursive: true });
 
   if (input.contextFiles.soul) {
@@ -95,6 +218,7 @@ export async function buildExecEnv(
   }
   if (input.contextFiles.agent) {
     await writeFile(join(hostExecEnvPath, "AGENT.md"), input.contextFiles.agent, "utf8");
+    await writeFile(join(hostExecEnvPath, "AGENTS.md"), input.contextFiles.agent, "utf8");
   }
   if (input.contextFiles.task) {
     await writeFile(join(hostExecEnvPath, "TASK.md"), input.contextFiles.task, "utf8");
@@ -102,7 +226,7 @@ export async function buildExecEnv(
 
   const projectedSkills: ProjectedSkill[] = [];
   for (const skill of input.projectedSkills) {
-    projectedSkills.push(await copyProjectedSkill(hostExecEnvPath, skill));
+    projectedSkills.push(await copyProjectedSkill(hostExecEnvPath, runtimeExecEnvPath, skill));
   }
 
   await writeFile(
@@ -120,6 +244,7 @@ export async function buildExecEnv(
   });
   const manifestPath = join(hostExecEnvPath, "projection.json");
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  await mirrorExecEnvToContainer(config, hostExecEnvPath, runtimeExecEnvPath);
 
   return {
     hostExecEnvPath,

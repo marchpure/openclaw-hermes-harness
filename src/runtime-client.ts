@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { assembleProjectedContext, serializeProjectedContextForPrompt } from "./context-assembler.js";
 import { buildExecEnv } from "./execenv-builder.js";
 import { classifyWorkspaceSkills } from "./skill-classifier.js";
@@ -16,6 +19,7 @@ export interface PreparedExecution {
   exposedSkills: ProjectedSkill[];
   bootstrapPrompt: string;
   sessionBindingHash: string;
+  sessionAnchor: string;
 }
 
 export interface SessionBindingRecord {
@@ -25,6 +29,44 @@ export interface SessionBindingRecord {
 }
 
 const sessionBindings = new Map<string, SessionBindingRecord>();
+
+function resolveOpenClawStateDir(): string {
+  const configured = process.env.OPENCLAW_STATE_DIR?.trim();
+  if (configured) return configured;
+  return join(homedir(), ".openclaw");
+}
+
+function resolveSessionBindingsStorePath(): string {
+  return join(resolveOpenClawStateDir(), "hermes", "session-bindings.json");
+}
+
+function loadPersistedBindings(): void {
+  const storePath = resolveSessionBindingsStorePath();
+  if (!existsSync(storePath)) return;
+  try {
+    const raw = JSON.parse(readFileSync(storePath, "utf8")) as Record<string, SessionBindingRecord>;
+    for (const [key, value] of Object.entries(raw)) {
+      if (!value || typeof value !== "object") continue;
+      if (typeof value.sessionId !== "string" || typeof value.runtimeExecEnvPath !== "string") continue;
+      sessionBindings.set(key, value);
+    }
+  } catch {
+    // Ignore corrupt cache; runtime can recreate bindings.
+  }
+}
+
+function persistBindings(): void {
+  const storePath = resolveSessionBindingsStorePath();
+  mkdirSync(dirname(storePath), { recursive: true });
+  console.log(`[hermes-acp] Persisting session bindings -> ${storePath} (${sessionBindings.size})`);
+  writeFileSync(
+    storePath,
+    JSON.stringify(Object.fromEntries(sessionBindings.entries()), null, 2) + "\n",
+    "utf8",
+  );
+}
+
+loadPersistedBindings();
 
 function computeSessionBindingHash(input: {
   workspaceDir: string;
@@ -51,21 +93,55 @@ function buildRuntimeRoot(config: HermesPluginConfig): string {
     "/var/cache/hermes-agent/execenv";
 }
 
+function sanitizeSessionAnchor(value: string): string {
+  return value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 120) || "default";
+}
+
+export function resolveStableSessionAnchor(params: {
+  workspaceDir: string;
+  sessionKey?: string;
+  sessionFile?: string;
+  sessionId?: string;
+  agentId?: string;
+}): string {
+  const raw =
+    params.sessionKey?.trim() ||
+    params.sessionFile?.trim() ||
+    params.sessionId?.trim() ||
+    params.agentId?.trim() ||
+    params.workspaceDir;
+
+  return sanitizeSessionAnchor(
+    createHash("sha256")
+      .update(raw)
+      .digest("hex"),
+  );
+}
+
 export async function prepareProjectedExecutionEnv(params: {
   task: string;
   taskId: string;
   workspaceDir: string;
   contextLevel: ContextLevel;
+  includeWorkspaceSkills?: boolean;
   model?: string;
   config: HermesPluginConfig;
+  sessionAnchor?: string;
 }): Promise<PreparedExecution> {
   const projectedContext = await assembleProjectedContext(params.task, params.contextLevel, {
     workspaceDir: params.workspaceDir,
     config: params.config,
+    includeWorkspaceSkills: params.includeWorkspaceSkills,
   });
   const classifiedSkills = classifyWorkspaceSkills(projectedContext.discoveredSkills, params.config);
   const runtimeRoot = buildRuntimeRoot(params.config);
-  const runtimeExecEnvPathHint = `${runtimeRoot}/${params.taskId}`;
+  const sessionAnchor = sanitizeSessionAnchor(params.sessionAnchor ?? params.taskId);
+  const runtimeExecEnvPathHint = `${runtimeRoot}/${sessionAnchor}`;
   const sessionBindingHash = computeSessionBindingHash({
     workspaceDir: params.workspaceDir,
     runtimeExecEnvPath: runtimeExecEnvPathHint,
@@ -75,7 +151,7 @@ export async function prepareProjectedExecutionEnv(params: {
   const execEnv = await buildExecEnv(
     params.config,
     {
-      taskId: params.taskId,
+      taskId: sessionAnchor,
       workspaceDir: params.workspaceDir,
       runtimeRootDir: runtimeRoot,
       contextFiles: projectedContext.files,
@@ -93,8 +169,12 @@ export async function prepareProjectedExecutionEnv(params: {
     execEnv,
     projectedContext,
     exposedSkills: execEnv.projectedSkills,
-    bootstrapPrompt: serializeProjectedContextForPrompt(projectedContext, execEnv.projectedSkills),
+    bootstrapPrompt: serializeProjectedContextForPrompt(projectedContext, execEnv.projectedSkills, {
+      runtimeCwd: execEnv.runtimeExecEnvPath,
+      projectionPath: `${execEnv.runtimeExecEnvPath}/projection.json`,
+    }),
     sessionBindingHash,
+    sessionAnchor,
   };
 }
 
@@ -104,8 +184,14 @@ export function readSessionBinding(bindingHash: string): SessionBindingRecord | 
 
 export function writeSessionBinding(bindingHash: string, record: SessionBindingRecord): void {
   sessionBindings.set(bindingHash, record);
+  console.log(
+    `[hermes-acp] writeSessionBinding hash=${bindingHash.slice(0, 12)} session=${record.sessionId} cwd=${record.runtimeExecEnvPath}`,
+  );
+  persistBindings();
 }
 
 export function clearSessionBinding(bindingHash: string): void {
   sessionBindings.delete(bindingHash);
+  console.log(`[hermes-acp] clearSessionBinding hash=${bindingHash.slice(0, 12)}`);
+  persistBindings();
 }

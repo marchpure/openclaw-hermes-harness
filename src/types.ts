@@ -184,6 +184,8 @@ export interface HermesPluginConfig {
   execEnvRootDir?: string;
   /** Runtime-visible root dir for task-scoped execution envs. Defaults to execEnvRootDir. */
   runtimeExecEnvRootDir?: string;
+  /** If true, mirror host execenvs into the Hermes Docker container before ACP turns. */
+  mirrorExecEnvToContainer: boolean;
   /** Stable schema/version marker used in session binding hashes. */
   projectionVersion: string;
   /** Transport mode: "tcp" (recommended) or "stdio" (docker exec). Default: "tcp" */
@@ -194,6 +196,8 @@ export interface HermesPluginConfig {
   tcpPort: number;
   defaultModel?: string;
   defaultContextLevel: ContextLevel;
+  runtimeMinContextLevel: ContextLevel;
+  runtimeProjectWorkspaceSkills: boolean;
   defaultCredentialScope: CredentialScopeMode;
   defaultWriteback: WritebackLevel;
   timeout: number;
@@ -219,7 +223,11 @@ export const DEFAULT_CONFIG: HermesPluginConfig = {
   tcpHost: "127.0.0.1",
   tcpPort: 3100,
   projectionVersion: "c1c2-v1",
+  runtimeExecEnvRootDir: "/tmp/openclaw-hermes-execenv",
+  mirrorExecEnvToContainer: true,
   defaultContextLevel: "L1",
+  runtimeMinContextLevel: "L2",
+  runtimeProjectWorkspaceSkills: true,
   defaultCredentialScope: "none",
   defaultWriteback: "W1",
   timeout: 1800,

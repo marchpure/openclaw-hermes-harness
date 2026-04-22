@@ -9,9 +9,10 @@ import {
   clearSessionBinding,
   prepareProjectedExecutionEnv,
   readSessionBinding,
+  resolveStableSessionAnchor,
   writeSessionBinding,
 } from "./runtime-client.js";
-import type { AcpSessionEvent, HermesPluginConfig } from "./types.js";
+import type { AcpSessionEvent, ContextLevel, HermesPluginConfig } from "./types.js";
 
 type HarnessMessage = NonNullable<AgentHarnessAttemptResult["messagesSnapshot"]>[number];
 
@@ -49,6 +50,11 @@ const ZERO_ASSISTANT_USAGE = {
   total: 0,
 };
 
+function maxContextLevel(a: ContextLevel, b: ContextLevel): ContextLevel {
+  const order: ContextLevel[] = ["L0", "L1", "L2", "L3"];
+  return order[Math.max(order.indexOf(a), order.indexOf(b))] ?? a;
+}
+
 export function createHermesRuntimeClient(options: {
   config: HermesPluginConfig;
 }): HermesRuntimeClient {
@@ -76,14 +82,26 @@ export async function runHermesHarnessAttempt(
   let assistantStarted = false;
   let reasoningStarted = false;
   let reasoningEnded = false;
+  const sessionAnchor = resolveStableSessionAnchor({
+    workspaceDir: params.workspaceDir,
+    sessionKey: params.sessionKey,
+    sessionFile: params.sessionFile,
+    sessionId: params.sessionId,
+    agentId: params.agentId,
+  });
+  console.log(
+    `[hermes-acp] anchor sessionKey=${params.sessionKey ?? ""} sessionId=${params.sessionId ?? ""} sessionFile=${params.sessionFile ?? ""} agentId=${params.agentId ?? ""} -> ${sessionAnchor}`,
+  );
 
   const execution = await prepareProjectedExecutionEnv({
     task: params.prompt,
-    taskId: `task-${Date.now()}`,
+    taskId: sessionAnchor,
     workspaceDir: params.workspaceDir,
-    contextLevel: config.defaultContextLevel,
+    contextLevel: maxContextLevel(config.defaultContextLevel, config.runtimeMinContextLevel),
+    includeWorkspaceSkills: config.runtimeProjectWorkspaceSkills,
     model: params.modelId,
     config,
+    sessionAnchor,
   });
 
   try {

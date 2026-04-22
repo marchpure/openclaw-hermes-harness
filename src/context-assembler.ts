@@ -93,6 +93,7 @@ function adaptiveMemorySummary(fullMemory: string, maxChars: number): string {
 export interface AssemblerOptions {
   workspaceDir: string;
   config: HermesPluginConfig;
+  includeWorkspaceSkills?: boolean;
 }
 
 /**
@@ -103,7 +104,7 @@ export async function assembleContext(
   level: ContextLevel,
   options: AssemblerOptions,
 ): Promise<ContextPayload> {
-  const { workspaceDir, config } = options;
+  const { workspaceDir, config, includeWorkspaceSkills = false } = options;
   const payload: ContextPayload = { task };
 
   // ── L0: Task + Model Config ───────────────────────────────────────────
@@ -178,7 +179,7 @@ export async function assembleContext(
     payload.memory.daily = dailyMemory;
   }
 
-  if (level === "L2") return payload;
+  if (level === "L2" && !includeWorkspaceSkills) return payload;
 
   // ── L3: + Skills, MCP Servers, Cron ───────────────────────────────────
 
@@ -190,7 +191,9 @@ export async function assembleContext(
 
   // Read skills manifest
   const skillsDir = join(workspaceDir, "skills");
-  payload.skills = await readSkillsManifest(skillsDir);
+  if (level === "L3" || includeWorkspaceSkills) {
+    payload.skills = await readSkillsManifest(skillsDir);
+  }
 
   // Read MCP server config (from OpenClaw config if available)
   // For now, return empty — this would integrate with OpenClaw's config system
@@ -312,6 +315,10 @@ export function serializeContextForPrompt(payload: ContextPayload): string {
 export function serializeProjectedContextForPrompt(
   projected: ProjectedContext,
   exposedSkills: ProjectedSkill[],
+  runtime?: {
+    runtimeCwd: string;
+    projectionPath: string;
+  },
 ): string {
   const parts: string[] = [];
 
@@ -346,9 +353,27 @@ export function serializeProjectedContextForPrompt(
   parts.push(
     [
       "# Runtime Contract",
+      ...(runtime
+        ? [
+            `Projected runtime cwd: ${runtime.runtimeCwd}`,
+            `Projected manifest path: ${runtime.projectionPath}`,
+          ]
+        : []),
       "Only use the skills listed under # Available OpenClaw Skills as OpenClaw-provided capabilities.",
       "If a capability is not listed there, do not claim it is available from the current OpenClaw workspace.",
       "If realtime or browser-based work is requested but no matching OpenClaw skill is listed, explain the limitation naturally instead of exposing internal errors.",
+      ...(runtime
+        ? [
+            "For terminal-style execution, default to the projected runtime cwd above.",
+            "If you need to read the projected manifest or projected skills, use the exact paths above instead of guessing the working directory.",
+          ]
+        : []),
+      ...(exposedSkills.length > 0
+        ? [
+            `Projected OpenClaw skill files:`,
+            ...exposedSkills.map((skill) => `- ${skill.name}: ${skill.projectedPath ?? "(path unavailable)"}`),
+          ]
+        : []),
     ].join("\n"),
   );
 
