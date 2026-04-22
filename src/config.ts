@@ -54,10 +54,6 @@ function readHermesAcpPartialConfig(
   const skillProjection = readObject(input.skillProjection);
   const execEnvCleanup = readObject(input.execEnvCleanup);
   return {
-    ...(readRuntimeMode(input.runtimeMode) ? { runtimeMode: readRuntimeMode(input.runtimeMode) } : {}),
-    ...(readNonEmptyString(input.hermesCommand)
-      ? { hermesCommand: readNonEmptyString(input.hermesCommand) }
-      : {}),
     ...(readNonEmptyString(input.hermesContainerName)
       ? { hermesContainerName: readNonEmptyString(input.hermesContainerName) }
       : {}),
@@ -169,11 +165,8 @@ function readPort(value: unknown): number | undefined {
 }
 
 function readTransport(value: unknown): HermesAcpPluginConfig["transport"] | undefined {
-  return value === "tcp" || value === "stdio" ? value : undefined;
-}
-
-function readRuntimeMode(value: unknown): HermesAcpPluginConfig["runtimeMode"] | undefined {
-  return value === "acp" || value === "app-server" || value === "appserver" ? value : undefined;
+  // The deployed harness only exposes the local TCP bridge. Ignore older transport values.
+  return value === "tcp" ? value : undefined;
 }
 
 function readContextLevel(

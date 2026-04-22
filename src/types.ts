@@ -168,8 +168,6 @@ export interface DispatchResult {
 
 // ─── Plugin Config ──────────────────────────────────────────────────────────
 
-export type TransportMode = "tcp" | "stdio";
-export type HermesRuntimeMode = "acp" | "app-server" | "appserver";
 export type SkillProjectionMode = "strict" | "permissive";
 export type ProjectedCapabilityClass =
   | "projectable-local"
@@ -178,8 +176,6 @@ export type ProjectedCapabilityClass =
   | "unsupported";
 
 export interface HermesPluginConfig {
-  runtimeMode?: HermesRuntimeMode;
-  hermesCommand?: string;
   hermesContainerName: string;
   hermesDataDir?: string;
   /** Host root dir for task-scoped execution envs. Defaults under hermesDataDir. */
@@ -190,11 +186,11 @@ export interface HermesPluginConfig {
   mirrorExecEnvToContainer: boolean;
   /** Stable schema/version marker used in session binding hashes. */
   projectionVersion: string;
-  /** Transport mode: "tcp" (recommended) or "stdio" (docker exec). Default: "tcp" */
-  transport: TransportMode;
-  /** TCP host for Hermes ACP bridge. Default: "127.0.0.1" */
+  /** The local Hermes bridge is TCP-only in the current OpenClaw deployment. */
+  transport: "tcp";
+  /** TCP host for the local Hermes ACP bridge. */
   tcpHost: string;
-  /** TCP port for Hermes ACP bridge. Default: 3100 */
+  /** TCP port for the local Hermes ACP bridge. */
   tcpPort: number;
   defaultModel?: string;
   defaultContextLevel: ContextLevel;

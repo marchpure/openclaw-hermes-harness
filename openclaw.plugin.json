@@ -6,11 +6,6 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "hermesCommand": {
-        "type": "string",
-        "minLength": 1,
-        "description": "Command to invoke hermes-acp. Default: docker exec hermes-agent hermes acp"
-      },
       "hermesContainerName": {
         "type": "string",
         "minLength": 1,
@@ -19,15 +14,6 @@
       "hermesDataDir": {
         "type": "string",
         "description": "Hermes data directory on host (mounted as /opt/data)"
-      },
-      "runtimeMode": {
-        "type": "string",
-        "enum": [
-          "acp",
-          "app-server",
-          "appserver"
-        ],
-        "description": "Hermes runtime mode. Use acp for harness runtime streaming."
       },
       "execEnvRootDir": {
         "type": "string",
@@ -122,10 +108,9 @@
       "transport": {
         "type": "string",
         "enum": [
-          "tcp",
-          "stdio"
+          "tcp"
         ],
-        "description": "Transport mode: tcp (recommended, persistent connection) or stdio (docker exec per task). Default: tcp"
+        "description": "Transport mode: tcp only. Hermes is expected behind the local ACP bridge."
       },
       "tcpHost": {
         "type": "string",
@@ -140,10 +125,6 @@
     }
   },
   "uiHints": {
-    "hermesCommand": {
-      "label": "Hermes Command",
-      "help": "Override the command used to start hermes-acp. Leave empty to use docker exec."
-    },
     "hermesContainerName": {
       "label": "Container Name",
       "help": "Docker container name where Hermes Agent runs."
@@ -151,10 +132,6 @@
     "hermesDataDir": {
       "label": "Data Directory",
       "help": "Host path to Hermes persistent data (config, memories, skills)."
-    },
-    "runtimeMode": {
-      "label": "Runtime Mode",
-      "help": "Hermes runtime mode. Prefer acp for harness runtime event streaming."
     },
     "execEnvRootDir": {
       "label": "ExecEnv Root",

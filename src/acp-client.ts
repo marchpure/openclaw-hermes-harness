@@ -2,18 +2,12 @@
  * openclaw-plugin-hermes — ACP Client
  *
  * Lightweight JSON-RPC client that communicates with Hermes Agent via the
- * Agent Client Protocol (ACP). Supports two transports:
- *
- *   - TCP (recommended): connects to a persistent ACP TCP bridge on port 3100
- *   - stdio: spawns `hermes acp` via docker exec and pipes stdin/stdout
- *
- * Both transports use identical NDJSON framing and JSON-RPC protocol.
+ * Agent Client Protocol (ACP) over the local TCP bridge on port 3100.
  *
  * ACP method names use namespace format:
  *   initialize, session/new, session/prompt, session/cancel, session/close
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
 import * as net from "node:net";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { EventEmitter } from "node:events";
@@ -22,7 +16,6 @@ import type {
   AcpJsonRpcResponse,
   AcpSessionEvent,
   HermesPluginConfig,
-  TransportMode,
 } from "./types.js";
 
 // ─── Logger (plugin-compatible) ─────────────────────────────────────────────
@@ -46,12 +39,7 @@ const STREAM_IDLE_FINALIZE_MS = 2500;
 // ─── ACP Client ─────────────────────────────────────────────────────────────
 
 export class HermesAcpClient extends EventEmitter {
-  // stdio transport
-  private child: ChildProcess | null = null;
-  // TCP transport
   private socket: net.Socket | null = null;
-  // shared
-  private transport: TransportMode;
   private readline: ReadlineInterface | null = null;
   private requestId = 0;
   private pendingRequests = new Map<
@@ -69,28 +57,24 @@ export class HermesAcpClient extends EventEmitter {
   ) {
     super();
     this.logger = logger ?? defaultLogger;
-    this.transport = config.transport ?? "tcp";
   }
 
   // ─── Lifecycle ──────────────────────────────────────────────────────────
 
   /**
-   * Connect to Hermes via TCP or spawn a stdio process, then initialize ACP.
-   * @param env Extra environment variables to inject (credentials) — stdio only
-   * @param cwd Working directory for the Hermes process — stdio only
+   * Connect to Hermes over the local ACP TCP bridge, then initialize ACP.
+   * The signature still accepts env/cwd because higher-level callers pass them
+   * as part of the shared runtime contract, even though the TCP bridge ignores them.
    */
-  async start(env?: Record<string, string>, cwd?: string): Promise<void> {
+  async start(_env?: Record<string, string>, _cwd?: string): Promise<void> {
     if (this.connected) {
       throw new Error("ACP client already connected");
     }
 
-    if (this.transport === "tcp") {
-      await this.startTcp();
-    } else {
-      await this.startStdio(env, cwd);
-    }
+    await this.startTcp();
 
-    // Initialize the ACP connection (same for both transports)
+    // Initialize immediately after the socket is live so callers fail fast if
+    // the local bridge is reachable but not speaking ACP correctly.
     const initResult = await this.sendRequest("initialize", {
       protocol_version: 1,
       client_info: { name: "openclaw-plugin-hermes", version: "1.0.0" },
@@ -98,7 +82,7 @@ export class HermesAcpClient extends EventEmitter {
     });
 
     this.connected = true;
-    this.logger.info(`ACP initialized (${this.transport}): ${JSON.stringify(initResult)}`);
+    this.logger.info(`ACP initialized (tcp): ${JSON.stringify(initResult)}`);
   }
 
   // ─── TCP Transport ────────────────────────────────────────────────────
@@ -144,60 +128,6 @@ export class HermesAcpClient extends EventEmitter {
         this.rejectAllPending(new Error("TCP connection closed"));
         this.emit("exit", { code: null, signal: null });
       });
-    });
-  }
-
-  // ─── stdio Transport ──────────────────────────────────────────────────
-
-  private startStdio(env?: Record<string, string>, cwd?: string): Promise<void> {
-    return new Promise((resolve) => {
-      const { command, args } = this.buildSpawnCommand();
-      this.logger.info(`Spawning: ${command} ${args.join(" ")}`);
-
-      const childEnv = {
-        ...process.env,
-        ...(env ?? {}),
-      };
-
-      this.child = spawn(command, args, {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: childEnv,
-        cwd: cwd ?? undefined,
-      });
-
-      // Collect stderr for diagnostics
-      this.child.stderr?.on("data", (chunk: Buffer) => {
-        const text = chunk.toString();
-        this.stderr += text;
-        if (this.stderr.length > 8192) {
-          this.stderr = this.stderr.slice(-4096);
-        }
-        this.logger.debug?.(`stderr: ${text.trimEnd()}`);
-      });
-
-      // Set up line-by-line JSON-RPC reader on stdout
-      this.readline = createInterface({ input: this.child.stdout! });
-      this.readline.on("line", (line: string) => this.handleLine(line));
-
-      // Handle process exit
-      this.child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-        this.connected = false;
-        this.logger.info(`hermes-acp exited: code=${code} signal=${signal}`);
-        this.rejectAllPending(new Error(`hermes-acp exited with code ${code}`));
-        this.emit("exit", { code, signal });
-      });
-
-      this.child.on("error", (err: Error) => {
-        this.connected = false;
-        this.logger.error(`hermes-acp spawn error: ${err.message}`);
-        this.rejectAllPending(err);
-        this.emit("error", err);
-      });
-
-      // Suppress EPIPE on stdin
-      this.child.stdin?.on("error", () => {});
-
-      resolve();
     });
   }
 
@@ -399,24 +329,9 @@ export class HermesAcpClient extends EventEmitter {
     this.readline?.close();
     this.readline = null;
 
-    if (this.transport === "tcp") {
-      // TCP cleanup
-      if (this.socket) {
-        this.socket.destroy();
-        this.socket = null;
-      }
-    } else {
-      // stdio cleanup
-      if (this.child && !this.child.killed) {
-        this.child.stdin?.end();
-        this.child.kill("SIGTERM");
-        setTimeout(() => {
-          if (this.child && !this.child.killed) {
-            this.child.kill("SIGKILL");
-          }
-        }, 5000);
-      }
-      this.child = null;
+    if (this.socket) {
+      this.socket.destroy();
+      this.socket = null;
     }
 
     this.sessionId = null;
@@ -438,41 +353,14 @@ export class HermesAcpClient extends EventEmitter {
     return this.stderr;
   }
 
-  /** Get the active transport mode */
-  get activeTransport(): TransportMode {
-    return this.transport;
-  }
-
   // ─── Internal: I/O ──────────────────────────────────────────────────────
 
-  private buildSpawnCommand(): { command: string; args: string[] } {
-    if (this.config.hermesCommand) {
-      const parts = this.config.hermesCommand.split(/\s+/);
-      return { command: parts[0], args: parts.slice(1) };
-    }
-    return {
-      command: "docker",
-      args: [
-        "exec", "-i", this.config.hermesContainerName,
-        "bash", "-c",
-        "source /opt/hermes/.venv/bin/activate && hermes acp",
-      ],
-    };
-  }
-
-  /** Write NDJSON data to the active transport */
+  /** Write one NDJSON frame to the active TCP socket. */
   private writeData(data: string): void {
-    if (this.transport === "tcp") {
-      if (!this.socket || this.socket.destroyed) {
-        throw new Error("TCP socket not connected");
-      }
-      this.socket.write(data);
-    } else {
-      if (!this.child?.stdin?.writable) {
-        throw new Error("ACP client not connected (stdio)");
-      }
-      this.child.stdin.write(data);
+    if (!this.socket || this.socket.destroyed) {
+      throw new Error("TCP socket not connected");
     }
+    this.socket.write(data);
   }
 
   private async sendRequest(method: string, params?: Record<string, unknown>): Promise<unknown> {

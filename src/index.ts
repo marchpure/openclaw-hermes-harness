@@ -21,6 +21,8 @@ import { cleanupExecEnvs } from "./execenv-builder.js";
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
 function resolveConfig(raw: unknown): HermesPluginConfig {
+  // Keep config normalization at the boundary so the rest of the runtime can
+  // assume a single resolved shape that matches the local OpenClaw deployment.
   return resolveHermesAcpConfig(raw);
 }
 
@@ -44,6 +46,8 @@ const plugin = {
       error: (msg: string, ...args: unknown[]) => api.logger?.error?.(msg, ...args) ?? console.error(`[hermes] ${msg}`),
     };
 
+    // Cleanup is fire-and-forget so plugin registration stays cheap even when
+    // a previous run left many projected execenv directories behind.
     void cleanupExecEnvs(config).catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn(`execenv cleanup skipped: ${msg}`);
