@@ -353,7 +353,7 @@ async function main(): Promise<void> {
   assert(callbackEvents.includes("reasoning-end"), "onReasoningEnd should fire");
   assert(reasoningChunks.join("").includes("inspect gateway attempt"), "onReasoningStream should receive ACP thinking text");
   assert(partialReplies.join("") === result.assistantText, "onPartialReply should receive assistant deltas");
-  assert(toolResults[0] === "attempt metadata accepted", "onToolResult should receive ACP tool result text");
+  assert(toolResults.length === 0, "onToolResult should not surface raw ACP tool result text");
   assert(agentEvents.some((event) => event.stream === "assistant"), "onAgentEvent should receive assistant stream events");
   assert(agentEvents.some((event) => event.stream === "thinking"), "onAgentEvent should receive thinking stream events");
   assert(agentEvents.some((event) => event.stream === "tool"), "onAgentEvent should receive tool stream events");

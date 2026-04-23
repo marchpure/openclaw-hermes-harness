@@ -440,7 +440,6 @@ async function handleHarnessEvent(
           : {}),
       },
     });
-    void params.onToolResult?.({ text: outputText });
     return;
   }
 
