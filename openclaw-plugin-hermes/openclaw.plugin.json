@@ -1,20 +1,11 @@
 {
-  "id": "openclaw-plugin-hermes",
+  "id": "hermes",
   "name": "Hermes Agent",
   "description": "Delegate heavy tasks (terminal, browser, code execution) to a containerized Hermes Agent via ACP.",
-  "permissions": {
-    "reason": "Requires Docker exec for health checks and stdio ACP transport, and TCP sockets for ACP bridge communication.",
-    "requires": ["net"]
-  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "hermesCommand": {
-        "type": "string",
-        "minLength": 1,
-        "description": "Command to invoke hermes-acp. Default: docker exec hermes-agent hermes acp"
-      },
       "hermesContainerName": {
         "type": "string",
         "minLength": 1,
@@ -23,6 +14,18 @@
       "hermesDataDir": {
         "type": "string",
         "description": "Hermes data directory on host (mounted as /opt/data)"
+      },
+      "execEnvRootDir": {
+        "type": "string",
+        "description": "Host root directory for task-scoped Hermes execution environments"
+      },
+      "runtimeExecEnvRootDir": {
+        "type": "string",
+        "description": "Runtime-visible root directory for Hermes execution environments"
+      },
+      "projectionVersion": {
+        "type": "string",
+        "description": "Stable projection version used for session binding and execenv manifests"
       },
       "defaultModel": {
         "type": "string",
@@ -70,13 +73,33 @@
         "type": "boolean",
         "description": "Enable the layered dispatch protocol (L/C/W). When disabled, tasks are sent directly to Hermes without strategy inference, context assembly, or credential injection. Default: true"
       },
+      "skillProjection": {
+        "type": "object",
+        "description": "Controls which OpenClaw workspace skills are exposed to Hermes",
+        "additionalProperties": false,
+        "properties": {
+          "hostBackedDenylist": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "execEnvCleanup": {
+        "type": "object",
+        "description": "Cleanup policy for old projected execution environments",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "maxAgeHours": { "type": "number", "minimum": 1 },
+          "maxCount": { "type": "number", "minimum": 1 }
+        }
+      },
       "transport": {
         "type": "string",
         "enum": [
-          "tcp",
-          "stdio"
+          "tcp"
         ],
-        "description": "Transport mode: tcp (recommended, persistent connection) or stdio (docker exec per task). Default: tcp"
+        "description": "Transport mode: tcp only. Hermes is expected behind the local ACP bridge."
       },
       "tcpHost": {
         "type": "string",
@@ -91,10 +114,6 @@
     }
   },
   "uiHints": {
-    "hermesCommand": {
-      "label": "Hermes Command",
-      "help": "Override the command used to start hermes-acp. Leave empty to use docker exec."
-    },
     "hermesContainerName": {
       "label": "Container Name",
       "help": "Docker container name where Hermes Agent runs."
@@ -102,6 +121,14 @@
     "hermesDataDir": {
       "label": "Data Directory",
       "help": "Host path to Hermes persistent data (config, memories, skills)."
+    },
+    "execEnvRootDir": {
+      "label": "ExecEnv Root",
+      "help": "Host path where the plugin writes task-scoped projected execution environments."
+    },
+    "runtimeExecEnvRootDir": {
+      "label": "Runtime ExecEnv Root",
+      "help": "Path visible from Hermes runtime for the same projected execution environments."
     },
     "defaultModel": {
       "label": "Default Model",

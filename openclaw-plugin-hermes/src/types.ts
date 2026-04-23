@@ -168,26 +168,46 @@ export interface DispatchResult {
 
 // ─── Plugin Config ──────────────────────────────────────────────────────────
 
-export type TransportMode = "tcp" | "stdio";
+export type ProjectedCapabilityClass =
+  | "projectable-local"
+  | "host-backed"
+  | "unsupported";
 
 export interface HermesPluginConfig {
-  hermesCommand?: string;
   hermesContainerName: string;
   hermesDataDir?: string;
-  /** Transport mode: "tcp" (recommended) or "stdio" (docker exec). Default: "tcp" */
-  transport: TransportMode;
-  /** TCP host for Hermes ACP bridge. Default: "127.0.0.1" */
+  /** Host root dir for task-scoped execution envs. Defaults under hermesDataDir. */
+  execEnvRootDir?: string;
+  /** Runtime-visible root dir for task-scoped execution envs. Defaults to execEnvRootDir. */
+  runtimeExecEnvRootDir?: string;
+  /** If true, mirror host execenvs into the Hermes Docker container before ACP turns. */
+  mirrorExecEnvToContainer: boolean;
+  /** Stable schema/version marker used in session binding hashes. */
+  projectionVersion: string;
+  /** The local Hermes bridge is TCP-only in the current OpenClaw deployment. */
+  transport: "tcp";
+  /** TCP host for the local Hermes ACP bridge. */
   tcpHost: string;
-  /** TCP port for Hermes ACP bridge. Default: 3100 */
+  /** TCP port for the local Hermes ACP bridge. */
   tcpPort: number;
   defaultModel?: string;
   defaultContextLevel: ContextLevel;
+  runtimeMinContextLevel: ContextLevel;
+  runtimeProjectWorkspaceSkills: boolean;
   defaultCredentialScope: CredentialScopeMode;
   defaultWriteback: WritebackLevel;
   timeout: number;
   autoStrategy: boolean;
-  /** 是否启用分层协议（L/C/W），关闭后直接派发任务 */
+  /** Enable the layered L/C/W dispatch path. Disabled means direct dispatch. */
   enableLayeredProtocol: boolean;
+  skillProjection: {
+    hostBackedDenylist: string[];
+  };
+  execEnvCleanup: {
+    enabled: boolean;
+    maxAgeHours: number;
+    maxCount: number;
+  };
 }
 
 export const DEFAULT_CONFIG: HermesPluginConfig = {
@@ -195,12 +215,25 @@ export const DEFAULT_CONFIG: HermesPluginConfig = {
   transport: "tcp",
   tcpHost: "127.0.0.1",
   tcpPort: 3100,
+  projectionVersion: "c1c2-v1",
+  runtimeExecEnvRootDir: "/tmp/openclaw-hermes-execenv",
+  mirrorExecEnvToContainer: true,
   defaultContextLevel: "L1",
+  runtimeMinContextLevel: "L2",
+  runtimeProjectWorkspaceSkills: true,
   defaultCredentialScope: "none",
   defaultWriteback: "W1",
   timeout: 1800,
   autoStrategy: true,
   enableLayeredProtocol: true,
+  skillProjection: {
+    hostBackedDenylist: ["browser", "feishu"],
+  },
+  execEnvCleanup: {
+    enabled: true,
+    maxAgeHours: 24,
+    maxCount: 200,
+  },
 };
 
 // ─── ACP Protocol Types ─────────────────────────────────────────────────────
@@ -254,6 +287,70 @@ export interface ContextPayload {
   skills?: Array<{ name: string; path: string; description?: string }>;
   mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
   cronDefinitions?: Array<{ schedule: string; task: string; enabled: boolean }>;
+}
+
+// ─── Execution Projection ──────────────────────────────────────────────────
+
+export interface SkillManifestEntry {
+  name: string;
+  path: string;
+  description?: string;
+}
+
+export interface ProjectedSkill extends SkillManifestEntry {
+  classification: ProjectedCapabilityClass;
+  sourcePath?: string;
+  projectedPath?: string;
+}
+
+export interface ProjectedContextFiles {
+  soul?: string;
+  user?: string;
+  agent?: string;
+  task?: string;
+}
+
+export interface ProjectedContext {
+  files: ProjectedContextFiles;
+  memory?: ContextPayload["memory"];
+  commandAllowlist?: string[];
+  discoveredSkills: SkillManifestEntry[];
+}
+
+export interface ExecEnvInput {
+  taskId: string;
+  workspaceDir: string;
+  contextFiles: ProjectedContextFiles;
+  projectedSkills: ProjectedSkill[];
+  runtimeConfig: Record<string, unknown>;
+}
+
+export interface ExecEnvManifest {
+  version: string;
+  taskId: string;
+  hostWorkspaceDir: string;
+  runtimeCwd: string;
+  files: {
+    soul?: string;
+    user?: string;
+    agent?: string;
+    task?: string;
+  };
+  skills: ProjectedSkill[];
+  hashes: {
+    workspace: string;
+    skills: string;
+    projection: string;
+    sessionBinding: string;
+  };
+}
+
+export interface ExecEnvBuildResult {
+  hostExecEnvPath: string;
+  runtimeExecEnvPath: string;
+  manifestPath: string;
+  projectedSkills: ProjectedSkill[];
+  sessionBindingHash: string;
 }
 
 // ─── Credential Entry ───────────────────────────────────────────────────────

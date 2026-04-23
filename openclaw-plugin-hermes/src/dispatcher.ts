@@ -10,10 +10,19 @@
  */
 
 import { HermesAcpClient } from "./acp-client.js";
-import { assembleContext, serializeContextForPrompt } from "./context-assembler.js";
 import { injectCredentials, buildDockerEnvFlags } from "./credential-injector.js";
 import { processResult, applyWriteback } from "./result-processor.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
+import {
+  mirrorWorkspaceFromContainer,
+  mirrorWorkspaceToContainer,
+} from "./execenv-builder.js";
+import {
+  clearSessionBinding,
+  prepareProjectedExecutionEnv,
+  readSessionBinding,
+  writeSessionBinding,
+} from "./runtime-client.js";
 import type {
   DispatchRequest,
   DispatchResult,
@@ -33,6 +42,41 @@ interface Logger {
   error(msg: string, ...args: unknown[]): void;
 }
 
+async function resumeOrCreateSession(params: {
+  acpClient: HermesAcpClient;
+  runtimeExecEnvPath: string;
+  bindingHash: string;
+  logger?: Logger;
+}): Promise<string> {
+  const existingBinding = readSessionBinding(params.bindingHash);
+  if (existingBinding && existingBinding.runtimeExecEnvPath === params.runtimeExecEnvPath) {
+    try {
+      const resumed = await params.acpClient.resumeSession(
+        existingBinding.sessionId,
+        params.runtimeExecEnvPath,
+      );
+      writeSessionBinding(params.bindingHash, {
+        sessionId: resumed,
+        runtimeExecEnvPath: params.runtimeExecEnvPath,
+        bindingHash: params.bindingHash,
+      });
+      return resumed;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      params.logger?.warn(`Session resume failed; creating a new session instead: ${msg}`);
+      clearSessionBinding(params.bindingHash);
+    }
+  }
+
+  const created = await params.acpClient.newSession(params.runtimeExecEnvPath);
+  writeSessionBinding(params.bindingHash, {
+    sessionId: created,
+    runtimeExecEnvPath: params.runtimeExecEnvPath,
+    bindingHash: params.bindingHash,
+  });
+  return created;
+}
+
 // ─── Dispatcher ─────────────────────────────────────────────────────────────
 
 export interface DispatcherOptions {
@@ -41,8 +85,6 @@ export interface DispatcherOptions {
   logger?: Logger;
   /** Callback for W3 confirmation prompts */
   confirmAction?: (description: string) => Promise<boolean>;
-  /** 外部传入的取消信号，用于在用户终止对话时取消 Hermes 任务 */
-  signal?: AbortSignal;
 }
 
 /**
@@ -55,17 +97,12 @@ export async function dispatchToHermes(
   request: DispatchRequest,
   options: DispatcherOptions,
 ): Promise<DispatchResult> {
-  const { config, workspaceDir, logger, signal } = options;
+  const { config, workspaceDir, logger } = options;
   const startTime = Date.now();
-
-  // Early abort check
-  if (signal?.aborted) {
-    return makeCancelledResult("Aborted before dispatch", inferDefaultStrategy(request, config), startTime);
-  }
 
   // 当分层协议关闭时，直接派发原始任务给 Hermes，跳过策略/上下文/凭证/回写
   if (!config.enableLayeredProtocol) {
-    return dispatchDirectly(request, config, workspaceDir, logger, startTime, signal);
+    return dispatchDirectly(request, config, workspaceDir, logger, startTime);
   }
 
   // ── Step 1: Determine Strategy ──────────────────────────────────────
@@ -105,10 +142,14 @@ export async function dispatchToHermes(
 
   // ── Step 2: Assemble Context ────────────────────────────────────────
 
-  let contextPayload;
+  let execution;
   try {
-    contextPayload = await assembleContext(request.task, strategy.context, {
+    execution = await prepareProjectedExecutionEnv({
+      task: request.task,
+      taskId: `task-${Date.now()}`,
       workspaceDir,
+      contextLevel: strategy.context,
+      model: request.model,
       config,
     });
   } catch (err) {
@@ -117,13 +158,7 @@ export async function dispatchToHermes(
     return makeErrorResult("Context assembly failed: " + msg, strategy, startTime);
   }
 
-  // Override model if specified in request
-  if (request.model && contextPayload.modelConfig) {
-    contextPayload.modelConfig.model = request.model;
-  }
-
-  // Serialize context into a prompt string
-  const promptText = serializeContextForPrompt(contextPayload);
+  const promptText = execution.bootstrapPrompt;
 
   // ── Step 3: Inject Credentials ──────────────────────────────────────
 
@@ -141,54 +176,38 @@ export async function dispatchToHermes(
   let tokensUsed = 0;
 
   try {
+    await mirrorWorkspaceToContainer(config, workspaceDir);
+
     // Start ACP connection with injected credentials
-    await acpClient.start(credentialResult.envVars, workspaceDir);
+    await acpClient.start(credentialResult.envVars, execution.execEnv.runtimeExecEnvPath);
 
-    // Create session
-    const sessionId = await acpClient.newSession(workspaceDir);
+    // Resume or create session based on execenv binding.
+    const sessionId = await resumeOrCreateSession({
+      acpClient,
+      runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
+      bindingHash: execution.sessionBindingHash,
+      logger,
+    });
 
-    // Wire up abort signal → send cancel notification to Hermes before closing
-    const abortHandler = () => {
-      logger?.info("Abort signal received — cancelling Hermes session");
-      acpClient.cancel(sessionId);  // synchronous notification, fire-and-forget
-    };
+    // Send the prompt
+    const timeout = (request.timeout ?? config.timeout) * 1000;
+    const result = await acpClient.prompt(promptText, sessionId, { timeout });
 
-    if (signal) {
-      if (signal.aborted) {
-        acpClient.cancel(sessionId);
-        await acpClient.close().catch(() => {});
-        return makeCancelledResult("Aborted before prompt", strategy, startTime);
-      }
-      signal.addEventListener("abort", abortHandler, { once: true });
-    }
+    acpText = result.text;
+    acpEvents = result.events;
+    tokensUsed = result.usage?.total_tokens ?? 0;
 
-    try {
-      const timeout = (request.timeout ?? config.timeout) * 1000;
-      const result = await acpClient.prompt(promptText, sessionId, { timeout, signal });
-
-      acpText = result.text;
-      acpEvents = result.events;
-      tokensUsed = result.usage?.total_tokens ?? 0;
-
-      logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
-    } finally {
-      if (signal) {
-        signal.removeEventListener("abort", abortHandler);
-      }
-    }
+    logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
+    await mirrorWorkspaceFromContainer(config, workspaceDir);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-
-    // Check if it was an abort
-    if (signal?.aborted || msg.includes("aborted") || msg.includes("Prompt aborted")) {
-      logger?.info("Hermes task cancelled via abort signal");
-      return makeCancelledResult("Task cancelled", strategy, startTime);
-    }
-
     logger?.error(`Hermes execution failed: ${msg}`);
+
+    // Check if it's a timeout
     if (msg.includes("timed out")) {
       return makeTimeoutResult(msg, strategy, startTime);
     }
+    clearSessionBinding(execution.sessionBindingHash);
     return makeErrorResult("Hermes execution failed: " + msg, strategy, startTime);
   } finally {
     await acpClient.close().catch(() => {});
@@ -261,30 +280,6 @@ function makeTimeoutResult(
   };
 }
 
-function makeCancelledResult(
-  message: string,
-  strategy: StrategyTriple,
-  startTime: number,
-): DispatchResult {
-  return {
-    status: "cancelled",
-    result: message,
-    tokensUsed: 0,
-    duration: Date.now() - startTime,
-    strategy,
-  };
-}
-
-function inferDefaultStrategy(request: DispatchRequest, config: HermesPluginConfig): StrategyTriple {
-  return {
-    context: request.contextLevel ?? config.defaultContextLevel,
-    credential: request.credentialScope ?? { mode: config.defaultCredentialScope },
-    writeback: request.writeback ?? config.defaultWriteback,
-    confidence: 0,
-    reasoning: "Default (cancelled before strategy inference)",
-  };
-}
-
 /**
  * 直接派发模式：跳过分层协议，将原始 task 文本直接发送给 Hermes。
  * 不执行策略推断、上下文组装、凭证注入和结果回写。
@@ -295,7 +290,6 @@ async function dispatchDirectly(
   workspaceDir: string,
   logger: Logger | undefined,
   startTime: number,
-  signal?: AbortSignal,
 ): Promise<DispatchResult> {
   const bypassStrategy: StrategyTriple = {
     context: "L0",
@@ -310,17 +304,34 @@ async function dispatchDirectly(
   const acpClient = new HermesAcpClient(config, logger as any);
   let acpText = "";
   let tokensUsed = 0;
+  let bindingHash: string | null = null;
 
   try {
-    await acpClient.start({}, workspaceDir);
-    const sessionId = await acpClient.newSession(workspaceDir);
+    const execution = await prepareProjectedExecutionEnv({
+      task: request.task,
+      taskId: `task-${Date.now()}`,
+      workspaceDir,
+      contextLevel: "L0",
+      model: request.model,
+      config,
+    });
+    bindingHash = execution.sessionBindingHash;
+    await mirrorWorkspaceToContainer(config, workspaceDir);
+    await acpClient.start({}, execution.execEnv.runtimeExecEnvPath);
+    const sessionId = await resumeOrCreateSession({
+      acpClient,
+      runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
+      bindingHash: execution.sessionBindingHash,
+      logger,
+    });
     const timeout = (request.timeout ?? config.timeout) * 1000;
-    const result = await acpClient.prompt(request.task, sessionId, { timeout, signal });
+    const result = await acpClient.prompt(request.task, sessionId, { timeout });
 
     acpText = result.text;
     tokensUsed = result.usage?.total_tokens ?? 0;
 
     logger?.info(`Direct dispatch completed: ${acpText.length} chars, ${tokensUsed} tokens`);
+    await mirrorWorkspaceFromContainer(config, workspaceDir);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger?.error(`Direct dispatch failed: ${msg}`);
@@ -328,12 +339,9 @@ async function dispatchDirectly(
     if (msg.includes("timed out")) {
       return makeTimeoutResult(msg, bypassStrategy, startTime);
     }
-    if (msg.includes("aborted") || signal?.aborted) {
-      return makeCancelledResult("Task cancelled by user", bypassStrategy, startTime);
-    }
+    if (bindingHash) clearSessionBinding(bindingHash);
     return makeErrorResult("Direct dispatch failed: " + msg, bypassStrategy, startTime);
   } finally {
-    acpClient.cancel();
     await acpClient.close().catch(() => {});
   }
 
