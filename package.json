@@ -10,7 +10,6 @@
     "openclaw.plugin.json",
     "README.md",
     "AGENTS.md",
-    "RUNTIME-REGRESSION.md",
     "tsconfig.json"
   ],
   "openclaw": {

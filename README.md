@@ -70,7 +70,6 @@ npm install
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `hermesCommand` | string | `docker exec -i hermes-agent hermes acp` | 自定义 hermes-acp 启动命令 |
 | `hermesContainerName` | string | `hermes-agent` | Docker 容器名 |
 | `hermesDataDir` | string | — | Hermes 数据目录 (宿主机路径) |
 | `execEnvRootDir` | string | `<hermesDataDir>/execenv` | 宿主机上的 task-scoped execenv 根目录 |
@@ -83,6 +82,7 @@ npm install
 | `timeout` | number | `1800` | 超时秒数 |
 | `autoStrategy` | boolean | `true` | 自动推断策略 |
 | `enableLayeredProtocol` | boolean | `true` | 启用分层协议（L/C/W），关闭后直接派发任务 |
+| `transport` | string | `tcp` | 当前实现只支持本地 Hermes ACP TCP bridge |
 | `skillProjection.mode` | strict/permissive | `strict` | skill 暴露过滤模式 |
 | `skillProjection.hostBackedDenylist` | string[] | `["browser","feishu"]` | 会被识别并过滤掉的 host-backed skill 名称 |
 | `execEnvCleanup.maxCount` | number | `200` | 最多保留多少个历史 execenv 目录 |
@@ -175,19 +175,19 @@ hermes_strategy({ task: "创建一个 GitHub Actions CI 技能" })
 
 ## 通信协议
 
-插件通过 ACP (Agent Client Protocol) 与 Hermes 通信：
+插件通过本地 ACP TCP bridge 与 Hermes 通信：
 
 ```
-OpenClaw ──stdio──► docker exec hermes-agent hermes acp
-    │                     │
-    │  JSON-RPC           │
-    │  ← initialize       │
-    │  → new_session      │
-    │  ← session_id       │
-    │  → prompt           │
-    │  ← streaming events │
-    │  ← done             │
-    │  → close            │
+OpenClaw ──TCP──► 127.0.0.1:3100 (Hermes ACP bridge)
+    │
+    │  JSON-RPC
+    │  ← initialize
+    │  → session/new
+    │  ← session_id
+    │  → session/prompt
+    │  ← streaming events
+    │  ← done / terminal payload
+    │  → session/close
 ```
 
 ## 安全
