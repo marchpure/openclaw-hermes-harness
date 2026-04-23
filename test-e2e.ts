@@ -16,6 +16,10 @@ import { injectCredentials } from "./src/credential-injector.js";
 import { checkHealth, formatHealthReport } from "./src/health.js";
 import { DEFAULT_CONFIG } from "./src/types.js";
 import type { HermesPluginConfig } from "./src/types.js";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { prepareProjectedExecutionEnv } from "./src/runtime-client.js";
 
 const config: HermesPluginConfig = {
   ...DEFAULT_CONFIG,
@@ -169,6 +173,57 @@ async function testAcpE2E() {
   }
 }
 
+// ─── Test 6: Projection Runtime Path ───────────────────────────────────────
+
+async function testProjectionRuntime() {
+  section("Test 6: Execution Projection");
+
+  const workspace = await mkdtemp(join(tmpdir(), "hermes-runtime-e2e-"));
+  await writeFile(join(workspace, "SOUL.md"), "You are a finance research agent.", "utf8");
+  await writeFile(join(workspace, "USER.md"), "The user is Hao Xingjun.", "utf8");
+  await writeFile(join(workspace, "AGENTS.md"), "Prefer concise, factual answers.", "utf8");
+  await mkdir(join(workspace, "skills", "summary-helper"), { recursive: true });
+  await writeFile(
+    join(workspace, "skills", "summary-helper", "SKILL.md"),
+    "# Summary Helper\n\nSummarize in 3 lines.",
+    "utf8",
+  );
+  await mkdir(join(workspace, "skills", "browser"), { recursive: true });
+  await writeFile(
+    join(workspace, "skills", "browser", "SKILL.md"),
+    "# Browser\n\nSearch the web.",
+    "utf8",
+  );
+
+  const runtimeConfig: HermesPluginConfig = {
+    ...config,
+    hermesDataDir: join(workspace, ".hermes-data"),
+  };
+
+  const execution = await prepareProjectedExecutionEnv({
+    task: "Summarize market news.",
+    taskId: "task-e2e",
+    workspaceDir: workspace,
+    contextLevel: "L3",
+    config: runtimeConfig,
+  });
+
+  ok(`ExecEnv 已创建: ${execution.execEnv.runtimeExecEnvPath}`);
+  ok(`暴露技能: ${execution.exposedSkills.map((skill) => skill.name).join(", ") || "(none)"}`);
+
+  if (execution.exposedSkills.some((skill) => skill.name === "browser")) {
+    fail("browser 不应出现在投影后的 OpenClaw skills 中");
+  } else {
+    ok("browser 已正确过滤");
+  }
+
+  if (execution.bootstrapPrompt.includes("**browser**")) {
+    fail("bootstrap prompt 不应声明 browser 可用");
+  } else {
+    ok("bootstrap prompt 已正确去除 browser 暴露");
+  }
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -192,6 +247,9 @@ async function main() {
 
   // Test 5
   await testAcpE2E();
+
+  // Test 6
+  await testProjectionRuntime();
 
   section("全部测试完成 ✅");
 }

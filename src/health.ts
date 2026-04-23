@@ -113,16 +113,8 @@ async function getContainerStats(
 }
 
 async function getHermesVersion(config: HermesPluginConfig): Promise<string> {
-  if (config.hermesCommand) {
-    const parts = config.hermesCommand.split(/\s+/);
-    const versionCmd = parts[0];
-    const versionArgs = [...parts.slice(1).filter((a) => a !== "acp"), "version"];
-    const { stdout } = await execFileAsync(versionCmd, versionArgs, {
-      timeout: EXEC_TIMEOUT,
-    });
-    return stdout.trim();
-  }
-
+  // Health checks intentionally use docker exec instead of the ACP socket so we
+  // can distinguish "container is alive" from "bridge port is reachable".
   const { stdout } = await execFileAsync(
     "docker",
     buildHermesExecArgs(config.hermesContainerName, ["version"]),
@@ -133,18 +125,11 @@ async function getHermesVersion(config: HermesPluginConfig): Promise<string> {
 
 async function checkAcpResponsive(config: HermesPluginConfig): Promise<boolean> {
   try {
-    if (config.hermesCommand) {
-      const parts = config.hermesCommand.split(/\s+/);
-      await execFileAsync(parts[0], [...parts.slice(1), "--help"], {
-        timeout: EXEC_TIMEOUT,
-      });
-    } else {
-      await execFileAsync(
-        "docker",
-        buildHermesExecArgs(config.hermesContainerName, ["acp", "--help"]),
-        { timeout: EXEC_TIMEOUT },
-      );
-    }
+    await execFileAsync(
+      "docker",
+      buildHermesExecArgs(config.hermesContainerName, ["acp", "--help"]),
+      { timeout: EXEC_TIMEOUT },
+    );
     return true;
   } catch {
     return false;

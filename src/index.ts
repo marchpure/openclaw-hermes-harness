@@ -9,39 +9,21 @@
  * OpenClaw is the brain, Hermes is the hands.
  */
 
+import { resolveHermesAcpConfig } from "./config.js";
 import { dispatchToHermes } from "./dispatcher.js";
+import { createHermesAgentHarness } from "./harness.js";
 import { checkHealth, formatHealthReport } from "./health.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
-import type { HermesPluginConfig, DispatchRequest, HealthReport } from "./types.js";
-import { DEFAULT_CONFIG } from "./types.js";
+import { buildHermesProvider } from "./provider.js";
+import type { HermesPluginConfig, DispatchRequest } from "./types.js";
+import { cleanupExecEnvs } from "./execenv-builder.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
 function resolveConfig(raw: unknown): HermesPluginConfig {
-  const input = (raw ?? {}) as Record<string, unknown>;
-  return {
-    hermesCommand: (input.hermesCommand as string) ?? undefined,
-    hermesContainerName: (input.hermesContainerName as string) ?? DEFAULT_CONFIG.hermesContainerName,
-    hermesDataDir: (input.hermesDataDir as string) ?? undefined,
-    defaultModel: (input.defaultModel as string) ?? undefined,
-    defaultContextLevel:
-      (input.defaultContextLevel as HermesPluginConfig["defaultContextLevel"]) ??
-      DEFAULT_CONFIG.defaultContextLevel,
-    defaultCredentialScope:
-      (input.defaultCredentialScope as HermesPluginConfig["defaultCredentialScope"]) ??
-      DEFAULT_CONFIG.defaultCredentialScope,
-    defaultWriteback:
-      (input.defaultWriteback as HermesPluginConfig["defaultWriteback"]) ??
-      DEFAULT_CONFIG.defaultWriteback,
-    transport:
-      (input.transport as HermesPluginConfig["transport"]) ??
-      DEFAULT_CONFIG.transport,
-    tcpHost: (input.tcpHost as string) ?? DEFAULT_CONFIG.tcpHost,
-    tcpPort: (input.tcpPort as number) ?? DEFAULT_CONFIG.tcpPort,
-    timeout: (input.timeout as number) ?? DEFAULT_CONFIG.timeout,
-    autoStrategy: (input.autoStrategy as boolean) ?? DEFAULT_CONFIG.autoStrategy,
-    enableLayeredProtocol: (input.enableLayeredProtocol as boolean) ?? DEFAULT_CONFIG.enableLayeredProtocol,
-  };
+  // Keep config normalization at the boundary so the rest of the runtime can
+  // assume a single resolved shape that matches the local OpenClaw deployment.
+  return resolveHermesAcpConfig(raw);
 }
 
 // ─── Plugin Definition ──────────────────────────────────────────────────────
@@ -55,11 +37,21 @@ const plugin = {
     const config = resolveConfig(api.pluginConfig);
     const workspaceDir = api.workspaceDir ?? process.cwd();
 
+    api.registerProvider?.(buildHermesProvider({ pluginConfig: api.pluginConfig }));
+    api.registerAgentHarness?.(createHermesAgentHarness({ pluginConfig: api.pluginConfig }));
+
     const logger = {
       info: (msg: string, ...args: unknown[]) => api.logger?.info?.(msg, ...args) ?? console.log(`[hermes] ${msg}`),
       warn: (msg: string, ...args: unknown[]) => api.logger?.warn?.(msg, ...args) ?? console.warn(`[hermes] ${msg}`),
       error: (msg: string, ...args: unknown[]) => api.logger?.error?.(msg, ...args) ?? console.error(`[hermes] ${msg}`),
     };
+
+    // Cleanup is fire-and-forget so plugin registration stays cheap even when
+    // a previous run left many projected execenv directories behind.
+    void cleanupExecEnvs(config).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`execenv cleanup skipped: ${msg}`);
+    });
 
     // ── Tool: hermes_dispatch ───────────────────────────────────────────
 
@@ -253,7 +245,9 @@ const plugin = {
       },
     });
 
-    logger.info("Hermes Agent plugin registered (3 tools: hermes_dispatch, hermes_status, hermes_strategy)");
+    logger.info(
+      "Hermes Agent plugin registered (provider, harness, and 3 tools: hermes_dispatch, hermes_status, hermes_strategy)",
+    );
   },
 };
 
