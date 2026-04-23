@@ -162,6 +162,13 @@ export interface DispatchResult {
   memoryUpdates?: MemoryUpdate[];
   skillsCreated?: string[];
   tokensUsed: number;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+    cache_read_tokens?: number;
+    cache_write_tokens?: number;
+  };
   duration: number;
   strategy: StrategyTriple;
 }
@@ -188,6 +195,13 @@ export interface HermesPluginConfig {
   autoStrategy: boolean;
   /** 是否启用分层协议（L/C/W），关闭后直接派发任务 */
   enableLayeredProtocol: boolean;
+  /** OTEL 配置。不配置 endpoint 则不开启可观测能力。 */
+  otel?: {
+    /** APMPlus OTEL 上报地址，为空则不开启可观测能力 */
+    endpoint?: string;
+    /** OTEL service.name。不配置则使用环境变量 OTEL_SERVICE_NAME。 */
+    serviceName?: string;
+  };
 }
 
 export const DEFAULT_CONFIG: HermesPluginConfig = {
@@ -223,8 +237,11 @@ export interface AcpSessionEvent {
   type: "text" | "thinking" | "tool_progress" | "tool_result" | "done" | "error";
   text?: string;
   toolName?: string;
+  toolTitle?: string;
   toolCallId?: string;
+  toolInput?: Record<string, unknown> | string;
   message?: string;
+  timestamp?: number;
 }
 
 // ─── Context Payload ────────────────────────────────────────────────────────
