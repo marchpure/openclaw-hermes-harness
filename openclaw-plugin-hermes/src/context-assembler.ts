@@ -358,6 +358,9 @@ export function serializeProjectedContextForPrompt(
           ]
         : []),
       "Only use the skills listed under # Available OpenClaw Skills as OpenClaw-provided capabilities.",
+      "Treat # Available OpenClaw Skills and the projected SKILL.md file paths below as the source of truth for OpenClaw skills in this session.",
+      "Do not use internal skill discovery tools, generic runtime skill registries, or empty skill-list results to deny a skill that is explicitly listed under # Available OpenClaw Skills.",
+      "If asked whether a projected OpenClaw skill exists, answer from the projected skill list and projected file paths first.",
       "If a capability is not listed there, do not claim it is available from the current OpenClaw workspace.",
       "If realtime or browser-based work is requested but no matching OpenClaw skill is listed, explain the limitation naturally instead of exposing internal errors.",
       ...(runtime

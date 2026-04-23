@@ -26,10 +26,17 @@ async function copyProjectedSkill(
   if (!skill.sourcePath) return skill;
 
   const skillDir = join(hostExecEnvPath, "skills", skill.name);
-  await mkdir(skillDir, { recursive: true });
+  const sourceSkillPath = skill.sourcePath;
+  const sourceSkillDir = dirname(sourceSkillPath);
+  await mkdir(join(hostExecEnvPath, "skills"), { recursive: true });
 
-  const targetSkillPath = join(skillDir, "SKILL.md");
-  await cp(skill.sourcePath, targetSkillPath, { force: true });
+  // Project the full skill directory so runtime scripts/assets referenced by
+  // SKILL.md remain executable inside Hermes execenv.
+  await cp(sourceSkillDir, skillDir, {
+    recursive: true,
+    force: true,
+    dereference: true,
+  });
 
   return {
     ...skill,
