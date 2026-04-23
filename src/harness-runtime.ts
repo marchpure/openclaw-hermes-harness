@@ -55,6 +55,43 @@ const ZERO_ASSISTANT_USAGE = {
   total: 0,
 };
 
+const CONTEXT_LEVEL_ORDER = {
+  L0: 0,
+  L1: 1,
+  L2: 2,
+  L3: 3,
+} as const;
+
+function resolveRuntimeContextLevel(config: HermesPluginConfig): HermesPluginConfig["defaultContextLevel"] {
+  return CONTEXT_LEVEL_ORDER[config.defaultContextLevel] >= CONTEXT_LEVEL_ORDER[config.runtimeMinContextLevel]
+    ? config.defaultContextLevel
+    : config.runtimeMinContextLevel;
+}
+
+function sanitizePromptForHermes(prompt: string): string {
+  let sanitized = prompt;
+
+  // WebUI sender metadata is transport noise, not stable workspace context.
+  sanitized = sanitized.replace(
+    /^Sender \(untrusted metadata\):\s*```json\s*[\s\S]*?```\s*/i,
+    "",
+  );
+
+  // Bootstrap truncation hints are useful to OpenClaw, but they cause Hermes
+  // to overfit on UI/runtime diagnostics instead of the user task.
+  sanitized = sanitized.replace(
+    /\n*\[Bootstrap truncation warning\][\s\S]*$/i,
+    "",
+  );
+
+  return sanitized.trim();
+}
+
+function extractWorkspacePaths(prompt: string, workspaceDir: string): string[] {
+  const matches = prompt.match(new RegExp(`${workspaceDir.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}[^\\s'"]*`, "g")) ?? [];
+  return [...new Set(matches)];
+}
+
 export function createHermesRuntimeClient(options: {
   config: HermesPluginConfig;
 }): HermesRuntimeClient {
@@ -85,6 +122,9 @@ export async function runHermesHarnessAttempt(
   let reasoningStarted = false;
   let reasoningEnded = false;
   let lifecycleEnded = false;
+  const sanitizedPrompt = sanitizePromptForHermes(params.prompt);
+  const referencedWorkspacePaths = extractWorkspacePaths(sanitizedPrompt, params.workspaceDir);
+  const contextLevel = resolveRuntimeContextLevel(config);
   const sessionAnchor = resolveStableSessionAnchor({
     workspaceDir: params.workspaceDir,
     sessionKey: params.sessionKey,
@@ -97,17 +137,18 @@ export async function runHermesHarnessAttempt(
   );
 
   const execution = await prepareProjectedExecutionEnv({
-    task: params.prompt,
+    task: sanitizedPrompt,
     taskId: sessionAnchor,
     workspaceDir: params.workspaceDir,
-    contextLevel: config.defaultContextLevel,
+    contextLevel,
+    includeWorkspaceSkills: config.runtimeProjectWorkspaceSkills,
     model: params.modelId,
     config,
     sessionAnchor,
   });
 
   try {
-    await mirrorWorkspaceToContainer(config, params.workspaceDir);
+    await mirrorWorkspaceToContainer(config, params.workspaceDir, referencedWorkspacePaths);
     await client.start({}, execution.execEnv.runtimeExecEnvPath);
     webui.lifecycleStart({ startedAt: Date.now() });
     publishHermesHarnessAgentEvent(params, {
@@ -157,7 +198,7 @@ export async function runHermesHarnessAttempt(
     }
 
     const usage = normalizeAcpUsage(result.usage);
-    await mirrorWorkspaceFromContainer(config, params.workspaceDir);
+    await mirrorWorkspaceFromContainer(config, params.workspaceDir, referencedWorkspacePaths);
     const assistantText = result.text;
     const lastAssistant = buildAssistantMessage(params, assistantText, usage, {
       aborted: false,
@@ -180,7 +221,7 @@ export async function runHermesHarnessAttempt(
       timedOut: false,
       promptError: null,
       promptErrorSource: null,
-      finalPromptText: params.prompt,
+      finalPromptText: sanitizedPrompt,
       messagesSnapshot,
       toolMetas: [...toolMetas.values()],
       lastAssistant,
@@ -215,7 +256,7 @@ export async function runHermesHarnessAttempt(
       timedOut: false,
       promptError: err,
       promptErrorSource: "prompt",
-      finalPromptText: params.prompt,
+      finalPromptText: sanitizedPrompt,
       messagesSnapshot: [buildUserMessage(params), lastAssistant] as AgentHarnessAttemptResult["messagesSnapshot"],
       toolMetas: [...toolMetas.values()],
       lastAssistant,
@@ -359,7 +400,7 @@ async function handleHarnessEvent(
 function buildUserMessage(params: AgentHarnessAttemptParams): HarnessMessage {
   return {
     role: "user",
-    content: params.prompt,
+    content: sanitizePromptForHermes(params.prompt),
     timestamp: Date.now(),
   } as HarnessMessage;
 }

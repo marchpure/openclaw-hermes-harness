@@ -1,6 +1,6 @@
 import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import type {
   ExecEnvBuildResult,
@@ -261,36 +261,71 @@ async function mirrorExecEnvToContainer(config: HermesPluginConfig, hostExecEnvP
   await streamDirectoryToContainer(hostExecEnvPath, container, runtimeExecEnvPath);
 }
 
-export async function mirrorWorkspaceToContainer(config: HermesPluginConfig, workspaceDir: string): Promise<void> {
-  if (!config.mirrorExecEnvToContainer) return;
-  if (config.transport !== "tcp") return;
-  if (!workspaceDir.startsWith("/")) return;
+function uniqueSortedPaths(paths: string[]): string[] {
+  return [...new Set(paths)].sort();
+}
 
+async function mirrorDirectoryToContainer(config: HermesPluginConfig, hostDir: string): Promise<void> {
   const container = config.hermesContainerName;
-  const runtimeParent = workspaceDir.slice(0, Math.max(workspaceDir.lastIndexOf("/"), 1));
+  const runtimeParent = hostDir.slice(0, Math.max(hostDir.lastIndexOf("/"), 1));
   await runCommand("docker", [
     "exec",
     container,
     "sh",
     "-lc",
-    `mkdir -p ${JSON.stringify(runtimeParent)} && rm -rf ${JSON.stringify(workspaceDir)} && mkdir -p ${JSON.stringify(workspaceDir)}`,
+    `mkdir -p ${JSON.stringify(runtimeParent)} && mkdir -p ${JSON.stringify(hostDir)}`,
   ]);
-  // Hermes tools run inside the container but OpenClaw validates on the host.
-  // Mirroring the workspace before each turn makes absolute workspace paths
-  // resolve to the same starting contents in both namespaces.
-  await streamDirectoryToContainer(workspaceDir, container, workspaceDir);
+  await streamDirectoryToContainer(hostDir, container, hostDir);
 }
 
-export async function mirrorWorkspaceFromContainer(config: HermesPluginConfig, workspaceDir: string): Promise<void> {
+async function mirrorDirectoryFromContainer(config: HermesPluginConfig, hostDir: string): Promise<void> {
+  const container = config.hermesContainerName;
+  await mkdir(hostDir, { recursive: true });
+  await streamDirectoryFromContainer(container, hostDir, hostDir);
+}
+
+export async function mirrorWorkspaceToContainer(
+  config: HermesPluginConfig,
+  workspaceDir: string,
+  referencedPaths: string[] = [],
+): Promise<void> {
   if (!config.mirrorExecEnvToContainer) return;
   if (config.transport !== "tcp") return;
   if (!workspaceDir.startsWith("/")) return;
 
-  const container = config.hermesContainerName;
-  await mkdir(workspaceDir, { recursive: true });
-  // Pull back file creations/edits made by Hermes so host-side OpenClaw checks
-  // observe real tool effects instead of container-private state.
-  await streamDirectoryFromContainer(container, workspaceDir, workspaceDir);
+  const dirs = uniqueSortedPaths(
+    referencedPaths
+      .filter((value) => value.startsWith(workspaceDir))
+      .map((value) => dirname(value)),
+  );
+
+  for (const dir of dirs) {
+    // Sync only the prompt-referenced workspace slices so Hermes can access
+    // the same host files without paying the cost of copying large caches.
+    await mirrorDirectoryToContainer(config, dir);
+  }
+}
+
+export async function mirrorWorkspaceFromContainer(
+  config: HermesPluginConfig,
+  workspaceDir: string,
+  referencedPaths: string[] = [],
+): Promise<void> {
+  if (!config.mirrorExecEnvToContainer) return;
+  if (config.transport !== "tcp") return;
+  if (!workspaceDir.startsWith("/")) return;
+
+  const dirs = uniqueSortedPaths(
+    referencedPaths
+      .filter((value) => value.startsWith(workspaceDir))
+      .map((value) => dirname(value)),
+  );
+
+  for (const dir of dirs) {
+    // Pull back only the directories touched by the prompt so host-side
+    // assertions observe Hermes edits without mirroring the full workspace.
+    await mirrorDirectoryFromContainer(config, dir);
+  }
 }
 
 export async function buildExecEnv(
