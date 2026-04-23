@@ -1,5 +1,16 @@
 declare module "openclaw/plugin-sdk/plugin-entry" {
-  export type ProviderRuntimeModel = Record<string, unknown>;
+  export type ProviderRuntimeModel = {
+    id?: string;
+    name?: string;
+    provider?: string;
+    baseUrl?: string;
+    api?: string;
+    reasoning?: boolean;
+    input?: string[];
+    contextWindow?: number;
+    maxTokens?: number;
+    compat?: Record<string, unknown>;
+  };
 }
 
 declare module "openclaw/plugin-sdk/provider-model-shared" {
@@ -14,7 +25,19 @@ declare module "openclaw/plugin-sdk/provider-model-shared" {
     maxTokens?: number;
     compat?: Record<string, unknown>;
   };
-  export type ProviderPlugin = Record<string, unknown>;
+  export type ProviderPlugin = {
+    id: string;
+    label: string;
+    docsPath?: string;
+    auth?: unknown[];
+    catalog?: {
+      order?: string;
+      run: () => Promise<unknown>;
+    };
+    resolveDynamicModel?: (ctx: { modelId: string }) => unknown;
+    resolveSyntheticAuth?: () => Record<string, unknown>;
+    isModernModelRef?: () => boolean;
+  };
   export function normalizeModelCompat<T>(value: T): T;
 }
 

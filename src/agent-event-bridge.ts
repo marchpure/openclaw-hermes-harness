@@ -71,9 +71,6 @@ async function resolveOpenClawAgentEventEmitter(): Promise<EmitAgentEvent | unde
     candidateRoots.add(dirname(dirname(sdkEntry)));
   } catch {}
 
-  candidateRoots.add("/opt/homebrew/lib/node_modules/openclaw/dist");
-  candidateRoots.add("/Users/bytedance/Code/openclaw/dist");
-
   const candidates: string[] = [];
   for (const distRoot of candidateRoots) {
     candidates.push(join(distRoot, "infra", "agent-events.js"));
@@ -108,6 +105,8 @@ async function tryLoadEmitter(modulePath: string): Promise<EmitAgentEvent | unde
     if (typeof named === "function") {
       return named as EmitAgentEvent;
     }
+    // Bundled OpenClaw builds sometimes minify the named export. Keep this
+    // fallback because it is still part of the real local runtime surface.
     const bundled = mod.i;
     if (typeof bundled === "function") {
       return bundled as EmitAgentEvent;

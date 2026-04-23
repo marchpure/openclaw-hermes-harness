@@ -22,15 +22,3 @@ export function resolveExecEnvHostPath(config: HermesPluginConfig, taskId: strin
 export function resolveExecEnvRuntimePath(config: HermesPluginConfig, taskId: string): string {
   return join(resolveExecEnvRuntimeRoot(config), taskId);
 }
-
-export function mapHostWorkspaceToRuntimeWorkspace(
-  config: HermesPluginConfig,
-  hostPath: string,
-  taskId: string,
-): string {
-  const hostExecEnv = resolveExecEnvHostPath(config, taskId);
-  if (hostPath === hostExecEnv) {
-    return resolveExecEnvRuntimePath(config, taskId);
-  }
-  return hostPath;
-}

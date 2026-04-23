@@ -34,8 +34,6 @@ function loadScopeReader(): (() => GatewayRequestScope | undefined) | null {
   } catch {
     // Ignore resolution failures and keep best-effort behavior.
   }
-  candidates.push(...findBundledGatewayRequestScopeModules("/usr/lib/node_modules/openclaw/dist"));
-  candidates.push(...findBundledGatewayRequestScopeModules("/usr/local/lib/node_modules/openclaw/dist"));
   for (const candidate of candidates) {
     try {
       const mod = require(candidate) as
@@ -87,6 +85,8 @@ function resolveScope(params: AgentHarnessAttemptParams) {
   if (!runId || !sessionKey) {
     return null;
   }
+  // The bridge only exists when Hermes is running inside a real Gateway turn.
+  // For CLI tests or direct harness calls we simply skip WebUI fan-out.
   const scope = loadScopeReader()?.();
   if (!scope?.context) {
     return null;
@@ -185,6 +185,8 @@ export function createWebUiEventBridge(params: AgentHarnessAttemptParams) {
         delta: deltaText,
       });
       const now = Date.now();
+      // Coalesce chat deltas slightly so the Gateway does not get flooded by
+      // character-sized updates from ACP streaming.
       if (now - state.lastDeltaSentAt < 150 && state.assistantText.length <= state.lastBroadcastLen) {
         return;
       }
