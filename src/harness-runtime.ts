@@ -5,6 +5,10 @@ import type {
 } from "openclaw/plugin-sdk/agent-harness";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
+import {
+  mirrorWorkspaceFromContainer,
+  mirrorWorkspaceToContainer,
+} from "./execenv-builder.js";
 import { createWebUiEventBridge } from "./webui-event-bridge.js";
 import {
   clearSessionBinding,
@@ -103,6 +107,7 @@ export async function runHermesHarnessAttempt(
   });
 
   try {
+    await mirrorWorkspaceToContainer(config, params.workspaceDir);
     await client.start({}, execution.execEnv.runtimeExecEnvPath);
     webui.lifecycleStart({ startedAt: Date.now() });
     publishHermesHarnessAgentEvent(params, {
@@ -152,6 +157,7 @@ export async function runHermesHarnessAttempt(
     }
 
     const usage = normalizeAcpUsage(result.usage);
+    await mirrorWorkspaceFromContainer(config, params.workspaceDir);
     const assistantText = result.text;
     const lastAssistant = buildAssistantMessage(params, assistantText, usage, {
       aborted: false,

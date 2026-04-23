@@ -14,6 +14,10 @@ import { injectCredentials, buildDockerEnvFlags } from "./credential-injector.js
 import { processResult, applyWriteback } from "./result-processor.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
 import {
+  mirrorWorkspaceFromContainer,
+  mirrorWorkspaceToContainer,
+} from "./execenv-builder.js";
+import {
   clearSessionBinding,
   prepareProjectedExecutionEnv,
   readSessionBinding,
@@ -172,6 +176,8 @@ export async function dispatchToHermes(
   let tokensUsed = 0;
 
   try {
+    await mirrorWorkspaceToContainer(config, workspaceDir);
+
     // Start ACP connection with injected credentials
     await acpClient.start(credentialResult.envVars, execution.execEnv.runtimeExecEnvPath);
 
@@ -192,6 +198,7 @@ export async function dispatchToHermes(
     tokensUsed = result.usage?.total_tokens ?? 0;
 
     logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
+    await mirrorWorkspaceFromContainer(config, workspaceDir);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger?.error(`Hermes execution failed: ${msg}`);
@@ -309,6 +316,7 @@ async function dispatchDirectly(
       config,
     });
     bindingHash = execution.sessionBindingHash;
+    await mirrorWorkspaceToContainer(config, workspaceDir);
     await acpClient.start({}, execution.execEnv.runtimeExecEnvPath);
     const sessionId = await resumeOrCreateSession({
       acpClient,
@@ -323,6 +331,7 @@ async function dispatchDirectly(
     tokensUsed = result.usage?.total_tokens ?? 0;
 
     logger?.info(`Direct dispatch completed: ${acpText.length} chars, ${tokensUsed} tokens`);
+    await mirrorWorkspaceFromContainer(config, workspaceDir);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger?.error(`Direct dispatch failed: ${msg}`);

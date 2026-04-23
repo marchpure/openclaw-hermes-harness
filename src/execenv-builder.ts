@@ -171,6 +171,79 @@ function streamDirectoryToContainer(hostExecEnvPath: string, container: string, 
   });
 }
 
+function streamDirectoryFromContainer(container: string, runtimePath: string, hostPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tarCreate = spawn("docker", [
+      "exec",
+      container,
+      "tar",
+      "-C",
+      runtimePath,
+      "-cf",
+      "-",
+      ".",
+    ], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const tarExtract = spawn("tar", ["-C", hostPath, "-xf", "-"], {
+      env: {
+        ...process.env,
+        COPYFILE_DISABLE: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderr = "";
+    tarCreate.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    tarExtract.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    tarCreate.stdout.pipe(tarExtract.stdin);
+
+    let createDone = false;
+    let extractDone = false;
+    let failed = false;
+
+    const finishIfDone = () => {
+      if (!failed && createDone && extractDone) {
+        resolve();
+      }
+    };
+
+    const fail = (err: Error) => {
+      if (failed) return;
+      failed = true;
+      tarCreate.kill();
+      tarExtract.kill();
+      reject(err);
+    };
+
+    tarCreate.on("error", (err) => fail(err));
+    tarExtract.on("error", (err) => fail(err));
+
+    tarCreate.on("exit", (code) => {
+      if (code !== 0) {
+        fail(new Error(`docker exec tar create failed with exit ${code}: ${stderr.trim()}`));
+        return;
+      }
+      createDone = true;
+      finishIfDone();
+    });
+
+    tarExtract.on("exit", (code) => {
+      if (code !== 0) {
+        fail(new Error(`tar extract failed with exit ${code}: ${stderr.trim()}`));
+        return;
+      }
+      extractDone = true;
+      finishIfDone();
+    });
+  });
+}
+
 async function mirrorExecEnvToContainer(config: HermesPluginConfig, hostExecEnvPath: string, runtimeExecEnvPath: string): Promise<void> {
   if (!config.mirrorExecEnvToContainer) return;
   if (config.transport !== "tcp") return;
@@ -186,6 +259,38 @@ async function mirrorExecEnvToContainer(config: HermesPluginConfig, hostExecEnvP
     `mkdir -p ${JSON.stringify(runtimeParent)} && rm -rf ${JSON.stringify(runtimeExecEnvPath)} && mkdir -p ${JSON.stringify(runtimeExecEnvPath)}`,
   ]);
   await streamDirectoryToContainer(hostExecEnvPath, container, runtimeExecEnvPath);
+}
+
+export async function mirrorWorkspaceToContainer(config: HermesPluginConfig, workspaceDir: string): Promise<void> {
+  if (!config.mirrorExecEnvToContainer) return;
+  if (config.transport !== "tcp") return;
+  if (!workspaceDir.startsWith("/")) return;
+
+  const container = config.hermesContainerName;
+  const runtimeParent = workspaceDir.slice(0, Math.max(workspaceDir.lastIndexOf("/"), 1));
+  await runCommand("docker", [
+    "exec",
+    container,
+    "sh",
+    "-lc",
+    `mkdir -p ${JSON.stringify(runtimeParent)} && rm -rf ${JSON.stringify(workspaceDir)} && mkdir -p ${JSON.stringify(workspaceDir)}`,
+  ]);
+  // Hermes tools run inside the container but OpenClaw validates on the host.
+  // Mirroring the workspace before each turn makes absolute workspace paths
+  // resolve to the same starting contents in both namespaces.
+  await streamDirectoryToContainer(workspaceDir, container, workspaceDir);
+}
+
+export async function mirrorWorkspaceFromContainer(config: HermesPluginConfig, workspaceDir: string): Promise<void> {
+  if (!config.mirrorExecEnvToContainer) return;
+  if (config.transport !== "tcp") return;
+  if (!workspaceDir.startsWith("/")) return;
+
+  const container = config.hermesContainerName;
+  await mkdir(workspaceDir, { recursive: true });
+  // Pull back file creations/edits made by Hermes so host-side OpenClaw checks
+  // observe real tool effects instead of container-private state.
+  await streamDirectoryFromContainer(container, workspaceDir, workspaceDir);
 }
 
 export async function buildExecEnv(
