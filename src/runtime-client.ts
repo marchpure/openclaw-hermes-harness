@@ -109,10 +109,14 @@ export function resolveStableSessionAnchor(params: {
   sessionId?: string;
   agentId?: string;
 }): string {
+  // OpenClaw CLI/local runs often reuse a broad sessionKey such as
+  // `agent:main:main` while still passing a distinct sessionId. Prefer the
+  // explicit session identity so Hermes does not resume unrelated ACP turns
+  // into the same projected execenv.
   const raw =
-    params.sessionKey?.trim() ||
-    params.sessionFile?.trim() ||
     params.sessionId?.trim() ||
+    params.sessionFile?.trim() ||
+    params.sessionKey?.trim() ||
     params.agentId?.trim() ||
     params.workspaceDir;
 
