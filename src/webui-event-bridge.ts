@@ -34,6 +34,12 @@ function loadScopeReader(): (() => GatewayRequestScope | undefined) | null {
   } catch {
     // Ignore resolution failures and keep best-effort behavior.
   }
+  // Real OpenClaw installs on this machine expose bundled runtime shards under
+  // the global dist directory instead of the plugin-sdk package path. Keep
+  // these fallbacks so Hermes can still publish WebUI chat events when loaded
+  // from an installed extension.
+  candidates.push(...findBundledGatewayRequestScopeModules("/usr/lib/node_modules/openclaw/dist"));
+  candidates.push(...findBundledGatewayRequestScopeModules("/usr/local/lib/node_modules/openclaw/dist"));
   for (const candidate of candidates) {
     try {
       const mod = require(candidate) as

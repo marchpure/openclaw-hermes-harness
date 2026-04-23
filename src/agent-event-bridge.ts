@@ -70,6 +70,10 @@ async function resolveOpenClawAgentEventEmitter(): Promise<EmitAgentEvent | unde
     const sdkEntry = require.resolve("openclaw/plugin-sdk/agent-harness");
     candidateRoots.add(dirname(dirname(sdkEntry)));
   } catch {}
+  // Installed OpenClaw builds may only expose hashed dist bundles in the
+  // global module directory, so keep those roots in the search set.
+  candidateRoots.add("/usr/lib/node_modules/openclaw/dist");
+  candidateRoots.add("/usr/local/lib/node_modules/openclaw/dist");
 
   const candidates: string[] = [];
   for (const distRoot of candidateRoots) {
