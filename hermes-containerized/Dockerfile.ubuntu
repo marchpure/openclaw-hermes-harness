@@ -61,7 +61,7 @@ ENV UV_EXTRA_INDEX_URL=https://pypi.org/simple
 RUN useradd -u 10000 -m -d /opt/data hermes
 
 # ─── 复制工具 ──────────────────────────────────────────────
-COPY --chmod=0755 --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+COPY --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 
 # ─── 复制源码 ──────────────────────────────────────────────
 COPY src/ /opt/hermes/
@@ -89,7 +89,8 @@ RUN uv venv && \
 
 # ─── 设置入口 ──────────────────────────────────────────────
 USER root
-RUN chmod +x /opt/hermes/docker/entrypoint-gateway.sh \
+RUN chmod +x /usr/local/bin/uv /usr/local/bin/uvx \
+             /opt/hermes/docker/entrypoint-gateway.sh \
              /opt/hermes/docker/entrypoint-acp.sh
 
 # ─── 清除代理 (运行时不需要) ──────────────────────────────

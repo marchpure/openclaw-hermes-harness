@@ -137,8 +137,12 @@ export class HermesAcpClient extends EventEmitter {
    * Create a new ACP session.
    * ACP method: "session/new"
    */
-  async newSession(cwd: string): Promise<string> {
-    const result = (await this.sendRequest("session/new", { cwd, mcpServers: [] })) as {
+  async newSession(cwd: string, model?: string): Promise<string> {
+    const result = (await this.sendRequest("session/new", {
+      cwd,
+      mcpServers: [],
+      ...(model ? { model } : {}),
+    })) as {
       session_id?: string;
       sessionId?: string;
     };
@@ -151,11 +155,12 @@ export class HermesAcpClient extends EventEmitter {
    * Resume an existing ACP session.
    * ACP method: "session/resume"
    */
-  async resumeSession(sessionId: string, cwd: string): Promise<string> {
+  async resumeSession(sessionId: string, cwd: string, model?: string): Promise<string> {
     const result = (await this.sendRequest("session/resume", {
       session_id: sessionId,
       cwd,
       mcpServers: [],
+      ...(model ? { model } : {}),
     })) as { session_id?: string; sessionId?: string };
     this.sessionId = result.session_id ?? result.sessionId ?? sessionId;
     this.logger.info(`Session resumed: ${this.sessionId}`);

@@ -106,7 +106,8 @@ OpenClaw Gateway
 职责：
 
 - 向 OpenClaw 暴露一个合成的 `hermes` provider
-- 让 `hermes/default` 或 `hermes/<custom-model>` 这种模型引用能被 OpenClaw 正常解析
+- 正式向 OpenClaw 暴露 `hermes/default`
+- 保留 `hermes/<custom-model>` 作为内部兼容路由能力
 - 把真正执行下沉到 harness，而不是 provider 自己直连某个上游 API
 
 关键函数：
@@ -128,15 +129,15 @@ OpenClaw Gateway
 作用：
 
 - 返回 Hermes provider 的 model catalog
-- 模型列表来源于插件配置里的 `discovery.models`
-- 若未配置，回退到 `default`
+- 对外 catalog 固定只暴露 `default`
+- 真实默认模型由插件配置里的 `defaultModel` 决定
 
 #### `resolveHermesDynamicModel`
 
 作用：
 
-- 允许 `hermes/<任意 modelId>` 动态可路由
-- 避免每次都依赖远程 discovery
+- 保留 `hermes/<任意 modelId>` 的动态可路由兼容能力
+- 避免未来需要额外维护一份公开模型列表
 
 ### 5.2 Harness 注册阶段
 
@@ -517,7 +518,7 @@ OpenClaw Gateway
 #### `readHermesPluginConfig`
 
 - 读取宽松输入
-- 同时兼顾 `discovery.models`
+- 兼容读取旧的 `discovery.models` 配置，但不再把它作为正式配置入口
 
 #### `resolveHermesAcpConfig`
 

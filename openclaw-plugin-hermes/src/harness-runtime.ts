@@ -193,6 +193,7 @@ export async function runHermesHarnessAttempt(
       client,
       runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
       bindingHash: execution.sessionBindingHash,
+      modelId: params.modelId,
     });
 
     const result = await client.prompt(execution.bootstrapPrompt, sessionId, {
@@ -330,6 +331,7 @@ async function resumeOrCreateSession(params: {
   client: HermesAcpClient;
   runtimeExecEnvPath: string;
   bindingHash: string;
+  modelId?: string;
 }): Promise<string> {
   // The binding hash encodes whether the projected context and workdir remain
   // semantically equivalent. Equivalent bindings can safely resume; otherwise
@@ -337,7 +339,7 @@ async function resumeOrCreateSession(params: {
   const existing = readSessionBinding(params.bindingHash);
   if (existing && existing.runtimeExecEnvPath === params.runtimeExecEnvPath) {
     try {
-      const resumed = await params.client.resumeSession(existing.sessionId, params.runtimeExecEnvPath);
+      const resumed = await params.client.resumeSession(existing.sessionId, params.runtimeExecEnvPath, params.modelId);
       writeSessionBinding(params.bindingHash, {
         sessionId: resumed,
         runtimeExecEnvPath: params.runtimeExecEnvPath,
@@ -349,7 +351,7 @@ async function resumeOrCreateSession(params: {
     }
   }
 
-  const created = await params.client.newSession(params.runtimeExecEnvPath);
+  const created = await params.client.newSession(params.runtimeExecEnvPath, params.modelId);
   writeSessionBinding(params.bindingHash, {
     sessionId: created,
     runtimeExecEnvPath: params.runtimeExecEnvPath,

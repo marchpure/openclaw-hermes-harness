@@ -73,6 +73,7 @@ loadPersistedBindings();
 function computeSessionBindingHash(input: {
   workspaceDir: string;
   runtimeExecEnvPath: string;
+  model: string;
   projectionVersion: string;
   skillNames: string[];
 }): string {
@@ -83,6 +84,7 @@ function computeSessionBindingHash(input: {
       JSON.stringify({
         workspaceDir: input.workspaceDir,
         runtimeExecEnvPath: input.runtimeExecEnvPath,
+        model: input.model,
         projectionVersion: input.projectionVersion,
         skills: input.skillNames,
       }),
@@ -95,6 +97,14 @@ function buildRuntimeRoot(config: HermesPluginConfig): string {
     config.execEnvRootDir ??
     config.hermesDataDir ??
     "/var/cache/hermes-agent/execenv";
+}
+
+function resolveRuntimeModel(model: string | undefined, config: HermesPluginConfig): string {
+  const requested = model?.trim();
+  if (requested && requested !== "default") {
+    return requested;
+  }
+  return config.defaultModel ?? "minimax-m2.5";
 }
 
 function sanitizeSessionAnchor(value: string): string {
@@ -187,11 +197,13 @@ export async function prepareProjectedExecutionEnv(params: {
   const runtimeRoot = buildRuntimeRoot(params.config);
   const sessionAnchor = sanitizeSessionAnchor(params.sessionAnchor ?? params.taskId);
   const runtimeExecEnvPathHint = `${runtimeRoot}/${sessionAnchor}`;
+  const resolvedModel = resolveRuntimeModel(params.model, params.config);
   // The binding hash must be stable before buildExecEnv because session resume
   // and later cache reuse depend on it.
   const sessionBindingHash = computeSessionBindingHash({
     workspaceDir: params.workspaceDir,
     runtimeExecEnvPath: runtimeExecEnvPathHint,
+    model: resolvedModel,
     projectionVersion: params.config.projectionVersion,
     skillNames: projectableSkills.map((skill) => skill.name),
   });
@@ -203,7 +215,7 @@ export async function prepareProjectedExecutionEnv(params: {
       contextFiles: projectedContext.files,
       projectedSkills: projectableSkills,
       runtimeConfig: {
-        model: params.model ?? params.config.defaultModel ?? "minimax-m2.5",
+        model: resolvedModel,
         contextLevel: params.contextLevel,
         projectionVersion: params.config.projectionVersion,
       },

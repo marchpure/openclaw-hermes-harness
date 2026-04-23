@@ -13,8 +13,8 @@ export function readHermesPluginConfig(value: unknown): HermesPluginConfig {
   const input = value as Record<string, unknown>;
   const discovery = readObject(input.discovery);
   return {
-    // Keep provider catalog parsing narrow: current deployments configure Hermes
-    // at the top level and only use discovery.models as an optional override.
+    // Keep reading older discovery overrides for config compatibility, but the
+    // supported public model surface is now just `hermes/default`.
     ...(discovery
       ? {
           discovery: {

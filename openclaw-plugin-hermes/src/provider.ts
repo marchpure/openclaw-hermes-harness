@@ -4,12 +4,11 @@ import {
   type ModelDefinitionConfig,
   type ProviderPlugin,
 } from "openclaw/plugin-sdk/provider-model-shared";
-import { readHermesPluginConfig } from "./config.js";
 
 const PROVIDER_ID = "hermes";
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 32_000;
-const FALLBACK_HERMES_MODELS = ["default"];
+const DEFAULT_CATALOG_MODELS = ["default"];
 
 export function buildHermesProvider(options: { pluginConfig?: unknown } = {}): ProviderPlugin {
   return {
@@ -34,7 +33,7 @@ export function buildHermesProvider(options: { pluginConfig?: unknown } = {}): P
 }
 
 export async function buildHermesProviderCatalog(
-  options: { pluginConfig?: unknown } = {},
+  _options: { pluginConfig?: unknown } = {},
 ): Promise<{
   provider: {
     baseUrl: string;
@@ -44,20 +43,16 @@ export async function buildHermesProviderCatalog(
     models: ModelDefinitionConfig[];
   };
 }> {
-  const config = readHermesPluginConfig(options.pluginConfig);
-  // The provider surface is synthetic: it only advertises model ids so
-  // OpenClaw can route `hermes/<model>` refs into the harness path.
-  const modelIds =
-    config.discovery?.models && config.discovery.models.length > 0
-      ? config.discovery.models
-      : FALLBACK_HERMES_MODELS;
   return {
     provider: {
       baseUrl: "http://127.0.0.1/hermes-runtime",
       apiKey: "hermes-runtime",
       auth: "token",
       api: "openai-responses",
-      models: modelIds.map((id) => buildModelDefinition(id)),
+      // Keep the public catalog intentionally minimal: Hermes is officially
+      // configured through `hermes/default`, while dynamic ids remain an
+      // internal compatibility path handled by the harness/runtime bridge.
+      models: DEFAULT_CATALOG_MODELS.map((id) => buildModelDefinition(id)),
     },
   };
 }

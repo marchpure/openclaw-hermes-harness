@@ -46,6 +46,7 @@ async function resumeOrCreateSession(params: {
   acpClient: HermesAcpClient;
   runtimeExecEnvPath: string;
   bindingHash: string;
+  modelId?: string;
   logger?: Logger;
 }): Promise<string> {
   const existingBinding = readSessionBinding(params.bindingHash);
@@ -54,6 +55,7 @@ async function resumeOrCreateSession(params: {
       const resumed = await params.acpClient.resumeSession(
         existingBinding.sessionId,
         params.runtimeExecEnvPath,
+        params.modelId,
       );
       writeSessionBinding(params.bindingHash, {
         sessionId: resumed,
@@ -68,7 +70,7 @@ async function resumeOrCreateSession(params: {
     }
   }
 
-  const created = await params.acpClient.newSession(params.runtimeExecEnvPath);
+  const created = await params.acpClient.newSession(params.runtimeExecEnvPath, params.modelId);
   writeSessionBinding(params.bindingHash, {
     sessionId: created,
     runtimeExecEnvPath: params.runtimeExecEnvPath,
@@ -186,6 +188,7 @@ export async function dispatchToHermes(
       acpClient,
       runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
       bindingHash: execution.sessionBindingHash,
+      modelId: request.model,
       logger,
     });
 
@@ -322,6 +325,7 @@ async function dispatchDirectly(
       acpClient,
       runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
       bindingHash: execution.sessionBindingHash,
+      modelId: request.model,
       logger,
     });
     const timeout = (request.timeout ?? config.timeout) * 1000;

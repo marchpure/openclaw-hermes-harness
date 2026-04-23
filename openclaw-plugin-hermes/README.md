@@ -75,7 +75,7 @@ npm install
 | `execEnvRootDir` | string | `<hermesDataDir>/execenv` | 宿主机上的 task-scoped execenv 根目录 |
 | `runtimeExecEnvRootDir` | string | 同 `execEnvRootDir` | Hermes 运行时可见的 execenv 根目录 |
 | `projectionVersion` | string | `c1c2-v1` | execution projection 版本号 |
-| `defaultModel` | string | — | 默认 LLM 模型 |
+| `defaultModel` | string | — | `hermes/default` 实际使用的默认 LLM 模型 |
 | `defaultContextLevel` | L0-L3 | `L1` | 默认传递层级 |
 | `defaultCredentialScope` | C0-C2 | `C0` | 默认凭据范围 |
 | `defaultWriteback` | W0-W3 | `W1` | 默认回写策略 |
@@ -85,6 +85,13 @@ npm install
 | `transport` | string | `tcp` | 当前实现只支持本地 Hermes ACP TCP bridge |
 | `skillProjection.hostBackedDenylist` | string[] | `["browser","feishu"]` | 会被识别并过滤掉的 host-backed skill 名称 |
 | `execEnvCleanup.maxCount` | number | `200` | 最多保留多少个历史 execenv 目录 |
+
+### 模型配置口径
+
+- 正式配置入口只有 `hermes/default`
+- `defaultModel` 决定 `hermes/default` 最终映射到哪个 Hermes 上游模型
+- 不要求维护额外的模型发现列表；安装脚本也只注册 `hermes/default`
+- 底层仍保留动态模型路由兼容能力，但不作为默认对外承诺能力
 
 ## 注册的工具
 

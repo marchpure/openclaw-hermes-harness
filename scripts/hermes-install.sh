@@ -1118,7 +1118,27 @@ phase4_install_plugin() {
                "autoStrategy": true,
                "enableLayeredProtocol": false,
                "timeout": 600
-           } | .plugins.entries[$pk].enabled = true' "${OPENCLAW_CONFIG}" > "${tmp}" \
+           }
+           | .plugins.entries[$pk].enabled = true
+           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
+               "hermes/default": { "alias": "hermes" }
+             })
+           | .models.providers.hermes = {
+               "baseUrl": "http://127.0.0.1/hermes-runtime",
+               "apiKey": "hermes-runtime",
+               "auth": "token",
+               "api": "openai-responses",
+               "models": [
+                 {
+                   "id": "default",
+                   "name": "default",
+                   "reasoning": true,
+                   "input": ["text", "image"],
+                   "contextWindow": 200000,
+                   "maxTokens": 32000
+                 }
+               ]
+             }' "${OPENCLAW_CONFIG}" > "${tmp}" \
            && mv "${tmp}" "${OPENCLAW_CONFIG}"
     else
         python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME}" "${DEFAULT_MODEL_VAL}" <<'PYEOF'
@@ -1134,6 +1154,25 @@ hermes['config'] = {
     'autoStrategy': True,
     'enableLayeredProtocol': False,
     'timeout': 600
+}
+d.setdefault('agents', {}).setdefault('defaults', {}).setdefault('models', {}).update({
+    'hermes/default': {'alias': 'hermes'},
+})
+d.setdefault('models', {}).setdefault('providers', {})['hermes'] = {
+    'baseUrl': 'http://127.0.0.1/hermes-runtime',
+    'apiKey': 'hermes-runtime',
+    'auth': 'token',
+    'api': 'openai-responses',
+    'models': [
+        {
+            'id': 'default',
+            'name': 'default',
+            'reasoning': True,
+            'input': ['text', 'image'],
+            'contextWindow': 200000,
+            'maxTokens': 32000,
+        },
+    ],
 }
 with open(cf, 'w') as f:
     json.dump(d, f, indent=2, ensure_ascii=False)

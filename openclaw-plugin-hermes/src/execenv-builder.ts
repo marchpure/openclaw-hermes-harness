@@ -251,6 +251,17 @@ async function mirrorExecEnvToContainer(config: HermesPluginConfig, hostExecEnvP
   if (!config.mirrorExecEnvToContainer) return;
   if (config.transport !== "tcp") return;
   if (!runtimeExecEnvPath.startsWith("/")) return;
+  const hermesDataDir = config.hermesDataDir?.trim();
+  // When the runtime execenv lives under /opt/data, the container path is the
+  // same bind-mounted directory as hostExecEnvPath. Re-copying would first
+  // `rm -rf` the container path and accidentally delete the host projection.
+  if (
+    hermesDataDir &&
+    hostExecEnvPath.startsWith(`${hermesDataDir}/`) &&
+    runtimeExecEnvPath === hostExecEnvPath.replace(hermesDataDir, "/opt/data")
+  ) {
+    return;
+  }
 
   const container = config.hermesContainerName;
   const runtimeParent = runtimeExecEnvPath.slice(0, Math.max(runtimeExecEnvPath.lastIndexOf("/"), 1));

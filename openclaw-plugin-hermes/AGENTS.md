@@ -173,7 +173,7 @@ Configuration is defined in `openclaw.plugin.json` with the following options:
 | `hermesCommand` | string | - | Custom hermes-acp command |
 | `hermesContainerName` | string | `hermes-agent` | Docker container name |
 | `hermesDataDir` | string | - | Host path for Hermes data |
-| `defaultModel` | string | - | Default LLM model |
+| `defaultModel` | string | - | Default upstream model used by `hermes/default` |
 | `defaultContextLevel` | L0-L3 | `L1` | Default context level |
 | `defaultCredentialScope` | C0-C2 | `C0` | Default credential scope |
 | `defaultWriteback` | W0-W3 | `W1` | Default writeback level |
@@ -202,6 +202,11 @@ Add to OpenClaw configuration:
   }
 }
 ```
+
+### Model Surface
+- Officially expose only `hermes/default`
+- `defaultModel` controls which upstream Hermes model `hermes/default` resolves to
+- Dynamic `hermes/<model>` routing remains as an internal compatibility path, not a required public configuration surface
 
 ### Transport Modes
 - **TCP (recommended)**: Persistent connection to Hermes ACP bridge on port 3100
