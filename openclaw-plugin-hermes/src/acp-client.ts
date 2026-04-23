@@ -227,7 +227,7 @@ export class HermesAcpClient extends EventEmitter {
     text: string,
     sessionId?: string,
     options?: { timeout?: number; signal?: AbortSignal },
-  ): Promise<{ text: string; events: AcpSessionEvent[]; usage?: { input_tokens: number; output_tokens: number; total_tokens: number } }> {
+  ): Promise<{ text: string; events: AcpSessionEvent[]; usage?: { input_tokens: number; output_tokens: number; total_tokens: number; cache_read_tokens?: number; cache_write_tokens?: number } }> {
     const sid = sessionId ?? this.sessionId;
     if (!sid) {
       throw new Error("No active session. Call newSession() first.");
@@ -236,7 +236,7 @@ export class HermesAcpClient extends EventEmitter {
     const timeout = options?.timeout ?? this.config.timeout * 1000;
     const events: AcpSessionEvent[] = [];
     let finalText = "";
-    let usage: { input_tokens: number; output_tokens: number; total_tokens: number } | undefined;
+    let usage: { input_tokens: number; output_tokens: number; total_tokens: number; cache_read_tokens?: number; cache_write_tokens?: number } | undefined;
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -297,6 +297,8 @@ export class HermesAcpClient extends EventEmitter {
             input_tokens: u.input_tokens ?? u.inputTokens ?? 0,
             output_tokens: u.output_tokens ?? u.outputTokens ?? 0,
             total_tokens: u.total_tokens ?? u.totalTokens ?? 0,
+            cache_read_tokens: u.cache_read_tokens ?? u.cacheReadTokens ?? 0,
+            cache_write_tokens: u.cache_write_tokens ?? u.cacheWriteTokens ?? 0,
           };
         }
         if (!settled) {
@@ -507,6 +509,7 @@ export class HermesAcpClient extends EventEmitter {
     // Otherwise treat as a streaming session event
     const event = this.parseSessionEvent(parsed);
     if (event) {
+      event.timestamp = Date.now();
       this.emit("session-event-raw", event);
     }
   }
@@ -519,6 +522,7 @@ export class HermesAcpClient extends EventEmitter {
       const update = params.update ?? params;
       const event = this.parseSessionEvent(update as Record<string, unknown>);
       if (event) {
+        event.timestamp = Date.now();
         this.emit("session-event-raw", event);
       }
     }
@@ -541,19 +545,21 @@ export class HermesAcpClient extends EventEmitter {
       return { type: "thinking", text };
     }
 
-    if (sessionUpdate === "tool_call_begin" || sessionUpdate === "toolCallBegin" || type === "tool_call") {
+    if (sessionUpdate === "tool_call_begin" || sessionUpdate === "toolCallBegin" || type === "tool_call" || sessionUpdate === "tool_call") {
       return {
         type: "tool_progress",
-        toolName: (data.name as string) ?? (data.toolName as string) ?? "",
+        toolName: (data.name as string) ?? (data.toolName as string) ?? (data.kind as string) ?? (data.title as string) ?? "",
+        toolTitle: (data.title as string) ?? "",
         toolCallId: (data.id as string) ?? (data.toolCallId as string) ?? "",
+        toolInput: data.rawInput as Record<string, unknown> | string | undefined,
       };
     }
 
-    if (sessionUpdate === "tool_call_end" || sessionUpdate === "toolCallEnd" || type === "tool_result") {
+    if (sessionUpdate === "tool_call_end" || sessionUpdate === "toolCallEnd" || type === "tool_result" || (sessionUpdate === "tool_call_update" && data.status === "completed")) {
       return {
         type: "tool_result",
         toolCallId: (data.id as string) ?? (data.toolCallId as string) ?? "",
-        text: (data.output as string) ?? (data.text as string) ?? "",
+        text: (data.rawOutput as string) ?? (data.output as string) ?? (data.text as string) ?? "",
       };
     }
 

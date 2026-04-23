@@ -20,13 +20,22 @@ import {
   cancelAllSessions,
   getActiveSessions,
 } from "./session-registry.js";
-import type { HermesPluginConfig, DispatchRequest, HealthReport } from "./types.js";
+import type { HermesPluginConfig, DispatchRequest } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
+import {
+  extractApmplusContext,
+  removeApmplusContext,
+  traceDispatch,
+  shutdownProvider,
+} from "./observability/index.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
 function resolveConfig(raw: unknown): HermesPluginConfig {
   const input = (raw ?? {}) as Record<string, unknown>;
+  const otel = typeof input.otel === "object" && input.otel !== null
+    ? (input.otel as Record<string, unknown>)
+    : undefined;
   return {
     hermesCommand: (input.hermesCommand as string) ?? undefined,
     hermesContainerName: (input.hermesContainerName as string) ?? DEFAULT_CONFIG.hermesContainerName,
@@ -49,6 +58,12 @@ function resolveConfig(raw: unknown): HermesPluginConfig {
     timeout: (input.timeout as number) ?? DEFAULT_CONFIG.timeout,
     autoStrategy: (input.autoStrategy as boolean) ?? DEFAULT_CONFIG.autoStrategy,
     enableLayeredProtocol: (input.enableLayeredProtocol as boolean) ?? DEFAULT_CONFIG.enableLayeredProtocol,
+    otel: otel
+      ? {
+          endpoint: (otel.endpoint as string) ?? undefined,
+          serviceName: (otel.serviceName as string) ?? undefined,
+        }
+      : undefined,
   };
 }
 
@@ -136,26 +151,28 @@ const plugin = {
        * on the OpenClaw side, we first send session/cancel to Hermes before closing.
        */
       async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
-        const task = params.task as string;
+        const apmplusCtx = extractApmplusContext(params);
+        const cleanParams = removeApmplusContext(params);
+
+        const task = cleanParams.task as string;
         if (!task?.trim()) {
           return { content: [{ type: "text", text: "Error: task is required" }] };
         }
 
         const request: DispatchRequest = {
           task,
-          model: params.model as string | undefined,
-          timeout: params.timeout as number | undefined,
+          model: cleanParams.model as string | undefined,
+          timeout: cleanParams.timeout as number | undefined,
         };
 
-        // Apply overrides
-        if (params.contextLevel) {
-          request.contextLevel = params.contextLevel as DispatchRequest["contextLevel"];
+        if (cleanParams.contextLevel) {
+          request.contextLevel = cleanParams.contextLevel as DispatchRequest["contextLevel"];
         }
-        if (params.writeback) {
-          request.writeback = params.writeback as DispatchRequest["writeback"];
+        if (cleanParams.writeback) {
+          request.writeback = cleanParams.writeback as DispatchRequest["writeback"];
         }
-        if (params.credentialScope || params.credentialKeys) {
-          const scopeStr = (params.credentialScope as string) ?? "C1";
+        if (cleanParams.credentialScope || cleanParams.credentialKeys) {
+          const scopeStr = (cleanParams.credentialScope as string) ?? "C1";
           if (scopeStr === "C0") {
             request.credentialScope = { mode: "none" };
           } else if (scopeStr === "C2") {
@@ -163,15 +180,15 @@ const plugin = {
           } else {
             request.credentialScope = {
               mode: "specified",
-              keys: (params.credentialKeys as string[]) ?? [],
+              keys: (cleanParams.credentialKeys as string[]) ?? [],
             };
           }
         }
 
         try {
           // 单次调用可覆盖 enableLayeredProtocol 配置
-          const effectiveConfig = params.enableLayeredProtocol !== undefined
-            ? { ...config, enableLayeredProtocol: params.enableLayeredProtocol as boolean }
+          const effectiveConfig = cleanParams.enableLayeredProtocol !== undefined
+            ? { ...config, enableLayeredProtocol: cleanParams.enableLayeredProtocol as boolean }
             : config;
 
           // 创建 AbortController 并注册到活跃会话表，以便支持外部取消
@@ -193,12 +210,24 @@ const plugin = {
           }
 
           try {
-            const result = await dispatchToHermes(request, {
-              config: effectiveConfig,
-              workspaceDir,
-              logger,
-              signal: abortController.signal,
-            });
+            const result = await traceDispatch(
+              {
+                endpoint: config.otel?.endpoint,
+                apmplusCtx,
+                task,
+                params: cleanParams,
+                defaultModel: config.defaultModel,
+                serviceName: config.otel?.serviceName,
+              },
+              () =>
+                dispatchToHermes(request, {
+                  config: effectiveConfig,
+                  workspaceDir,
+                  logger,
+                  signal: abortController.signal,
+                  allowUserDetailInfoReport: apmplusCtx?.allowUserDetailInfoReport === true,
+                }),
+            );
 
             const meta = [
               `Strategy: ${formatStrategy(result.strategy)}`,
@@ -353,6 +382,12 @@ const plugin = {
       const count = cancelAllSessions();
       if (count > 0) {
         logger.info(`Process signal received — cancelled ${count} active Hermes task(s)`);
+      }
+      try {
+        shutdownProvider();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`Observability shutdown failed: ${msg}`);
       }
     };
     process.on("SIGINT", cleanupHandler);

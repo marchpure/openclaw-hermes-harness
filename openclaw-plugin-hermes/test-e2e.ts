@@ -10,6 +10,8 @@
  */
 
 import { HermesAcpClient } from "./src/acp-client.js";
+import { dispatchToHermes } from "./src/dispatcher.js";
+import { traceDispatch, getOrCreateProvider } from "./src/observability/index.js";
 import { inferStrategy, formatStrategy } from "./src/strategy-engine.js";
 import { assembleContext, serializeContextForPrompt } from "./src/context-assembler.js";
 import { injectCredentials } from "./src/credential-injector.js";
@@ -152,7 +154,8 @@ async function testAcpE2E() {
     console.log(`\n  📨 Hermes 回复:\n  "${result.text}"\n`);
 
     if (result.usage) {
-      info(`Token 使用: input=${result.usage.input_tokens}, output=${result.usage.output_tokens}, total=${result.usage.total_tokens}`);
+      info(`Token 使用: input=${result.usage.input_tokens}, output=${result.usage.output_tokens}, total=${result.usage.total_tokens}, cache_read=${result.usage.cache_read_tokens}, cache_write=${result.usage.cache_write_tokens}`);
+      console.log(`  🔍 完整的 usage 对象:`, JSON.stringify(result.usage, null, 2));
     }
 
     info(`事件流: ${result.events.length} 个事件`);
@@ -193,7 +196,47 @@ async function main() {
   // Test 5
   await testAcpE2E();
 
+  // Test 6
+  await testDispatchE2E();
+
   section("全部测试完成 ✅");
+}
+
+async function testDispatchE2E() {
+  section("Test 6: Full Dispatch E2E with trace");
+  try {
+    const res = await traceDispatch(
+      {
+        endpoint: "http://127.0.0.1:4317",
+        apmplusCtx: {
+          traceId: "test-trace-1234",
+          spanId: "test-span-5678",
+          allowUserDetailInfoReport: true,
+          channelId: "hermes-e2e",
+        },
+        task: "你好，用一段话介绍自己。",
+        params: {
+          task: "你好，用一段话介绍自己。",
+          model: "test-model-abc",
+        },
+      },
+      () =>
+        dispatchToHermes(
+          {
+            task: "你好，用一段话介绍自己。",
+            model: "test-model-abc",
+          },
+          {
+            config,
+            workspaceDir: WORKSPACE,
+            logger: console,
+          },
+        ),
+    );
+    ok(`Dispatch returned successfully. Result length: ${res.result.length}`);
+  } catch (err) {
+    fail(`Dispatch failed: ${err}`);
+  }
 }
 
 main().catch(console.error);

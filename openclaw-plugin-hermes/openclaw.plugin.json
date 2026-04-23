@@ -87,6 +87,20 @@
         "minimum": 1,
         "maximum": 65535,
         "description": "TCP port for Hermes ACP bridge. Default: 3100"
+      },
+      "otel": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "APMPlus OTEL 上报地址。为空则不开启可观测能力。"
+          },
+          "serviceName": {
+            "type": "string",
+            "description": "OTEL service.name 值。不配置则使用环境变量 OTEL_SERVICE_NAME。"
+          }
+        }
       }
     }
   },
@@ -114,6 +128,10 @@
     "enableLayeredProtocol": {
       "label": "Layered Protocol",
       "help": "When enabled, uses the L/C/W layered dispatch protocol. When disabled, tasks are sent directly to Hermes without strategy, context, or credential processing."
+    },
+    "otel": {
+      "label": "OTEL",
+      "help": "OTEL 可观测配置，包括 endpoint 和 serviceName。"
     }
   }
 }
