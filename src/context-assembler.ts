@@ -214,10 +214,13 @@ export async function readSkillsManifest(skillsDir: string): Promise<SkillManife
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       const skillPath = join(skillsDir, entry.name, "SKILL.md");
       try {
-        await stat(skillPath);
+        // Accept both real directories and symlinked skill directories as long
+        // as they materialize to a readable SKILL.md on the host filesystem.
+        const skillStat = await stat(skillPath);
+        if (!skillStat.isFile()) continue;
         // Read first few lines for description
         const content = await readFile(skillPath, "utf8");
         const descMatch = content.match(/^#\s+.*\n\n(.+)/m);
