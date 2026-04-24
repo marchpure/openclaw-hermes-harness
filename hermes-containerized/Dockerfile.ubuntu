@@ -1,0 +1,103 @@
+FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie AS uv_source
+FROM ubuntu:24.04
+
+# ============================================================
+# Hermes Agent — 容器化构建 (中国大陆优化 · Ubuntu 24.04)
+# ============================================================
+# 基于官方 Dockerfile 改造，使用国内镜像源加速
+# 默认以 gateway 常驻模式运行
+# ============================================================
+# FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie AS uv_source
+# FROM ubuntu:24.04
+
+# ─── 代理配置 (通过 --build-arg 传入) ────────────────────────
+ARG http_proxy=
+ARG https_proxy=
+ARG no_proxy=
+ENV http_proxy=${http_proxy} \
+    https_proxy=${https_proxy} \
+    no_proxy=${no_proxy}
+
+# ─── 基础环境变量 ─────────────────────────────────────────
+ENV PYTHONUNBUFFERED=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ─── 替换 APT 为国内源 (清华) ───────────────────────────────
+# Ubuntu 24.04 使用 DEB822 格式，源文件为 /etc/apt/sources.list.d/ubuntu.sources
+# 需替换 archive.ubuntu.com 和 security.ubuntu.com
+RUN sed -i 's|http://archive.ubuntu.com|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/ubuntu.sources && \
+    sed -i 's|http://security.ubuntu.com|http://mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/ubuntu.sources
+
+# ─── 安装系统依赖 + Node.js 20 ───────────────────────────────
+# Ubuntu 24.04 自带 Node.js 18，不满足项目要求 (>=20)，需通过 NodeSource 安装
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        nodejs \
+        python3 python3-dev \
+        ripgrep ffmpeg \
+        libffi-dev \
+        procps git && \
+    rm -rf /var/lib/apt/lists/*
+
+# ─── 配置 npm 国内源 ──────────────────────────────────────
+RUN npm config set registry https://registry.npmmirror.com
+
+# ─── 配置 pip 源 (清华主源 + 官方 fallback) ──────────────────
+RUN mkdir -p /etc/pip && \
+    echo '[global]' > /etc/pip/pip.conf && \
+    echo 'index-url = https://pypi.tuna.tsinghua.edu.cn/simple' >> /etc/pip/pip.conf && \
+    echo 'extra-index-url = https://pypi.org/simple' >> /etc/pip/pip.conf && \
+    echo 'trusted-host = pypi.tuna.tsinghua.edu.cn pypi.org' >> /etc/pip/pip.conf
+
+# ─── 配置 uv 源 (清华主源 + 官方 fallback) ──────────────────
+ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV UV_EXTRA_INDEX_URL=https://pypi.org/simple
+
+# ─── 非 root 用户 (仅用于 Python 依赖安装阶段) ──────────────
+RUN useradd -u 10000 -m -d /opt/data hermes
+
+# ─── 复制工具 ──────────────────────────────────────────────
+COPY --from=uv_source /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
+
+# ─── 复制源码 ──────────────────────────────────────────────
+COPY src/ /opt/hermes/
+
+# ─── 复制自定义脚本 ────────────────────────────────────────
+COPY scripts/entrypoint-gateway.sh /opt/hermes/docker/entrypoint-gateway.sh
+COPY scripts/entrypoint-acp.sh     /opt/hermes/docker/entrypoint-acp.sh
+COPY scripts/acp-tcp-server.py     /opt/hermes/acp-tcp-server.py
+
+WORKDIR /opt/hermes
+
+# ─── 安装 Node 依赖 + Playwright ──────────────────────────
+RUN npm install --prefer-offline --no-audit && \
+    npx playwright install --with-deps chromium --only-shell && \
+    cd /opt/hermes/scripts/whatsapp-bridge && \
+    npm install --prefer-offline --no-audit && \
+    npm cache clean --force
+
+# ─── 安装 Python 依赖 ─────────────────────────────────────
+RUN chown -R hermes:hermes /opt/hermes
+USER hermes
+
+RUN uv venv && \
+    uv pip install --no-cache-dir -e ".[all]"
+
+# ─── 设置入口 ──────────────────────────────────────────────
+USER root
+RUN chmod +x /usr/local/bin/uv /usr/local/bin/uvx \
+             /opt/hermes/docker/entrypoint-gateway.sh \
+             /opt/hermes/docker/entrypoint-acp.sh
+
+# ─── 清除代理 (运行时不需要) ──────────────────────────────
+ENV http_proxy= \
+    https_proxy= \
+    no_proxy=
+
+ENV HERMES_HOME=/opt/data
+VOLUME [ "/opt/data" ]
+ENTRYPOINT [ "/opt/hermes/docker/entrypoint-acp.sh" ]

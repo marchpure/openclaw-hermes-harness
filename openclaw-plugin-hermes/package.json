@@ -1,0 +1,40 @@
+{
+  "name": "openclaw-plugin-hermes",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "OpenClaw plugin — delegate heavy tasks to containerized Hermes Agent via ACP",
+  "main": "dist/index.js",
+  "files": [
+    "src/",
+    "dist/",
+    "openclaw.plugin.json",
+    "README.md",
+    "AGENTS.md",
+    "tsconfig.json"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2"
+    }
+  },
+  "license": "MIT",
+  "scripts": {
+    "build": "npx tsc",
+    "test:skill-writeback": "npx tsx scripts/test-skill-writeback.ts",
+    "test:skill-evolution": "npx tsx scripts/test-skill-evolution.ts",
+    "test:runtime:session-history": "npx tsx scripts/test-session-history-projection.ts",
+    "test:runtime:static": "npx tsx scripts/test-plugin-registration-static.ts",
+    "test:runtime:projection": "npx tsx scripts/test-projection.ts",
+    "test:runtime:regression": "npx tsx scripts/test-runtime-regression.ts",
+    "test:runtime:gateway": "npx tsx scripts/test-gateway-attempt-full.ts",
+    "test:runtime:full": "npx tsx scripts/test-runtime-full.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

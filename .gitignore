@@ -1,0 +1,29 @@
+# 敏感文件
+.env
+hermes-containerized/.env
+hermes-containerized/data/
+
+# 源码 (通过 git clone 管理)
+hermes-containerized/src/
+
+# Node.js
+node_modules/
+
+# OS
+.DS_Store
+*.swp
+*.swo
+
+# Docker
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# IDE
+.vscode/
+.idea/
+.trae/

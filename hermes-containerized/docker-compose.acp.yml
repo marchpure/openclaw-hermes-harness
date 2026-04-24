@@ -1,0 +1,53 @@
+services:
+  hermes-acp:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu
+      args:
+        http_proxy: ${http_proxy:-}
+        https_proxy: ${https_proxy:-}
+        no_proxy: ${no_proxy:-}
+    image: hermes-agent:latest
+    container_name: hermes-acp
+    restart: unless-stopped
+    init: true
+    user: root
+
+    environment:
+      - TZ=Asia/Shanghai
+      - HERMES_UID=${HERMES_UID:-1000}
+      - HERMES_GID=${HERMES_GID:-1000}
+      - HERMES_HOME=/opt/data
+      - ACP_TCP_PORT=3100
+      - ACP_TCP_HOST=0.0.0.0
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./data:/opt/data
+
+    entrypoint: ["/opt/hermes/docker/entrypoint-acp.sh"]
+
+    ports:
+      - "3100:3100"
+
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=256M
+
+    deploy:
+      resources:
+        limits:
+          cpus: "${HERMES_CPU_LIMIT:-2.0}"
+          memory: "${HERMES_MEM_LIMIT:-4G}"
+        reservations:
+          cpus: "0.5"
+          memory: "512M"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
