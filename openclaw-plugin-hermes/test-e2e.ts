@@ -212,7 +212,7 @@ async function testExecenvSkillWriteback() {
   await mkdir(join(workspace, "skills", "existing-skill"), { recursive: true });
   await writeFile(
     join(workspace, "skills", "existing-skill", "SKILL.md"),
-    "---\nname: existing-skill\ndescription: existing\n---\n# Existing\n\noriginal workspace skill\n",
+    "---\nopenclaw_managed: true\nopenclaw_skill_origin: autoskill\nopenclaw_created_by: hermes-runtime\nname: existing-skill\ndescription: existing\n---\n# Existing\n\noriginal workspace skill\n",
     "utf8",
   );
 
@@ -265,6 +265,7 @@ async function testExecenvSkillWriteback() {
     workspace,
     [],
     runtimeSkillDir.replace(/\/skills$/, ""),
+    ["runtime-generated-skill", "existing-skill", "global-runtime-skill"],
   );
 
   const syncedNewSkill = join(workspace, "skills", "runtime-generated-skill", "SKILL.md");

@@ -83,7 +83,7 @@ npm install
 | `autoStrategy` | boolean | `true` | 自动推断策略 |
 | `enableLayeredProtocol` | boolean | `true` | 启用分层协议（L/C/W），关闭后直接派发任务 |
 | `transport` | string | `tcp` | 当前实现只支持本地 Hermes ACP TCP bridge |
-| `skillProjection.hostBackedDenylist` | string[] | `["browser","browser-use","compute-use"]` | 会被识别并过滤掉的 host-backed skill 名称 |
+| `skillProjection.hostBackedDenylist` | string[] | `["browser","browser-use","compute-use","feishu"]` | 会被识别并过滤掉的 host-backed skill 名称 |
 | `execEnvCleanup.maxCount` | number | `200` | 最多保留多少个历史 execenv 目录 |
 
 ### 模型配置口径

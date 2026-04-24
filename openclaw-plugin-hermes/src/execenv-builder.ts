@@ -11,6 +11,7 @@ import type {
   ProjectedSkill,
 } from "./types.js";
 import {
+  resolveHostExecEnvPathFromRuntimePath,
   resolveExecEnvHostPath,
   resolveExecEnvRuntimePath,
 } from "./runtime-paths.js";
@@ -369,26 +370,35 @@ async function syncExecEnvSkillsToWorkspace(
 
   const workspaceSkillsDir = join(workspaceDir, "skills");
   const runtimeSkillsDir = join(runtimeExecEnvPath, "skills");
-  const hostExecEnvSkillsDir = join(resolveExecEnvHostPath(config, runtimeExecEnvPath.split("/").pop() ?? ""), "skills");
+  const hostExecEnvSkillsDir = join(
+    resolveHostExecEnvPathFromRuntimePath(config, runtimeExecEnvPath),
+    "skills",
+  );
   const tempSyncDir = join(tmpdir(), `hermes-skill-sync-${hashText(runtimeExecEnvPath).slice(0, 12)}`);
   const allowedSkills = new Set(createdSkillNames);
 
   await mkdir(workspaceSkillsDir, { recursive: true });
 
   try {
+    const hostExecEnvAvailable = await stat(hostExecEnvSkillsDir)
+      .then((info) => info.isDirectory())
+      .catch(() => false);
+
     let sourceDir = hostExecEnvSkillsDir;
+<<<<<<< HEAD
     const hostMatchesRuntime = hostExecEnvSkillsDir === runtimeSkillsDir;
     const hostExecEnvAvailable = await stat(hostExecEnvSkillsDir)
       .then((info) => info.isDirectory())
       .catch(() => false);
 
     if (!hostMatchesRuntime && !hostExecEnvAvailable) {
+=======
+    if (!hostExecEnvAvailable) {
+>>>>>>> 7406ac6 (fix: tighten hermes projection and writeback validation)
       await rm(tempSyncDir, { recursive: true, force: true });
       await mkdir(tempSyncDir, { recursive: true });
       await streamDirectoryFromContainer(config.hermesContainerName, runtimeSkillsDir, tempSyncDir);
       sourceDir = tempSyncDir;
-    } else if (!hostExecEnvAvailable) {
-      throw new Error("host execenv skills is not a directory");
     }
 
     const skillEntries = await readdir(sourceDir, { withFileTypes: true });

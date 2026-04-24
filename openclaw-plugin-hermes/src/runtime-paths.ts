@@ -22,3 +22,18 @@ export function resolveExecEnvHostPath(config: HermesPluginConfig, taskId: strin
 export function resolveExecEnvRuntimePath(config: HermesPluginConfig, taskId: string): string {
   return join(resolveExecEnvRuntimeRoot(config), taskId);
 }
+
+export function resolveHostExecEnvPathFromRuntimePath(
+  config: HermesPluginConfig,
+  runtimeExecEnvPath: string,
+): string {
+  const runtimeRoot = resolveExecEnvRuntimeRoot(config);
+  if (runtimeExecEnvPath === runtimeRoot) {
+    return resolveExecEnvHostRoot(config);
+  }
+  if (runtimeExecEnvPath.startsWith(`${runtimeRoot}/`)) {
+    const suffix = runtimeExecEnvPath.slice(runtimeRoot.length + 1);
+    return join(resolveExecEnvHostRoot(config), suffix);
+  }
+  return resolveExecEnvHostPath(config, runtimeExecEnvPath.split("/").pop() ?? "");
+}
