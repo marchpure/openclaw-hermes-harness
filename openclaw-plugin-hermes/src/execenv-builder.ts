@@ -360,6 +360,62 @@ async function syncExecEnvSkillsToWorkspace(
   }
 }
 
+async function syncGlobalHermesSkillsToWorkspace(
+  config: HermesPluginConfig,
+  workspaceDir: string,
+): Promise<void> {
+  const workspaceSkillsDir = join(workspaceDir, "skills");
+  const runtimeGlobalSkillsDir = "/opt/data/skills";
+  const hostGlobalSkillsDir = config.hermesDataDir?.trim()
+    ? join(config.hermesDataDir.trim(), "skills")
+    : undefined;
+  const tempSyncDir = join(tmpdir(), `hermes-global-skill-sync-${hashText(workspaceDir).slice(0, 12)}`);
+
+  await mkdir(workspaceSkillsDir, { recursive: true });
+
+  try {
+    let sourceDir = tempSyncDir;
+    const hostGlobalSkillsAvailable = hostGlobalSkillsDir
+      ? await stat(hostGlobalSkillsDir).then((info) => info.isDirectory()).catch(() => false)
+      : false;
+
+    if (hostGlobalSkillsAvailable && hostGlobalSkillsDir) {
+      sourceDir = hostGlobalSkillsDir;
+    } else {
+      await rm(tempSyncDir, { recursive: true, force: true });
+      await mkdir(tempSyncDir, { recursive: true });
+      await streamDirectoryFromContainer(config.hermesContainerName, runtimeGlobalSkillsDir, tempSyncDir);
+    }
+
+    const categoryEntries = await readdir(sourceDir, { withFileTypes: true });
+    for (const categoryEntry of categoryEntries) {
+      if (!categoryEntry.isDirectory()) continue;
+      const categoryDir = join(sourceDir, categoryEntry.name);
+      const skillEntries = await readdir(categoryDir, { withFileTypes: true }).catch(() => []);
+      for (const skillEntry of skillEntries) {
+        if (!skillEntry.isDirectory()) continue;
+        const sourceSkillDir = join(categoryDir, skillEntry.name);
+        const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
+        try {
+          const skillFileStat = await stat(sourceSkillFile);
+          if (!skillFileStat.isFile()) continue;
+        } catch {
+          continue;
+        }
+        await cp(sourceSkillDir, join(workspaceSkillsDir, skillEntry.name), {
+          recursive: true,
+          force: true,
+          dereference: true,
+        });
+      }
+    }
+  } catch {
+    // Hermes global skills may be unavailable in some deployments.
+  } finally {
+    await rm(tempSyncDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 export async function mirrorWorkspaceToContainer(
   config: HermesPluginConfig,
   workspaceDir: string,
@@ -410,6 +466,11 @@ export async function mirrorWorkspaceFromContainer(
   if (runtimeExecEnvPath) {
     await syncExecEnvSkillsToWorkspace(config, workspaceDir, runtimeExecEnvPath);
   }
+
+  // Hermes skill_manage writes may land in the runtime-global /opt/data/skills
+  // store instead of the projected execenv. Mirror those skills back into the
+  // current OpenClaw workspace so agent-local discovery can see them.
+  await syncGlobalHermesSkillsToWorkspace(config, workspaceDir);
 }
 
 export async function buildExecEnv(

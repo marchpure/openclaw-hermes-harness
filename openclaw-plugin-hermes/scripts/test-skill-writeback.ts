@@ -75,6 +75,23 @@ async function main() {
   } catch {
     ok("ignores runtime directories without SKILL.md");
   }
+
+  const hostGlobalSkillDir = join(config.hermesDataDir!, "skills", "productivity", "global-runtime-skill");
+  await mkdir(hostGlobalSkillDir, { recursive: true });
+  await writeFile(
+    join(hostGlobalSkillDir, "SKILL.md"),
+    "---\nname: global-runtime-skill\ndescription: stored in hermes global skills\n---\n# Global Runtime Skill\n\ncreated inside /opt/data/skills\n",
+    "utf8",
+  );
+
+  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath);
+
+  const globalSkillPath = join(workspace, "skills", "global-runtime-skill", "SKILL.md");
+  const globalSkill = await mustRead(globalSkillPath);
+  if (!globalSkill.includes("created inside /opt/data/skills")) {
+    fail("global Hermes skill was not copied into workspace/skills");
+  }
+  ok("copies Hermes global skills from /opt/data/skills into workspace/skills");
 }
 
 main().catch((err) => {

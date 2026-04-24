@@ -1,8 +1,8 @@
 /**
  * 端到端测试 — 直接调用插件核心模块
- * 
+ *
  * 用法: npx tsx test-e2e.ts
- * 
+ *
  * 测试流程:
  *   1. 健康检查 — 确认 Hermes 容器在跑
  *   2. 策略推断 — 测试几个任务的自动推断
@@ -30,8 +30,6 @@ const config: HermesPluginConfig = {
 
 const WORKSPACE = "/Users/bytedance/.the-system/workspace";
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
 function section(title: string) {
   console.log(`\n${"═".repeat(60)}`);
   console.log(`  ${title}`);
@@ -41,8 +39,6 @@ function section(title: string) {
 function ok(msg: string) { console.log(`  ✅ ${msg}`); }
 function fail(msg: string) { console.log(`  ❌ ${msg}`); }
 function info(msg: string) { console.log(`  ℹ️  ${msg}`); }
-
-// ─── Test 1: Health Check ───────────────────────────────────────────────────
 
 async function testHealth() {
   section("Test 1: 健康检查");
@@ -59,8 +55,6 @@ async function testHealth() {
     return false;
   }
 }
-
-// ─── Test 2: Strategy Inference ─────────────────────────────────────────────
 
 function testStrategy() {
   section("Test 2: 策略推断");
@@ -85,8 +79,6 @@ function testStrategy() {
   }
 }
 
-// ─── Test 3: Context Assembly ───────────────────────────────────────────────
-
 async function testContextAssembly() {
   section("Test 3: 上下文组装");
 
@@ -97,32 +89,26 @@ async function testContextAssembly() {
       { workspaceDir: WORKSPACE, config },
     );
 
-    const keys = Object.keys(payload).filter(k => {
+    const keys = Object.keys(payload).filter((k) => {
       const v = (payload as any)[k];
-      return v !== undefined && v !== null && (typeof v !== 'object' || Object.keys(v).length > 0);
+      return v !== undefined && v !== null && (typeof v !== "object" || Object.keys(v).length > 0);
     });
     ok(`${level}: 包含 [${keys.join(", ")}]`);
   }
 }
 
-// ─── Test 4: Credential Injection ───────────────────────────────────────────
-
 function testCredentials() {
   section("Test 4: 凭据注入");
 
-  // C0
   const c0 = injectCredentials({ mode: "none" });
   ok(`C0: ${c0.injected.length} 个凭据, ${c0.auditLog.length} 条日志`);
 
-  // C1
   const c1 = injectCredentials({ mode: "specified", keys: ["OPENAI_API_KEY", "GITHUB_TOKEN"] });
-  ok(`C1: ${c1.injected.length} 个凭据注入 (${c1.injected.map(e => e.key).join(", ") || "无匹配"})`);
+  ok(`C1: ${c1.injected.length} 个凭据注入 (${c1.injected.map((e) => e.key).join(", ") || "无匹配"})`);
   for (const log of c1.auditLog) {
     info(log);
   }
 }
-
-// ─── Test 5: Full ACP E2E ───────────────────────────────────────────────────
 
 async function testAcpE2E() {
   section("Test 5: ACP 端到端通信");
@@ -135,17 +121,14 @@ async function testAcpE2E() {
   });
 
   try {
-    // Step 1: Start
     info("启动 ACP 连接...");
     await client.start({}, WORKSPACE);
     ok("ACP 初始化成功");
 
-    // Step 2: New session
     info("创建会话...");
     const sessionId = await client.newSession("/opt/data");
     ok(`会话已创建: ${sessionId}`);
 
-    // Step 3: Prompt
     info("发送测试提示...");
     const result = await client.prompt(
       "你好，请用一句话介绍你自己。",
@@ -166,15 +149,12 @@ async function testAcpE2E() {
     }
 
     ok("ACP 端到端测试通过 🎉");
-
   } catch (err) {
     fail(`ACP 测试失败: ${err}`);
   } finally {
     await client.close().catch(() => {});
   }
 }
-
-// ─── Test 6: Projection Runtime Path ───────────────────────────────────────
 
 async function testProjectionRuntime() {
   section("Test 6: Execution Projection");
@@ -225,8 +205,6 @@ async function testProjectionRuntime() {
   }
 }
 
-// ─── Test 7: Execenv Skill Writeback ───────────────────────────────────────
-
 async function testExecenvSkillWriteback() {
   section("Test 7: Execenv Skill Writeback");
 
@@ -274,6 +252,14 @@ async function testExecenvSkillWriteback() {
   await mkdir(hostInvalidDir, { recursive: true });
   await writeFile(join(hostInvalidDir, "README.md"), "missing SKILL.md", "utf8");
 
+  const hostGlobalSkillDir = join(workspace, ".hermes-data", "skills", "productivity", "global-runtime-skill");
+  await mkdir(hostGlobalSkillDir, { recursive: true });
+  await writeFile(
+    join(hostGlobalSkillDir, "SKILL.md"),
+    "---\nname: global-runtime-skill\ndescription: stored in global hermes skills\n---\n# Global Runtime Skill\n\ncreated by Hermes global skill store\n",
+    "utf8",
+  );
+
   await mirrorWorkspaceFromContainer(
     runtimeConfig,
     workspace,
@@ -283,10 +269,12 @@ async function testExecenvSkillWriteback() {
 
   const syncedNewSkill = join(workspace, "skills", "runtime-generated-skill", "SKILL.md");
   const syncedExistingSkill = join(workspace, "skills", "existing-skill", "SKILL.md");
+  const syncedGlobalSkill = join(workspace, "skills", "global-runtime-skill", "SKILL.md");
   const invalidMirrored = join(workspace, "skills", "invalid-no-skill-md");
 
   const syncedNewContent = await readFile(syncedNewSkill, "utf8").catch(() => "");
   const syncedExistingContent = await readFile(syncedExistingSkill, "utf8").catch(() => "");
+  const syncedGlobalContent = await readFile(syncedGlobalSkill, "utf8").catch(() => "");
 
   if (syncedNewContent.includes("created by Hermes runtime")) {
     ok("execenv 新增 skill 已同步回 workspace/skills");
@@ -300,6 +288,12 @@ async function testExecenvSkillWriteback() {
     fail("workspace 已有 skill 未被 execenv 更新");
   }
 
+  if (syncedGlobalContent.includes("created by Hermes global skill store")) {
+    ok("Hermes 全局技能库 /opt/data/skills 已同步回 workspace/skills");
+  } else {
+    fail("Hermes 全局技能库 /opt/data/skills 未同步回 workspace/skills");
+  }
+
   try {
     await stat(invalidMirrored);
     fail("缺少 SKILL.md 的无效目录不应被同步");
@@ -308,34 +302,20 @@ async function testExecenvSkillWriteback() {
   }
 }
 
-// ─── Main ───────────────────────────────────────────────────────────────────
-
 async function main() {
   console.log("\n🚀 OpenClaw × Hermes 插件 — 端到端测试\n");
 
-  // Test 1
   const healthy = await testHealth();
   if (!healthy) {
     fail("容器未运行，跳过后续测试。先运行: cd hermes-containerized && docker compose up -d");
     process.exit(1);
   }
 
-  // Test 2
   testStrategy();
-
-  // Test 3
   await testContextAssembly();
-
-  // Test 4
   testCredentials();
-
-  // Test 5
   await testAcpE2E();
-
-  // Test 6
   await testProjectionRuntime();
-
-  // Test 7
   await testExecenvSkillWriteback();
 
   section("全部测试完成 ✅");
