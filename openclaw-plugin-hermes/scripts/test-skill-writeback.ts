@@ -34,10 +34,24 @@ async function main() {
     "utf8",
   );
 
+  await mkdir(join(workspace, "skills", "managed-existing-skill"), { recursive: true });
+  await writeFile(
+    join(workspace, "skills", "managed-existing-skill", "SKILL.md"),
+    "---\nopenclaw_managed: true\nopenclaw_skill_origin: autoskill\nopenclaw_created_by: hermes-runtime\nname: managed-existing-skill\ndescription: workspace copy\n---\n# Managed Existing\n\nworkspace version\n",
+    "utf8",
+  );
+
   await mkdir(join(hostExecEnvSkillsDir, "existing-skill"), { recursive: true });
   await writeFile(
     join(hostExecEnvSkillsDir, "existing-skill", "SKILL.md"),
     "---\nname: existing-skill\ndescription: runtime copy\n---\n# Existing\n\nruntime updated version\n",
+    "utf8",
+  );
+
+  await mkdir(join(hostExecEnvSkillsDir, "managed-existing-skill"), { recursive: true });
+  await writeFile(
+    join(hostExecEnvSkillsDir, "managed-existing-skill", "SKILL.md"),
+    "---\nname: managed-existing-skill\ndescription: runtime copy\n---\n# Managed Existing\n\nruntime updated version\n",
     "utf8",
   );
 
@@ -57,10 +71,17 @@ async function main() {
   await mkdir(join(hostExecEnvSkillsDir, "invalid-dir"), { recursive: true });
   await writeFile(join(hostExecEnvSkillsDir, "invalid-dir", "README.md"), "missing skill md", "utf8");
 
-  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath, ["existing-skill", "new-runtime-skill"]);
+  await mirrorWorkspaceFromContainer(
+    config,
+    workspace,
+    [],
+    runtimeExecEnvPath,
+    ["existing-skill", "managed-existing-skill", "new-runtime-skill"],
+  );
 
   const newSkillPath = join(workspace, "skills", "new-runtime-skill", "SKILL.md");
   const existingSkillPath = join(workspace, "skills", "existing-skill", "SKILL.md");
+  const managedExistingSkillPath = join(workspace, "skills", "managed-existing-skill", "SKILL.md");
   const invalidPath = join(workspace, "skills", "invalid-dir");
   const unrelatedSkillPath = join(workspace, "skills", "unrelated-runtime-skill");
 
@@ -71,10 +92,16 @@ async function main() {
   ok("copies new runtime-generated skill into workspace/skills");
 
   const existingSkill = await mustRead(existingSkillPath);
-  if (!existingSkill.includes("runtime updated version")) {
-    fail("existing workspace skill was not refreshed from runtime execenv");
+  if (!existingSkill.includes("workspace version")) {
+    fail("non-autoskill existing workspace skill should not be refreshed from runtime execenv");
   }
-  ok("refreshes existing workspace skill from runtime execenv");
+  ok("does not refresh non-autoskill existing workspace skill from runtime execenv");
+
+  const managedExistingSkill = await mustRead(managedExistingSkillPath);
+  if (!managedExistingSkill.includes("runtime updated version")) {
+    fail("autoskill-managed existing workspace skill was not refreshed from runtime execenv");
+  }
+  ok("refreshes autoskill-managed existing workspace skill from runtime execenv");
 
   try {
     await stat(invalidPath);

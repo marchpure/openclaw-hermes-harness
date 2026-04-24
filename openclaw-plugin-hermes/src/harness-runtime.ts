@@ -3,6 +3,7 @@ import type {
   AgentHarnessAttemptResult,
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
+import { readFile } from "node:fs/promises";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
 import {
@@ -17,7 +18,7 @@ import {
   resolveStableSessionAnchor,
   writeSessionBinding,
 } from "./runtime-client.js";
-import { extractCreatedSkillNames } from "./result-processor.js";
+import { extractTouchedSkillNames } from "./result-processor.js";
 import type { AcpSessionEvent, HermesPluginConfig } from "./types.js";
 
 type HarnessMessage = NonNullable<AgentHarnessAttemptResult["messagesSnapshot"]>[number];
@@ -55,6 +56,9 @@ const ZERO_ASSISTANT_USAGE = {
   output: 0,
   total: 0,
 };
+
+const MAX_HISTORY_MESSAGES = 12;
+const MAX_HISTORY_CHARS = 12000;
 
 const CONTEXT_LEVEL_ORDER = {
   L0: 0,
@@ -110,6 +114,91 @@ function extractWorkspacePaths(prompt: string, workspaceDir: string): string[] {
   return [...new Set(matches)];
 }
 
+function flattenMessageContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  const parts: string[] = [];
+  for (const item of content) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const type = typeof record.type === "string" ? record.type : "";
+    if (type === "text" && typeof record.text === "string" && record.text.trim()) {
+      parts.push(record.text.trim());
+      continue;
+    }
+    if (type === "thinking") continue;
+    if (type === "toolCall" && typeof record.name === "string") {
+      parts.push(`[tool call: ${record.name}]`);
+    }
+  }
+  return parts.join("\n").trim();
+}
+
+async function loadConversationHistory(
+  params: AgentHarnessAttemptParams,
+): Promise<{ promptText?: string; messages: HarnessMessage[] }> {
+  const sessionFile = typeof params.sessionFile === "string" ? params.sessionFile.trim() : "";
+  if (!sessionFile) {
+    return { messages: [] };
+  }
+
+  try {
+    const raw = await readFile(sessionFile, "utf8");
+    const parsedMessages: HarnessMessage[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let entry: Record<string, unknown>;
+      try {
+        entry = JSON.parse(trimmed) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (entry.type !== "message") continue;
+      const message = (entry.message ?? {}) as Record<string, unknown>;
+      const role = typeof message.role === "string" ? message.role : "";
+      if (role !== "user" && role !== "assistant") continue;
+      const text = flattenMessageContent(message.content);
+      if (!text) continue;
+      parsedMessages.push({
+        role,
+        content: text,
+        timestamp:
+          typeof message.timestamp === "number"
+            ? message.timestamp
+            : typeof entry.timestamp === "number"
+              ? entry.timestamp
+              : Date.now(),
+      } as HarnessMessage);
+    }
+
+    const currentPrompt = sanitizePromptForHermes(params.prompt);
+    const history = parsedMessages
+      .filter((msg) => !(msg.role === "user" && msg.content === currentPrompt))
+      .slice(-MAX_HISTORY_MESSAGES);
+
+    if (history.length === 0) {
+      return { messages: [] };
+    }
+
+    const blocks = history.map((msg) => `## ${msg.role === "user" ? "User" : "Assistant"}\n${msg.content}`);
+    let promptText = blocks.join("\n\n");
+    if (promptText.length > MAX_HISTORY_CHARS) {
+      promptText = promptText.slice(-MAX_HISTORY_CHARS);
+    }
+    return {
+      promptText,
+      messages: history,
+    };
+  } catch {
+    return { messages: [] };
+  }
+}
+
 /**
  * Create the OpenClaw harness-facing runtime client.
  */
@@ -155,6 +244,7 @@ export async function runHermesHarnessAttempt(
   let lifecycleEnded = false;
   const sanitizedPrompt = sanitizePromptForHermes(params.prompt);
   const referencedWorkspacePaths = extractWorkspacePaths(sanitizedPrompt, params.workspaceDir);
+  const conversationHistory = await loadConversationHistory(params);
   const contextLevel = resolveRuntimeContextLevel(config);
   // The session anchor names the stable Hermes workdir. Prefer OpenClaw's
   // explicit session id so broad session keys do not merge unrelated turns.
@@ -178,6 +268,7 @@ export async function runHermesHarnessAttempt(
     model: params.modelId,
     config,
     sessionAnchor,
+    conversationHistory: conversationHistory.promptText,
   });
 
   try {
@@ -236,7 +327,7 @@ export async function runHermesHarnessAttempt(
     }
 
     const usage = normalizeAcpUsage(result.usage);
-    const createdSkillNames = extractCreatedSkillNames(result.events);
+    const touchedSkillNames = extractTouchedSkillNames(result.events);
     // Pull back only prompt-referenced directories. This preserves observable
     // side effects without tarring large workspace caches.
     await mirrorWorkspaceFromContainer(
@@ -244,7 +335,7 @@ export async function runHermesHarnessAttempt(
       params.workspaceDir,
       referencedWorkspacePaths,
       execution.execEnv.runtimeExecEnvPath,
-      createdSkillNames,
+      touchedSkillNames,
     );
     const assistantText = result.text;
     const lastAssistant = buildAssistantMessage(params, assistantText, usage, {
@@ -252,6 +343,7 @@ export async function runHermesHarnessAttempt(
       errorMessage: null,
     });
     const messagesSnapshot = [
+      ...conversationHistory.messages,
       buildUserMessage(params),
       ...(lastAssistant ? [lastAssistant] : []),
     ] as AgentHarnessAttemptResult["messagesSnapshot"];
@@ -304,7 +396,7 @@ export async function runHermesHarnessAttempt(
       promptError: err,
       promptErrorSource: "prompt",
       finalPromptText: sanitizedPrompt,
-      messagesSnapshot: [buildUserMessage(params), lastAssistant] as AgentHarnessAttemptResult["messagesSnapshot"],
+      messagesSnapshot: [...conversationHistory.messages, buildUserMessage(params), lastAssistant] as AgentHarnessAttemptResult["messagesSnapshot"],
       toolMetas: [...toolMetas.values()],
       lastAssistant,
       currentAttemptAssistant: lastAssistant,

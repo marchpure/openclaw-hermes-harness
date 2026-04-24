@@ -24,6 +24,8 @@
   "scripts": {
     "build": "npx tsc",
     "test:skill-writeback": "npx tsx scripts/test-skill-writeback.ts",
+    "test:skill-evolution": "npx tsx scripts/test-skill-evolution.ts",
+    "test:runtime:session-history": "npx tsx scripts/test-session-history-projection.ts",
     "test:runtime:static": "npx tsx scripts/test-plugin-registration-static.ts",
     "test:runtime:projection": "npx tsx scripts/test-projection.ts",
     "test:runtime:regression": "npx tsx scripts/test-runtime-regression.ts",

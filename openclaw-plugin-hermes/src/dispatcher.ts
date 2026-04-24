@@ -11,8 +11,7 @@
 
 import { HermesAcpClient } from "./acp-client.js";
 import { injectCredentials, buildDockerEnvFlags } from "./credential-injector.js";
-import { processResult, applyWriteback } from "./result-processor.js";
-import { extractCreatedSkillNames } from "./result-processor.js";
+import { processResult, applyWriteback, extractTouchedSkillNames } from "./result-processor.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
 import {
   mirrorWorkspaceFromContainer,
@@ -200,7 +199,7 @@ export async function dispatchToHermes(
     acpText = result.text;
     acpEvents = result.events;
     tokensUsed = result.usage?.total_tokens ?? 0;
-    const createdSkillNames = extractCreatedSkillNames(acpEvents);
+    const touchedSkillNames = extractTouchedSkillNames(acpEvents);
 
     logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
     await mirrorWorkspaceFromContainer(
@@ -208,7 +207,7 @@ export async function dispatchToHermes(
       workspaceDir,
       [],
       execution.execEnv.runtimeExecEnvPath,
-      createdSkillNames,
+      touchedSkillNames,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

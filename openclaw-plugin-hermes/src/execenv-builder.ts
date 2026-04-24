@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -17,6 +17,58 @@ import {
 
 function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex");
+}
+
+const AUTOSKILL_HEADER_LINES = [
+  "openclaw_managed: true",
+  "openclaw_skill_origin: autoskill",
+  "openclaw_created_by: hermes-runtime",
+];
+
+async function readAutoskillMetadata(skillFile: string): Promise<{
+  managed: boolean;
+  autoskill: boolean;
+}> {
+  try {
+    const content = await readFile(skillFile, "utf8");
+    return {
+      managed: /^openclaw_managed:\s*true$/m.test(content),
+      autoskill: /^openclaw_skill_origin:\s*autoskill$/m.test(content),
+    };
+  } catch {
+    return { managed: false, autoskill: false };
+  }
+}
+
+async function ensureAutoskillMetadata(skillDir: string): Promise<void> {
+  const skillFile = join(skillDir, "SKILL.md");
+  let content = await readFile(skillFile, "utf8");
+  const hasManaged = /^openclaw_managed:\s*true$/m.test(content);
+  const hasOrigin = /^openclaw_skill_origin:\s*autoskill$/m.test(content);
+  const hasCreator = /^openclaw_created_by:\s*hermes-runtime$/m.test(content);
+  if (hasManaged && hasOrigin && hasCreator) {
+    return;
+  }
+
+  if (content.startsWith("---\n")) {
+    const closing = content.indexOf("\n---\n", 4);
+    if (closing >= 0) {
+      const frontmatter = content.slice(0, closing + 5);
+      const body = content.slice(closing + 5);
+      const extraLines = AUTOSKILL_HEADER_LINES.filter((line) => !frontmatter.includes(line));
+      if (extraLines.length > 0) {
+        const injected = `${frontmatter.slice(0, -4)}${extraLines.join("\n")}\n---\n${body}`;
+        await writeFile(skillFile, injected, "utf8");
+      }
+      return;
+    }
+  }
+
+  const header = `---\n${AUTOSKILL_HEADER_LINES.join("\n")}\n---\n`;
+  if (!content.startsWith(header)) {
+    content = `${header}${content}`;
+    await writeFile(skillFile, content, "utf8");
+  }
 }
 
 async function copyProjectedSkill(
@@ -351,11 +403,23 @@ async function syncExecEnvSkillsToWorkspace(
       } catch {
         continue;
       }
-      await cp(sourceSkillDir, join(workspaceSkillsDir, entry.name), {
+      const targetSkillDir = join(workspaceSkillsDir, entry.name);
+      const targetSkillFile = join(targetSkillDir, "SKILL.md");
+      const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
+      if (targetExists) {
+        const meta = await readAutoskillMetadata(targetSkillFile);
+        if (!meta.managed || !meta.autoskill) {
+          continue;
+        }
+      }
+      await cp(sourceSkillDir, targetSkillDir, {
         recursive: true,
         force: true,
         dereference: true,
       });
+      if (!targetExists) {
+        await ensureAutoskillMetadata(targetSkillDir);
+      }
     }
   } catch {
     // No projected runtime skills yet; nothing to sync back.
@@ -410,11 +474,23 @@ async function syncGlobalHermesSkillsToWorkspace(
         } catch {
           continue;
         }
-        await cp(sourceSkillDir, join(workspaceSkillsDir, skillEntry.name), {
+        const targetSkillDir = join(workspaceSkillsDir, skillEntry.name);
+        const targetSkillFile = join(targetSkillDir, "SKILL.md");
+        const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
+        if (targetExists) {
+          const meta = await readAutoskillMetadata(targetSkillFile);
+          if (!meta.managed || !meta.autoskill) {
+            continue;
+          }
+        }
+        await cp(sourceSkillDir, targetSkillDir, {
           recursive: true,
           force: true,
           dereference: true,
         });
+        if (!targetExists) {
+          await ensureAutoskillMetadata(targetSkillDir);
+        }
       }
     }
   } catch {

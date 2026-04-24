@@ -171,7 +171,7 @@ async function processFullWriteback(
   events: AcpSessionEvent[],
   options: ProcessorOptions,
 ): Promise<{ skills: string[]; warnings: string[] }> {
-  const skills = extractCreatedSkillNames(events);
+  const skills = extractTouchedSkillNames(events);
   const warnings: string[] = [];
 
   // Detect if Hermes created any skills
@@ -216,15 +216,22 @@ async function processFullWriteback(
   return { skills, warnings };
 }
 
-export function extractCreatedSkillNames(events: AcpSessionEvent[]): string[] {
+export function extractTouchedSkillNames(events: AcpSessionEvent[]): string[] {
   const names = new Set<string>();
-  const skillCreationEvents = events.filter(
-    (e) => e.type === "tool_result" && e.text?.includes("skill_create"),
+  const skillEvents = events.filter(
+    (e) =>
+      e.type === "tool_result" &&
+      (
+        e.toolName === "skill_create" ||
+        e.toolName === "skill_manage" ||
+        (typeof e.text === "string" &&
+          (e.text.includes("skill_create") || e.text.includes("skill_manage")))
+      ),
   );
 
-  for (const event of skillCreationEvents) {
+  for (const event of skillEvents) {
     try {
-      const skillInfo = parseSkillCreationEvent(event);
+      const skillInfo = parseTouchedSkillEvent(event);
       if (skillInfo?.name) {
         names.add(skillInfo.name);
       }
@@ -302,21 +309,97 @@ function extractLearning(text: string): string | null {
 /**
  * Parse a skill creation event from Hermes tool output.
  */
-function parseSkillCreationEvent(
+function parseTouchedSkillEvent(
   event: AcpSessionEvent,
 ): { name: string; path: string } | null {
   if (!event.text) return null;
+
+  const text = event.text.trim();
   try {
-    const data = JSON.parse(event.text);
-    if (data.name && data.path) {
-      return { name: data.name, path: data.path };
+    const data = JSON.parse(text);
+    const directName = extractSkillNameFromUnknown(data);
+    if (directName) {
+      return { name: directName, path: extractSkillPathFromUnknown(data) };
     }
   } catch {
-    // Try regex extraction
-    const nameMatch = event.text.match(/skill[_\s]name[：:=]\s*["']?(\S+)/i);
-    if (nameMatch?.[1]) {
-      return { name: nameMatch[1], path: "" };
+    // Fall through to text heuristics.
+  }
+
+  const regexPatterns = [
+    /skill[_\s]name[：:=]\s*["']?([A-Za-z0-9._-]+)/i,
+    /(?:create|created|update|updated|patch|patched|edit|edited)\s+skill[：:=\s]+["']?([A-Za-z0-9._-]+)/i,
+    /skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i,
+  ];
+
+  for (const pattern of regexPatterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return { name: match[1], path: "" };
     }
   }
+
   return null;
+}
+
+function extractSkillNameFromUnknown(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const pathMatch = trimmed.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i);
+    if (pathMatch?.[1]) {
+      return pathMatch[1];
+    }
+    return trimmed ? trimmed : null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+
+  const directCandidates = [
+    record.name,
+    record.skill,
+    record.skill_name,
+    record.skillName,
+  ];
+  for (const candidate of directCandidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  const nestedCandidates = [
+    record.input,
+    record.args,
+    record.arguments,
+    record.payload,
+    record.result,
+    record.output,
+    record.data,
+    record.target,
+    record.file,
+    record.path,
+  ];
+  for (const candidate of nestedCandidates) {
+    const nested = extractSkillNameFromUnknown(candidate);
+    if (nested) return nested;
+  }
+
+  if (typeof record.path === "string") {
+    const pathMatch = record.path.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i);
+    if (pathMatch?.[1]) {
+      return pathMatch[1];
+    }
+  }
+
+  return null;
+}
+
+function extractSkillPathFromUnknown(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  const pathCandidates = [record.path, record.skill_path, record.skillPath];
+  for (const candidate of pathCandidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return "";
 }
