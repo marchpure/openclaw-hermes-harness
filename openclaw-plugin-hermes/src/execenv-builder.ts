@@ -462,9 +462,7 @@ async function syncExecEnvSkillsToWorkspace(
         force: true,
         dereference: true,
       });
-      if (!targetExists) {
-        await ensureAutoskillMetadata(targetSkillDir);
-      }
+      await ensureAutoskillMetadata(targetSkillDir);
     }
   } catch {
     // No projected runtime skills yet; nothing to sync back.
@@ -525,9 +523,7 @@ async function syncGlobalHermesSkillsToWorkspace(
         force: true,
         dereference: true,
       });
-      if (!targetExists) {
-        await ensureAutoskillMetadata(targetSkillDir);
-      }
+      await ensureAutoskillMetadata(targetSkillDir);
     };
 
     const rootEntries = await readdir(sourceDir, { withFileTypes: true });
