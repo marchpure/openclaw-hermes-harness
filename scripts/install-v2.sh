@@ -87,12 +87,15 @@ resolve_base_install_script() {
 resolve_plugin_tarball() {
     if [[ -n "${LOCAL_PLUGIN_DIR}" && -d "${LOCAL_PLUGIN_DIR}" && -f "${LOCAL_PLUGIN_DIR}/openclaw.plugin.json" ]]; then
         command -v npm >/dev/null 2>&1 || die "缺少 npm，无法打包本地插件"
-        local tmp_dir pack_output plugin_tar
+        command -v python3 >/dev/null 2>&1 || die "缺少 python3，无法解析 npm pack 输出"
+        local tmp_dir pack_output packed_name packed_tar plugin_tar
         tmp_dir="$(mktemp -d)"
         TEMP_DIRS+=("${tmp_dir}")
         pack_output="$(cd "${LOCAL_PLUGIN_DIR}" && npm pack --pack-destination "${tmp_dir}" --json)"
-        plugin_tar="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[0]["filename"])' <<<"${pack_output}")"
-        plugin_tar="${tmp_dir}/${plugin_tar}"
+        packed_name="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[0]["filename"])' <<<"${pack_output}")"
+        packed_tar="${tmp_dir}/${packed_name}"
+        plugin_tar="${tmp_dir}/openclaw-plugin-hermes.tar.gz"
+        cp "${packed_tar}" "${plugin_tar}"
         printf '%s\n' "${plugin_tar}"
         return 0
     fi
