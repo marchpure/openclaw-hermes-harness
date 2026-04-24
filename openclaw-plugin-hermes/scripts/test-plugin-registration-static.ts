@@ -16,6 +16,10 @@ async function main() {
     "plugin entry must register the Hermes provider",
   );
   assert(
+    index.includes('id: "openclaw-plugin-hermes"'),
+    "plugin id must be openclaw-plugin-hermes",
+  );
+  assert(
     index.includes("api.registerAgentHarness?.(createHermesAgentHarness"),
     "plugin entry must register the Hermes agent harness",
   );

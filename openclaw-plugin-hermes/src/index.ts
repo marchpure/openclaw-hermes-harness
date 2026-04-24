@@ -29,7 +29,7 @@ function resolveConfig(raw: unknown): HermesPluginConfig {
 // ─── Plugin Definition ──────────────────────────────────────────────────────
 
 const plugin = {
-  id: "hermes",
+  id: "openclaw-plugin-hermes",
   name: "Hermes Agent",
   description: "Delegate heavy tasks to a containerized Hermes Agent via ACP.",
 

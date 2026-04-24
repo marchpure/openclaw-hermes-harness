@@ -52,17 +52,17 @@ async function resumeOrCreateSession(params: {
   const existingBinding = readSessionBinding(params.bindingHash);
   if (existingBinding && existingBinding.runtimeExecEnvPath === params.runtimeExecEnvPath) {
     try {
-      const resumed = await params.acpClient.resumeSession(
+      const loaded = await params.acpClient.loadSession(
         existingBinding.sessionId,
         params.runtimeExecEnvPath,
         params.modelId,
       );
       writeSessionBinding(params.bindingHash, {
-        sessionId: resumed,
+        sessionId: loaded,
         runtimeExecEnvPath: params.runtimeExecEnvPath,
         bindingHash: params.bindingHash,
       });
-      return resumed;
+      return loaded;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       params.logger?.warn(`Session resume failed; creating a new session instead: ${msg}`);

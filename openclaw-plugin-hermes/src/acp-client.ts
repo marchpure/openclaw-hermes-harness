@@ -152,6 +152,25 @@ export class HermesAcpClient extends EventEmitter {
   }
 
   /**
+   * Load an existing ACP session without creating a replacement when missing.
+   * ACP method: "session/load"
+   */
+  async loadSession(sessionId: string, cwd: string, model?: string): Promise<string> {
+    const result = (await this.sendRequest("session/load", {
+      session_id: sessionId,
+      cwd,
+      mcpServers: [],
+      ...(model ? { model } : {}),
+    })) as { session_id?: string; sessionId?: string } | null;
+    if (!result) {
+      throw new Error(`ACP session ${sessionId} not found`);
+    }
+    this.sessionId = result.session_id ?? result.sessionId ?? sessionId;
+    this.logger.info(`Session loaded: ${this.sessionId}`);
+    return this.sessionId;
+  }
+
+  /**
    * Resume an existing ACP session.
    * ACP method: "session/resume"
    */

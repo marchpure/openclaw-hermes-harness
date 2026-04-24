@@ -344,13 +344,13 @@ async function resumeOrCreateSession(params: {
   const existing = readSessionBinding(params.bindingHash);
   if (existing && existing.runtimeExecEnvPath === params.runtimeExecEnvPath) {
     try {
-      const resumed = await params.client.resumeSession(existing.sessionId, params.runtimeExecEnvPath, params.modelId);
+      const loaded = await params.client.loadSession(existing.sessionId, params.runtimeExecEnvPath, params.modelId);
       writeSessionBinding(params.bindingHash, {
-        sessionId: resumed,
+        sessionId: loaded,
         runtimeExecEnvPath: params.runtimeExecEnvPath,
         bindingHash: params.bindingHash,
       });
-      return resumed;
+      return loaded;
     } catch {
       clearSessionBinding(params.bindingHash);
     }
