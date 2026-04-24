@@ -54,6 +54,9 @@ function extractTouchedSkillNamesFromToolMetas(
 ): string[] {
   const names = new Set<string>();
   for (const value of toolMetas.values()) {
+    if (value.toolName === "write" && !value.meta?.includes("SKILL.md")) {
+      continue;
+    }
     const text = value.meta?.trim();
     if (!text) continue;
     const matches = text.match(/skills\/(?:[A-Za-z0-9._-]+\/)?([A-Za-z0-9._-]+)\/SKILL\.md/ig) ?? [];
@@ -74,6 +77,38 @@ function extractTouchedSkillNamesFromText(text: string | undefined): string[] {
     if (name) names.add(name);
   }
   return [...names];
+}
+
+function parseToolResultMeta(outputText: string): {
+  summary?: string;
+  isError: boolean;
+} {
+  const trimmed = outputText.trim();
+  if (!trimmed) {
+    return { isError: false };
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const errorText = typeof parsed.error === "string" ? parsed.error.trim() : "";
+    if (errorText) {
+      return { summary: errorText, isError: true };
+    }
+    if (parsed.success === false) {
+      return {
+        summary: typeof parsed.message === "string" ? parsed.message : trimmed,
+        isError: true,
+      };
+    }
+    if (typeof parsed.path === "string" && parsed.path.trim()) {
+      return { summary: parsed.path.trim(), isError: false };
+    }
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return { summary: parsed.message.trim(), isError: false };
+    }
+  } catch {
+    // Non-JSON tool output is still valid for display; keep the raw text.
+  }
+  return { summary: trimmed, isError: false };
 }
 
 export type HermesRuntimeClient = {
@@ -569,25 +604,27 @@ async function handleHarnessEvent(
     const id = event.toolCallId || `tool:${state.toolMetas.size}`;
     const toolName = event.toolName || state.toolMetas.get(id)?.toolName || "hermes_tool";
     const outputText = (event.text ?? "").trim();
+    const parsedMeta = parseToolResultMeta(outputText);
     state.toolMetas.set(id, {
       toolName,
-      ...(outputText ? { meta: outputText.slice(0, 200) } : {}),
+      ...(parsedMeta.summary ? { meta: parsedMeta.summary.slice(0, 200) } : {}),
     });
-    state.webui.toolResult(toolName, id, outputText || undefined, false);
+    state.webui.toolResult(toolName, id, parsedMeta.summary || undefined, parsedMeta.isError);
     publishHermesHarnessAgentEvent(params, {
       stream: "tool",
       data: {
         phase: "result",
         name: toolName,
         toolCallId: id,
-        ...(outputText
+        ...(parsedMeta.summary
           ? {
               result: {
-                content: [{ type: "text", text: outputText }],
+                content: [{ type: "text", text: parsedMeta.summary }],
               },
-              summary: outputText,
+              summary: parsedMeta.summary,
             }
           : {}),
+        ...(parsedMeta.isError ? { isError: true } : {}),
       },
     });
     return;

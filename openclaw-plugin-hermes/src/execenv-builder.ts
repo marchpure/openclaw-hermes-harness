@@ -22,6 +22,10 @@ import {
   resolveExecEnvRuntimePath,
 } from "./runtime-paths.js";
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -410,7 +414,6 @@ async function syncExecEnvSkillsToWorkspace(
   createdSkillNames: string[],
 ): Promise<void> {
   if (!runtimeExecEnvPath.startsWith("/")) return;
-  if (createdSkillNames.length === 0) return;
 
   const workspaceSkillsDir = join(workspaceDir, "skills");
   const runtimeSkillsDir = join(runtimeExecEnvPath, "skills");
@@ -420,49 +423,65 @@ async function syncExecEnvSkillsToWorkspace(
   );
   const tempSyncDir = join(tmpdir(), `hermes-skill-sync-${hashText(runtimeExecEnvPath).slice(0, 12)}`);
   const allowedSkills = new Set(createdSkillNames);
+  const allowAllNewSkills = createdSkillNames.length === 0;
 
   await mkdir(workspaceSkillsDir, { recursive: true });
 
   try {
-    const hostExecEnvAvailable = await stat(hostExecEnvSkillsDir)
-      .then((info) => info.isDirectory())
-      .catch(() => false);
+    // Hermes may report prompt completion slightly before the execenv skill
+    // write is visible on the mounted host path or fully streamed back out of
+    // the container. Retry briefly so plain `write skills/.../SKILL.md` flows
+    // can still sync into the OpenClaw workspace.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const hostExecEnvAvailable = await stat(hostExecEnvSkillsDir)
+        .then((info) => info.isDirectory())
+        .catch(() => false);
 
-    let sourceDir = hostExecEnvSkillsDir;
-    if (!hostExecEnvAvailable) {
-      await rm(tempSyncDir, { recursive: true, force: true });
-      await mkdir(tempSyncDir, { recursive: true });
-      await streamDirectoryFromContainer(config.hermesContainerName, runtimeSkillsDir, tempSyncDir);
-      sourceDir = tempSyncDir;
-    }
-
-    const skillEntries = await readdir(sourceDir, { withFileTypes: true });
-    for (const entry of skillEntries) {
-      if (!entry.isDirectory()) continue;
-      if (!allowedSkills.has(entry.name)) continue;
-      const sourceSkillDir = join(sourceDir, entry.name);
-      const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
-      try {
-        const skillFileStat = await stat(sourceSkillFile);
-        if (!skillFileStat.isFile()) continue;
-      } catch {
-        continue;
+      let sourceDir = hostExecEnvSkillsDir;
+      if (!hostExecEnvAvailable) {
+        await rm(tempSyncDir, { recursive: true, force: true });
+        await mkdir(tempSyncDir, { recursive: true });
+        await streamDirectoryFromContainer(config.hermesContainerName, runtimeSkillsDir, tempSyncDir);
+        sourceDir = tempSyncDir;
       }
-      const targetSkillDir = join(workspaceSkillsDir, entry.name);
-      const targetSkillFile = join(targetSkillDir, "SKILL.md");
-      const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
-      if (targetExists) {
-        const meta = await readAutoskillMetadata(targetSkillFile);
-        if (!meta.managed || !meta.autoskill) {
+
+      let copiedCount = 0;
+      const skillEntries = await readdir(sourceDir, { withFileTypes: true }).catch(() => []);
+      for (const entry of skillEntries) {
+        if (!entry.isDirectory()) continue;
+        const sourceSkillDir = join(sourceDir, entry.name);
+        const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
+        try {
+          const skillFileStat = await stat(sourceSkillFile);
+          if (!skillFileStat.isFile()) continue;
+        } catch {
           continue;
         }
+        const targetSkillDir = join(workspaceSkillsDir, entry.name);
+        const targetSkillFile = join(targetSkillDir, "SKILL.md");
+        const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
+        if (!allowAllNewSkills && !allowedSkills.has(entry.name)) {
+          continue;
+        }
+        if (targetExists) {
+          const meta = await readAutoskillMetadata(targetSkillFile);
+          if (!meta.managed || !meta.autoskill) {
+            continue;
+          }
+        }
+        await cp(sourceSkillDir, targetSkillDir, {
+          recursive: true,
+          force: true,
+          dereference: true,
+        });
+        await ensureAutoskillMetadata(targetSkillDir);
+        copiedCount += 1;
       }
-      await cp(sourceSkillDir, targetSkillDir, {
-        recursive: true,
-        force: true,
-        dereference: true,
-      });
-      await ensureAutoskillMetadata(targetSkillDir);
+
+      if (copiedCount > 0 || attempt === 4) {
+        break;
+      }
+      await sleep(200);
     }
   } catch {
     // No projected runtime skills yet; nothing to sync back.
