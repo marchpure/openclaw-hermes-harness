@@ -6,7 +6,6 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import * as net from "node:net";
 import type { HermesPluginConfig, HealthReport } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -114,16 +113,8 @@ async function getContainerStats(
 }
 
 async function getHermesVersion(config: HermesPluginConfig): Promise<string> {
-  if (config.hermesCommand) {
-    const parts = config.hermesCommand.split(/\s+/);
-    const versionCmd = parts[0];
-    const versionArgs = [...parts.slice(1).filter((a) => a !== "acp"), "version"];
-    const { stdout } = await execFileAsync(versionCmd, versionArgs, {
-      timeout: EXEC_TIMEOUT,
-    });
-    return stdout.trim();
-  }
-
+  // Health checks intentionally use docker exec instead of the ACP socket so we
+  // can distinguish "container is alive" from "bridge port is reachable".
   const { stdout } = await execFileAsync(
     "docker",
     buildHermesExecArgs(config.hermesContainerName, ["version"]),
@@ -133,46 +124,16 @@ async function getHermesVersion(config: HermesPluginConfig): Promise<string> {
 }
 
 async function checkAcpResponsive(config: HermesPluginConfig): Promise<boolean> {
-  // 通过发送真实的 initialize 握手来检测 ACP TCP 端点是否可用
-  const host = config.tcpHost ?? "127.0.0.1";
-  const port = config.tcpPort ?? 3100;
-
-  return new Promise<boolean>((resolve) => {
-    const timeout = setTimeout(() => {
-      sock.destroy();
-      resolve(false);
-    }, EXEC_TIMEOUT);
-
-    const sock = net.createConnection({ host, port }, () => {
-      const req = JSON.stringify({
-        jsonrpc: "2.0",
-        method: "initialize",
-        params: { protocol_version: 1, client_info: { name: "health-check", version: "1.0.0" }, client_capabilities: {} },
-        id: 0,
-      }) + "\n";
-      sock.write(req);
-    });
-
-    let buf = "";
-    sock.on("data", (chunk: Buffer) => {
-      buf += chunk.toString();
-      if (buf.includes("\n")) {
-        clearTimeout(timeout);
-        sock.destroy();
-        try {
-          const resp = JSON.parse(buf.split("\n")[0]);
-          resolve(resp.result != null && resp.error == null);
-        } catch {
-          resolve(false);
-        }
-      }
-    });
-
-    sock.on("error", () => {
-      clearTimeout(timeout);
-      resolve(false);
-    });
-  });
+  try {
+    await execFileAsync(
+      "docker",
+      buildHermesExecArgs(config.hermesContainerName, ["acp", "--help"]),
+      { timeout: EXEC_TIMEOUT },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

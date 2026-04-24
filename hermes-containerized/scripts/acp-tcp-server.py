@@ -14,11 +14,13 @@ Environment:
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 # Ensure Hermes source is on sys.path
 project_root = str(Path("/opt/hermes"))
@@ -54,6 +56,162 @@ def _load_env() -> None:
 logger = logging.getLogger("acp-tcp-server")
 
 
+def _read_projected_model(cwd: str | None) -> str | None:
+    """Read OpenClaw's projected runtime model from cwd/runtime-config.json."""
+    if not cwd:
+        return None
+    try:
+        config_path = Path(cwd) / "runtime-config.json"
+        if not config_path.is_file():
+            return None
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        model = data.get("model") if isinstance(data, dict) else None
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+    except Exception:
+        logger.debug("Failed to read projected model from %s", cwd, exc_info=True)
+    return None
+
+
+def _patch_hermes_acp_model_routing() -> None:
+    """Teach Hermes' ACP adapter to create sessions with per-request models.
+
+    The stock Hermes ACP adapter builds AIAgent from HERMES_HOME/config.yaml and
+    ignores OpenClaw's projected runtime-config.json. OpenClaw now sends model in
+    session/new|resume when supported, while this fallback also reads cwd so old
+    clients still route dynamically.
+    """
+    from acp_adapter.session import SessionManager, SessionState
+
+    if getattr(SessionManager, "_openclaw_model_patch", False):
+        return
+
+    original_create_session = SessionManager.create_session
+    original_update_cwd = SessionManager.update_cwd
+
+    def create_session(self: Any, cwd: str = ".", model: str | None = None) -> SessionState:
+        resolved_model = (model.strip() if isinstance(model, str) and model.strip() else None) or _read_projected_model(cwd)
+        if not resolved_model:
+            return original_create_session(self, cwd)
+
+        import threading
+        import uuid
+
+        session_id = str(uuid.uuid4())
+        agent = self._make_agent(session_id=session_id, cwd=cwd, model=resolved_model)
+        # Some Hermes provider resolution paths normalize or fall back to the
+        # config default during AIAgent initialization. OpenClaw routing is
+        # explicit, so force the selected model after the agent has built its
+        # client; subsequent API calls read agent.model.
+        try:
+            agent.model = resolved_model
+        except Exception:
+            logger.debug("Failed to force ACP session model", exc_info=True)
+        state = SessionState(
+            session_id=session_id,
+            agent=agent,
+            cwd=cwd,
+            model=getattr(agent, "model", "") or resolved_model,
+            cancel_event=threading.Event(),
+        )
+        with self._lock:
+            self._sessions[session_id] = state
+        self._persist(state)
+
+        try:
+            from tools.terminal_tool import register_task_env_overrides
+            register_task_env_overrides(session_id, {"cwd": cwd})
+        except Exception:
+            logger.debug("Failed to register ACP task cwd override", exc_info=True)
+
+        logger.info("Created ACP session %s (cwd=%s, model=%s)", session_id, cwd, state.model)
+        return state
+
+    def update_cwd(self: Any, session_id: str, cwd: str, model: str | None = None) -> SessionState | None:
+        state = original_update_cwd(self, session_id, cwd)
+        if state is None:
+            return None
+        resolved_model = (model.strip() if isinstance(model, str) and model.strip() else None) or _read_projected_model(cwd)
+        if resolved_model and state.model != resolved_model:
+            logger.info(
+                "ACP session %s model changed from %s to %s; recreating agent",
+                session_id,
+                state.model,
+                resolved_model,
+            )
+            state.agent = self._make_agent(session_id=session_id, cwd=cwd, model=resolved_model)
+            try:
+                state.agent.model = resolved_model
+            except Exception:
+                logger.debug("Failed to force resumed ACP session model", exc_info=True)
+            state.model = getattr(state.agent, "model", "") or resolved_model
+            state.history = []
+            self._persist(state)
+        return state
+
+    SessionManager.create_session = create_session
+    SessionManager.update_cwd = update_cwd
+    SessionManager._openclaw_model_patch = True
+
+    from acp_adapter.server import HermesACPAgent
+
+    original_new_session = HermesACPAgent.new_session
+    original_resume_session = HermesACPAgent.resume_session
+    original_load_session = HermesACPAgent.load_session
+
+    async def new_session(self: Any, cwd: str, mcp_servers: list | None = None, model: str | None = None, **kwargs: Any):
+        state = self.session_manager.create_session(cwd=cwd, model=model)
+        await self._register_session_mcp_servers(state, mcp_servers)
+        logger.info("New session %s (cwd=%s, model=%s)", state.session_id, cwd, state.model)
+        self._schedule_available_commands_update(state.session_id)
+        from acp.schema import NewSessionResponse
+        return NewSessionResponse(session_id=state.session_id)
+
+    async def resume_session(
+        self: Any,
+        cwd: str,
+        session_id: str,
+        mcp_servers: list | None = None,
+        model: str | None = None,
+        **kwargs: Any,
+    ):
+        state = self.session_manager.update_cwd(session_id, cwd, model=model)
+        if state is None:
+            logger.warning("resume_session: session %s not found, creating new", session_id)
+            state = self.session_manager.create_session(cwd=cwd, model=model)
+        await self._register_session_mcp_servers(state, mcp_servers)
+        logger.info("Resumed session %s (model=%s)", state.session_id, state.model)
+        self._schedule_available_commands_update(state.session_id)
+        from acp.schema import ResumeSessionResponse
+        return ResumeSessionResponse()
+
+    async def load_session(
+        self: Any,
+        cwd: str,
+        session_id: str,
+        mcp_servers: list | None = None,
+        model: str | None = None,
+        **kwargs: Any,
+    ):
+        state = self.session_manager.update_cwd(session_id, cwd, model=model)
+        if state is None:
+            logger.warning("load_session: session %s not found", session_id)
+            return None
+        await self._register_session_mcp_servers(state, mcp_servers)
+        logger.info("Loaded session %s (model=%s)", session_id, state.model)
+        self._schedule_available_commands_update(session_id)
+        from acp.schema import LoadSessionResponse
+        return LoadSessionResponse()
+
+    HermesACPAgent.new_session = new_session
+    HermesACPAgent.resume_session = resume_session
+    HermesACPAgent.load_session = load_session
+    HermesACPAgent._openclaw_original_new_session = original_new_session
+    HermesACPAgent._openclaw_original_resume_session = original_resume_session
+    HermesACPAgent._openclaw_original_load_session = original_load_session
+    logger.info("Installed OpenClaw dynamic model routing patch for Hermes ACP")
+
+
 async def handle_client(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -61,6 +219,8 @@ async def handle_client(
     """Handle one TCP client — create a fresh ACP agent and bridge I/O."""
     import acp
     from acp_adapter.server import HermesACPAgent
+
+    _patch_hermes_acp_model_routing()
 
     peer = writer.get_extra_info("peername")
     logger.info("Client connected: %s", peer)

@@ -11,8 +11,8 @@ DATA_DIR="${DATA_DIR:-/opt/hermes-data}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/root/.openclaw/openclaw.json}"
 OPENCLAW_EXTENSIONS_DIR="${OPENCLAW_EXTENSIONS_DIR:-/root/.openclaw/extensions}"
 PLUGIN_CONFIG_KEY="${PLUGIN_CONFIG_KEY:-openclaw-plugin-hermes}"
-PLUGIN_DIR_NAME="${PLUGIN_DIR_NAME:-hermes}"
-PLUGIN_LEGACY_DIR_NAME="${PLUGIN_LEGACY_DIR_NAME:-openclaw-plugin-hermes}"
+PLUGIN_DIR_NAME="${PLUGIN_DIR_NAME:-openclaw-plugin-hermes}"
+PLUGIN_LEGACY_DIR_NAME="${PLUGIN_LEGACY_DIR_NAME:-hermes}"
 HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"
 LOG_DIR_PRIMARY="${LOG_DIR_PRIMARY:-/var/log/hermes-agent}"
 LOG_DIR_FALLBACK="${LOG_DIR_FALLBACK:-/tmp/hermes-agent}"
@@ -56,8 +56,8 @@ Hermes Agent 卸载脚本
   - 删除 Docker 容器 hermes-agent
   - 删除 Docker 镜像 hermes-agent:*（包括回滚标签）
   - 删除 /opt/hermes-data 整个数据目录
-  - 删除 OpenClaw 插件目录 /root/.openclaw/extensions/hermes
-  - 兼容清理旧目录 /root/.openclaw/extensions/openclaw-plugin-hermes
+  - 删除 OpenClaw 插件目录 /root/.openclaw/extensions/openclaw-plugin-hermes
+  - 兼容清理旧目录 /root/.openclaw/extensions/hermes
   - 从 /root/.openclaw/openclaw.json 中移除 Hermes 插件配置
   - 删除升级日志目录 /var/log/hermes-agent 和 /tmp/hermes-agent
 EOF
@@ -213,7 +213,11 @@ cleanup_openclaw_plugin() {
     if command -v jq &>/dev/null; then
         local tmp
         tmp="$(mktemp)"
-        jq --arg pk "${PLUGIN_CONFIG_KEY}" 'del(.plugins.entries[$pk])' "${OPENCLAW_CONFIG}" > "${tmp}"
+        jq --arg pk "${PLUGIN_CONFIG_KEY}" --arg legacy_pk "hermes" '
+            del(.plugins.entries[$pk])
+            | del(.plugins.entries[$legacy_pk])
+            | .plugins.allow = ((.plugins.allow // []) | map(select(. != $pk and . != $legacy_pk)))
+        ' "${OPENCLAW_CONFIG}" > "${tmp}"
         mv "${tmp}" "${OPENCLAW_CONFIG}"
         CONFIG_CHANGED=true
         log_info "已从 OpenClaw 配置移除 Hermes 插件条目"
@@ -227,6 +231,9 @@ cfg, pk = sys.argv[1], sys.argv[2]
 with open(cfg) as f:
     data = json.load(f)
 data.get('plugins', {}).get('entries', {}).pop(pk, None)
+data.get('plugins', {}).get('entries', {}).pop('hermes', None)
+allow = data.get('plugins', {}).get('allow', [])
+data.setdefault('plugins', {})['allow'] = [item for item in allow if item not in (pk, 'hermes')]
 with open(cfg, 'w') as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
 PYEOF
