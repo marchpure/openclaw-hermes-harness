@@ -227,7 +227,7 @@ export const DEFAULT_CONFIG: HermesPluginConfig = {
   autoStrategy: true,
   enableLayeredProtocol: true,
   skillProjection: {
-    hostBackedDenylist: ["browser", "feishu"],
+    hostBackedDenylist: ["browser", "browser-use", "compute-use"],
   },
   execEnvCleanup: {
     enabled: true,
