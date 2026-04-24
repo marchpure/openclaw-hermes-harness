@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import type {
-  CredentialEnvelopeManifest,
   ExecEnvBuildResult,
   ExecEnvInput,
   ExecEnvManifest,
@@ -15,10 +14,6 @@ import {
   resolveExecEnvHostPath,
   resolveExecEnvRuntimePath,
 } from "./runtime-paths.js";
-
-const OPENCLAW_RUNTIME_DIR = ".openclaw";
-const CREDENTIAL_ENV_FILENAME = "credentials.env";
-const CREDENTIAL_MANIFEST_FILENAME = "credential-manifest.json";
 
 function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -144,45 +139,6 @@ function buildManifest(input: {
       sessionBinding: input.sessionBindingHash,
     },
   };
-}
-
-function shellEscapeSingleQuoted(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-async function writeCredentialEnvelope(
-  hostExecEnvPath: string,
-  envelope: ExecEnvInput["credentialEnvelope"],
-): Promise<string | undefined> {
-  const runtimeDir = join(hostExecEnvPath, OPENCLAW_RUNTIME_DIR);
-  const envFilePath = join(runtimeDir, CREDENTIAL_ENV_FILENAME);
-  const manifestPath = join(runtimeDir, CREDENTIAL_MANIFEST_FILENAME);
-
-  await rm(envFilePath, { force: true });
-  await rm(manifestPath, { force: true });
-
-  if (!envelope || Object.keys(envelope.envVars).length === 0) {
-    return undefined;
-  }
-
-  await mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-
-  const envContent = Object.entries(envelope.envVars)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${key}=${shellEscapeSingleQuoted(value)}`)
-    .join("\n") + "\n";
-
-  await writeFile(envFilePath, envContent, { encoding: "utf8", mode: 0o600 });
-
-  const manifest: CredentialEnvelopeManifest = {
-    version: envelope.version,
-    scope: envelope.scope,
-    generatedAt: new Date().toISOString(),
-    envFile: `${OPENCLAW_RUNTIME_DIR}/${CREDENTIAL_ENV_FILENAME}`,
-    envKeys: Object.keys(envelope.envVars).sort(),
-  };
-  await writeFile(manifestPath, JSON.stringify(manifest, null, 2), { encoding: "utf8", mode: 0o600 });
-  return manifestPath;
 }
 
 function runCommand(command: string, args: string[]): Promise<void> {
@@ -422,18 +378,17 @@ async function syncExecEnvSkillsToWorkspace(
   try {
     let sourceDir = hostExecEnvSkillsDir;
     const hostMatchesRuntime = hostExecEnvSkillsDir === runtimeSkillsDir;
-    if (!hostMatchesRuntime) {
+    const hostExecEnvAvailable = await stat(hostExecEnvSkillsDir)
+      .then((info) => info.isDirectory())
+      .catch(() => false);
+
+    if (!hostMatchesRuntime && !hostExecEnvAvailable) {
       await rm(tempSyncDir, { recursive: true, force: true });
       await mkdir(tempSyncDir, { recursive: true });
       await streamDirectoryFromContainer(config.hermesContainerName, runtimeSkillsDir, tempSyncDir);
       sourceDir = tempSyncDir;
-    } else {
-      const hostExecEnvAvailable = await stat(hostExecEnvSkillsDir)
-        .then((info) => info.isDirectory())
-        .catch(() => false);
-      if (!hostExecEnvAvailable) {
-        throw new Error("host execenv skills is not a directory");
-      }
+    } else if (!hostExecEnvAvailable) {
+      throw new Error("host execenv skills is not a directory");
     }
 
     const skillEntries = await readdir(sourceDir, { withFileTypes: true });
@@ -636,8 +591,6 @@ export async function buildExecEnv(
   await rm(join(hostExecEnvPath, "TASK.md"), { force: true });
   await rm(join(hostExecEnvPath, "runtime-config.json"), { force: true });
   await rm(join(hostExecEnvPath, "projection.json"), { force: true });
-  await rm(join(hostExecEnvPath, OPENCLAW_RUNTIME_DIR, CREDENTIAL_ENV_FILENAME), { force: true });
-  await rm(join(hostExecEnvPath, OPENCLAW_RUNTIME_DIR, CREDENTIAL_MANIFEST_FILENAME), { force: true });
   await mkdir(join(hostExecEnvPath, "skills"), { recursive: true });
 
   if (input.contextFiles.soul) {
@@ -676,14 +629,12 @@ export async function buildExecEnv(
   });
   const manifestPath = join(hostExecEnvPath, "projection.json");
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
-  const credentialManifestPath = await writeCredentialEnvelope(hostExecEnvPath, input.credentialEnvelope);
   await mirrorExecEnvToContainer(config, hostExecEnvPath, runtimeExecEnvPath);
 
   return {
     hostExecEnvPath,
     runtimeExecEnvPath,
     manifestPath,
-    credentialManifestPath,
     projectedSkills,
     sessionBindingHash,
   };
@@ -712,4 +663,30 @@ export async function cleanupExecEnvs(config: HermesPluginConfig): Promise<void>
     // If retention needs to be more exact, switch this to an mtime policy.
     await rm(join(root, entry.name), { recursive: true, force: true });
   }
+}
+
+export async function cleanupExecEnv(config: HermesPluginConfig, execEnv: {
+  hostExecEnvPath: string;
+  runtimeExecEnvPath: string;
+}): Promise<void> {
+  await rm(execEnv.hostExecEnvPath, { recursive: true, force: true }).catch(() => {});
+
+  if (!execEnv.runtimeExecEnvPath.startsWith("/")) return;
+
+  const hermesDataDir = config.hermesDataDir?.trim();
+  if (
+    hermesDataDir &&
+    execEnv.hostExecEnvPath.startsWith(`${hermesDataDir}/`) &&
+    execEnv.runtimeExecEnvPath === execEnv.hostExecEnvPath.replace(hermesDataDir, "/opt/data")
+  ) {
+    return;
+  }
+
+  await runCommand("docker", [
+    "exec",
+    config.hermesContainerName,
+    "sh",
+    "-lc",
+    `rm -rf ${JSON.stringify(execEnv.runtimeExecEnvPath)}`,
+  ]).catch(() => {});
 }

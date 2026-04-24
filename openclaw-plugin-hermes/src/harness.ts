@@ -55,7 +55,10 @@ export function createHermesAgentHarness(options?: {
       // reset 当前只清理本地的 session binding，不尝试远程 compact，
       // 因为 Hermes 还没有暴露一个和 OpenClaw compact 语义对齐的接口。
       if (params.sessionFile) {
-        await clearHermesHarnessBinding(params.sessionFile);
+        await clearHermesHarnessBinding(
+          resolveHermesAcpConfig(options?.pluginConfig),
+          params.sessionFile,
+        );
       }
     },
   };

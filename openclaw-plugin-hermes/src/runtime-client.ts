@@ -30,6 +30,7 @@ export interface SessionBindingRecord {
 }
 
 const sessionBindings = new Map<string, SessionBindingRecord>();
+let persistBindingsChain = Promise.resolve();
 
 function resolveOpenClawStateDir(): string {
   const configured = process.env.OPENCLAW_STATE_DIR?.trim();
@@ -58,15 +59,44 @@ function loadPersistedBindings(): void {
   }
 }
 
-function persistBindings(): void {
+function readPersistedBindingsSnapshot(): Map<string, SessionBindingRecord> {
+  const snapshot = new Map<string, SessionBindingRecord>();
+  const storePath = resolveSessionBindingsStorePath();
+  if (!existsSync(storePath)) {
+    return snapshot;
+  }
+  try {
+    const raw = JSON.parse(readFileSync(storePath, "utf8")) as Record<string, SessionBindingRecord>;
+    for (const [key, value] of Object.entries(raw)) {
+      if (!value || typeof value !== "object") continue;
+      if (typeof value.sessionId !== "string" || typeof value.runtimeExecEnvPath !== "string") continue;
+      snapshot.set(key, value);
+    }
+  } catch {
+    // Ignore corrupt on-disk state and prefer the current in-memory mutation.
+  }
+  return snapshot;
+}
+
+function persistBindings(mutator?: (bindings: Map<string, SessionBindingRecord>) => void): void {
   const storePath = resolveSessionBindingsStorePath();
   mkdirSync(dirname(storePath), { recursive: true });
-  console.log(`[hermes-acp] Persisting session bindings -> ${storePath} (${sessionBindings.size})`);
-  writeFileSync(
-    storePath,
-    JSON.stringify(Object.fromEntries(sessionBindings.entries()), null, 2) + "\n",
-    "utf8",
-  );
+  persistBindingsChain = persistBindingsChain
+    .catch(() => {})
+    .then(() => {
+      const merged = readPersistedBindingsSnapshot();
+      for (const [key, value] of sessionBindings.entries()) {
+        merged.set(key, value);
+      }
+      mutator?.(merged);
+      sessionBindings.clear();
+      for (const [key, value] of merged.entries()) {
+        sessionBindings.set(key, value);
+      }
+      console.log(`[hermes-acp] Persisting session bindings -> ${storePath} (${merged.size})`);
+      const snapshot = JSON.stringify(Object.fromEntries(merged.entries()), null, 2) + "\n";
+      writeFileSync(storePath, snapshot, "utf8");
+    });
 }
 
 loadPersistedBindings();
@@ -251,11 +281,38 @@ export function writeSessionBinding(bindingHash: string, record: SessionBindingR
   console.log(
     `[hermes-acp] writeSessionBinding hash=${bindingHash.slice(0, 12)} session=${record.sessionId} cwd=${record.runtimeExecEnvPath}`,
   );
-  persistBindings();
+  persistBindings((bindings) => {
+    bindings.set(bindingHash, record);
+  });
 }
 
 export function clearSessionBinding(bindingHash: string): void {
   sessionBindings.delete(bindingHash);
   console.log(`[hermes-acp] clearSessionBinding hash=${bindingHash.slice(0, 12)}`);
-  persistBindings();
+  persistBindings((bindings) => {
+    bindings.delete(bindingHash);
+  });
+}
+
+export function clearSessionBindingForIdentity(params: {
+  workspaceDir: string;
+  sessionKey?: string;
+  sessionFile?: string;
+  sessionId?: string;
+  agentId?: string;
+}): SessionBindingRecord | undefined {
+  const sessionAnchor = resolveStableSessionAnchor(params);
+  const match = [...sessionBindings.entries()].find(([, record]) =>
+    record.runtimeExecEnvPath.split("/").pop() === sessionAnchor
+  );
+  if (!match) return undefined;
+  const [bindingHash, record] = match;
+  sessionBindings.delete(bindingHash);
+  console.log(
+    `[hermes-acp] clearSessionBindingForIdentity hash=${bindingHash.slice(0, 12)} session=${record.sessionId} anchor=${sessionAnchor}`,
+  );
+  persistBindings((bindings) => {
+    bindings.delete(bindingHash);
+  });
+  return record;
 }

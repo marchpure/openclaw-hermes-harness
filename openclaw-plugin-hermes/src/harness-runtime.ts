@@ -7,12 +7,14 @@ import { readFile } from "node:fs/promises";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
 import {
+  cleanupExecEnv,
   mirrorWorkspaceFromContainer,
   mirrorWorkspaceToContainer,
 } from "./execenv-builder.js";
 import { createWebUiEventBridge } from "./webui-event-bridge.js";
 import {
   clearSessionBinding,
+  clearSessionBindingForIdentity,
   prepareProjectedExecutionEnv,
   readSessionBinding,
   resolveStableSessionAnchor,
@@ -46,33 +48,6 @@ export type HermesRunResponse = {
     activeCount: number;
   };
 };
-
-function extractTouchedSkillNamesFromToolMetas(
-  toolMetas: Map<string, { toolName: string; meta?: string }>,
-): string[] {
-  const names = new Set<string>();
-  for (const value of toolMetas.values()) {
-    const text = value.meta?.trim();
-    if (!text) continue;
-    const matches = text.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/ig) ?? [];
-    for (const match of matches) {
-      const name = match.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i)?.[1];
-      if (name) names.add(name);
-    }
-  }
-  return [...names];
-}
-
-function extractTouchedSkillNamesFromText(text: string | undefined): string[] {
-  if (!text) return [];
-  const names = new Set<string>();
-  const matches = text.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/ig) ?? [];
-  for (const match of matches) {
-    const name = match.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i)?.[1];
-    if (name) names.add(name);
-  }
-  return [...names];
-}
 
 export type HermesRuntimeClient = {
   runAttempt(params: AgentHarnessAttemptParams): Promise<HermesRunResponse>;
@@ -240,8 +215,19 @@ export function createHermesRuntimeClient(options: {
 /**
  * Clear persisted Hermes session binding for OpenClaw harness reset.
  */
-export async function clearHermesHarnessBinding(sessionFile: string): Promise<void> {
-  await clearSessionBinding(sessionFile);
+export async function clearHermesHarnessBinding(
+  config: HermesPluginConfig,
+  sessionFile: string,
+): Promise<void> {
+  const cleared = clearSessionBindingForIdentity({
+    workspaceDir: "",
+    sessionFile,
+  });
+  if (!cleared) return;
+  await cleanupExecEnv(config, {
+    hostExecEnvPath: "",
+    runtimeExecEnvPath: cleared.runtimeExecEnvPath,
+  });
 }
 
 /**
@@ -354,13 +340,7 @@ export async function runHermesHarnessAttempt(
     }
 
     const usage = normalizeAcpUsage(result.usage);
-    const touchedSkillNames = [
-      ...new Set([
-        ...extractTouchedSkillNames(result.events),
-        ...extractTouchedSkillNamesFromToolMetas(toolMetas),
-        ...extractTouchedSkillNamesFromText(result.text),
-      ]),
-    ];
+    const touchedSkillNames = extractTouchedSkillNames(result.events);
     // Pull back only prompt-referenced directories. This preserves observable
     // side effects without tarring large workspace caches.
     await mirrorWorkspaceFromContainer(
@@ -415,6 +395,8 @@ export async function runHermesHarnessAttempt(
       },
     });
     clearSessionBinding(execution.sessionBindingHash);
+    await cleanupExecEnv(config, execution.execEnv);
+    const isTimedOut = err instanceof Error && /timed out/i.test(err.message);
     const lastAssistant = buildAssistantMessage(params, "", undefined, {
       aborted: Boolean(params.abortSignal?.aborted),
       errorMessage: err instanceof Error ? err.message : String(err),
@@ -425,7 +407,7 @@ export async function runHermesHarnessAttempt(
       sessionId: params.sessionId,
       aborted: Boolean(params.abortSignal?.aborted),
       externalAbort: Boolean(params.abortSignal?.aborted),
-      timedOut: false,
+      timedOut: isTimedOut,
       promptError: err,
       promptErrorSource: "prompt",
       finalPromptText: sanitizedPrompt,
