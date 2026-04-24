@@ -385,16 +385,7 @@ async function syncExecEnvSkillsToWorkspace(
       .catch(() => false);
 
     let sourceDir = hostExecEnvSkillsDir;
-<<<<<<< HEAD
-    const hostMatchesRuntime = hostExecEnvSkillsDir === runtimeSkillsDir;
-    const hostExecEnvAvailable = await stat(hostExecEnvSkillsDir)
-      .then((info) => info.isDirectory())
-      .catch(() => false);
-
-    if (!hostMatchesRuntime && !hostExecEnvAvailable) {
-=======
     if (!hostExecEnvAvailable) {
->>>>>>> 7406ac6 (fix: tighten hermes projection and writeback validation)
       await rm(tempSyncDir, { recursive: true, force: true });
       await mkdir(tempSyncDir, { recursive: true });
       await streamDirectoryFromContainer(config.hermesContainerName, runtimeSkillsDir, tempSyncDir);
