@@ -458,39 +458,50 @@ async function syncGlobalHermesSkillsToWorkspace(
       await streamDirectoryFromContainer(config.hermesContainerName, runtimeGlobalSkillsDir, tempSyncDir);
     }
 
-    const categoryEntries = await readdir(sourceDir, { withFileTypes: true });
-    for (const categoryEntry of categoryEntries) {
-      if (!categoryEntry.isDirectory()) continue;
-      const categoryDir = join(sourceDir, categoryEntry.name);
+    const copySkillDir = async (sourceSkillDir: string, skillName: string): Promise<void> => {
+      const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
+      try {
+        const skillFileStat = await stat(sourceSkillFile);
+        if (!skillFileStat.isFile()) return;
+      } catch {
+        return;
+      }
+      const targetSkillDir = join(workspaceSkillsDir, skillName);
+      const targetSkillFile = join(targetSkillDir, "SKILL.md");
+      const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
+      if (targetExists) {
+        const meta = await readAutoskillMetadata(targetSkillFile);
+        if (!meta.managed || !meta.autoskill) {
+          return;
+        }
+      }
+      await cp(sourceSkillDir, targetSkillDir, {
+        recursive: true,
+        force: true,
+        dereference: true,
+      });
+      if (!targetExists) {
+        await ensureAutoskillMetadata(targetSkillDir);
+      }
+    };
+
+    const rootEntries = await readdir(sourceDir, { withFileTypes: true });
+    for (const entry of rootEntries) {
+      if (!entry.isDirectory()) continue;
+
+      // Hermes may create skills directly under /opt/data/skills/<skill>
+      // instead of categorizing them under /opt/data/skills/<category>/<skill>.
+      if (allowedSkills.has(entry.name)) {
+        await copySkillDir(join(sourceDir, entry.name), entry.name);
+        continue;
+      }
+
+      const categoryDir = join(sourceDir, entry.name);
       const skillEntries = await readdir(categoryDir, { withFileTypes: true }).catch(() => []);
       for (const skillEntry of skillEntries) {
         if (!skillEntry.isDirectory()) continue;
         if (!allowedSkills.has(skillEntry.name)) continue;
-        const sourceSkillDir = join(categoryDir, skillEntry.name);
-        const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
-        try {
-          const skillFileStat = await stat(sourceSkillFile);
-          if (!skillFileStat.isFile()) continue;
-        } catch {
-          continue;
-        }
-        const targetSkillDir = join(workspaceSkillsDir, skillEntry.name);
-        const targetSkillFile = join(targetSkillDir, "SKILL.md");
-        const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
-        if (targetExists) {
-          const meta = await readAutoskillMetadata(targetSkillFile);
-          if (!meta.managed || !meta.autoskill) {
-            continue;
-          }
-        }
-        await cp(sourceSkillDir, targetSkillDir, {
-          recursive: true,
-          force: true,
-          dereference: true,
-        });
-        if (!targetExists) {
-          await ensureAutoskillMetadata(targetSkillDir);
-        }
+        await copySkillDir(join(categoryDir, skillEntry.name), skillEntry.name);
       }
     }
   } catch {
