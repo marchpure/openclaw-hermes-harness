@@ -16,10 +16,11 @@ import { injectCredentials } from "./src/credential-injector.js";
 import { checkHealth, formatHealthReport } from "./src/health.js";
 import { DEFAULT_CONFIG } from "./src/types.js";
 import type { HermesPluginConfig } from "./src/types.js";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareProjectedExecutionEnv } from "./src/runtime-client.js";
+import { mirrorWorkspaceFromContainer } from "./src/execenv-builder.js";
 
 const config: HermesPluginConfig = {
   ...DEFAULT_CONFIG,
@@ -224,6 +225,89 @@ async function testProjectionRuntime() {
   }
 }
 
+// ─── Test 7: Execenv Skill Writeback ───────────────────────────────────────
+
+async function testExecenvSkillWriteback() {
+  section("Test 7: Execenv Skill Writeback");
+
+  const workspace = await mkdtemp(join(tmpdir(), "hermes-runtime-writeback-"));
+  await mkdir(join(workspace, "skills", "existing-skill"), { recursive: true });
+  await writeFile(
+    join(workspace, "skills", "existing-skill", "SKILL.md"),
+    "---\nname: existing-skill\ndescription: existing\n---\n# Existing\n\noriginal workspace skill\n",
+    "utf8",
+  );
+
+  const taskId = `task-writeback-${Date.now()}`;
+  const runtimeConfig: HermesPluginConfig = {
+    ...config,
+    hermesDataDir: join(workspace, ".hermes-data"),
+  };
+
+  const execution = await prepareProjectedExecutionEnv({
+    task: "Create a new skill in execenv",
+    taskId,
+    workspaceDir: workspace,
+    contextLevel: "L3",
+    config: runtimeConfig,
+  });
+
+  const runtimeSkillDir = join(execution.execEnv.runtimeExecEnvPath, "skills");
+  const hostNewSkillDir = join(workspace, ".hermes-data", "execenv", taskId, "skills", "runtime-generated-skill");
+  const hostExistingSkillDir = join(workspace, ".hermes-data", "execenv", taskId, "skills", "existing-skill");
+  const hostInvalidDir = join(workspace, ".hermes-data", "execenv", taskId, "skills", "invalid-no-skill-md");
+
+  await mkdir(hostNewSkillDir, { recursive: true });
+  await writeFile(
+    join(hostNewSkillDir, "SKILL.md"),
+    "---\nname: runtime-generated-skill\ndescription: generated in execenv\n---\n# Runtime Generated\n\ncreated by Hermes runtime\n",
+    "utf8",
+  );
+
+  await mkdir(hostExistingSkillDir, { recursive: true });
+  await writeFile(
+    join(hostExistingSkillDir, "SKILL.md"),
+    "---\nname: existing-skill\ndescription: updated in execenv\n---\n# Existing\n\nupdated by Hermes runtime\n",
+    "utf8",
+  );
+
+  await mkdir(hostInvalidDir, { recursive: true });
+  await writeFile(join(hostInvalidDir, "README.md"), "missing SKILL.md", "utf8");
+
+  await mirrorWorkspaceFromContainer(
+    runtimeConfig,
+    workspace,
+    [],
+    runtimeSkillDir.replace(/\/skills$/, ""),
+  );
+
+  const syncedNewSkill = join(workspace, "skills", "runtime-generated-skill", "SKILL.md");
+  const syncedExistingSkill = join(workspace, "skills", "existing-skill", "SKILL.md");
+  const invalidMirrored = join(workspace, "skills", "invalid-no-skill-md");
+
+  const syncedNewContent = await readFile(syncedNewSkill, "utf8").catch(() => "");
+  const syncedExistingContent = await readFile(syncedExistingSkill, "utf8").catch(() => "");
+
+  if (syncedNewContent.includes("created by Hermes runtime")) {
+    ok("execenv 新增 skill 已同步回 workspace/skills");
+  } else {
+    fail("execenv 新增 skill 未同步回 workspace/skills");
+  }
+
+  if (syncedExistingContent.includes("updated by Hermes runtime")) {
+    ok("workspace 已有 skill 可被 execenv 更新版本覆盖");
+  } else {
+    fail("workspace 已有 skill 未被 execenv 更新");
+  }
+
+  try {
+    await stat(invalidMirrored);
+    fail("缺少 SKILL.md 的无效目录不应被同步");
+  } catch {
+    ok("缺少 SKILL.md 的无效目录已正确忽略");
+  }
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -250,6 +334,9 @@ async function main() {
 
   // Test 6
   await testProjectionRuntime();
+
+  // Test 7
+  await testExecenvSkillWriteback();
 
   section("全部测试完成 ✅");
 }

@@ -1,5 +1,6 @@
 import { cp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import type {
@@ -305,6 +306,60 @@ async function mirrorDirectoryFromContainer(config: HermesPluginConfig, hostDir:
   await streamDirectoryFromContainer(container, hostDir, hostDir);
 }
 
+async function syncExecEnvSkillsToWorkspace(
+  config: HermesPluginConfig,
+  workspaceDir: string,
+  runtimeExecEnvPath: string,
+): Promise<void> {
+  if (!runtimeExecEnvPath.startsWith("/")) return;
+
+  const workspaceSkillsDir = join(workspaceDir, "skills");
+  const runtimeSkillsDir = join(runtimeExecEnvPath, "skills");
+  const hostExecEnvSkillsDir = join(resolveExecEnvHostPath(config, runtimeExecEnvPath.split("/").pop() ?? ""), "skills");
+  const tempSyncDir = join(tmpdir(), `hermes-skill-sync-${hashText(runtimeExecEnvPath).slice(0, 12)}`);
+
+  await mkdir(workspaceSkillsDir, { recursive: true });
+
+  try {
+    let sourceDir = hostExecEnvSkillsDir;
+    const hostMatchesRuntime = hostExecEnvSkillsDir === runtimeSkillsDir;
+    const hostExecEnvAvailable = await stat(hostExecEnvSkillsDir)
+      .then((info) => info.isDirectory())
+      .catch(() => false);
+
+    if (!hostMatchesRuntime && !hostExecEnvAvailable) {
+      await rm(tempSyncDir, { recursive: true, force: true });
+      await mkdir(tempSyncDir, { recursive: true });
+      await streamDirectoryFromContainer(config.hermesContainerName, runtimeSkillsDir, tempSyncDir);
+      sourceDir = tempSyncDir;
+    } else if (!hostExecEnvAvailable) {
+      throw new Error("host execenv skills is not a directory");
+    }
+
+    const skillEntries = await readdir(sourceDir, { withFileTypes: true });
+    for (const entry of skillEntries) {
+      if (!entry.isDirectory()) continue;
+      const sourceSkillDir = join(sourceDir, entry.name);
+      const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
+      try {
+        const skillFileStat = await stat(sourceSkillFile);
+        if (!skillFileStat.isFile()) continue;
+      } catch {
+        continue;
+      }
+      await cp(sourceSkillDir, join(workspaceSkillsDir, entry.name), {
+        recursive: true,
+        force: true,
+        dereference: true,
+      });
+    }
+  } catch {
+    // No projected runtime skills yet; nothing to sync back.
+  } finally {
+    await rm(tempSyncDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 export async function mirrorWorkspaceToContainer(
   config: HermesPluginConfig,
   workspaceDir: string,
@@ -331,6 +386,7 @@ export async function mirrorWorkspaceFromContainer(
   config: HermesPluginConfig,
   workspaceDir: string,
   referencedPaths: string[] = [],
+  runtimeExecEnvPath?: string,
 ): Promise<void> {
   if (!config.mirrorExecEnvToContainer) return;
   if (config.transport !== "tcp") return;
@@ -346,6 +402,13 @@ export async function mirrorWorkspaceFromContainer(
     // Pull back only the directories touched by the prompt so host-side
     // assertions observe Hermes edits without mirroring the full workspace.
     await mirrorDirectoryFromContainer(config, dir);
+  }
+
+  // Hermes autoskill writes land in the projected execenv cwd rather than the
+  // real OpenClaw workspace. Persist any generated skills back into the host
+  // workspace so future turns can discover and use them.
+  if (runtimeExecEnvPath) {
+    await syncExecEnvSkillsToWorkspace(config, workspaceDir, runtimeExecEnvPath);
   }
 }
 

@@ -201,7 +201,12 @@ export async function dispatchToHermes(
     tokensUsed = result.usage?.total_tokens ?? 0;
 
     logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
-    await mirrorWorkspaceFromContainer(config, workspaceDir);
+    await mirrorWorkspaceFromContainer(
+      config,
+      workspaceDir,
+      [],
+      execution.execEnv.runtimeExecEnvPath,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger?.error(`Hermes execution failed: ${msg}`);

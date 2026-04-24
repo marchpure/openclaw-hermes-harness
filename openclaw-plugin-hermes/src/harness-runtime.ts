@@ -237,7 +237,12 @@ export async function runHermesHarnessAttempt(
     const usage = normalizeAcpUsage(result.usage);
     // Pull back only prompt-referenced directories. This preserves observable
     // side effects without tarring large workspace caches.
-    await mirrorWorkspaceFromContainer(config, params.workspaceDir, referencedWorkspacePaths);
+    await mirrorWorkspaceFromContainer(
+      config,
+      params.workspaceDir,
+      referencedWorkspacePaths,
+      execution.execEnv.runtimeExecEnvPath,
+    );
     const assistantText = result.text;
     const lastAssistant = buildAssistantMessage(params, assistantText, usage, {
       aborted: false,

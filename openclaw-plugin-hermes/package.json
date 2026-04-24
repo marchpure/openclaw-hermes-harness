@@ -21,6 +21,15 @@
     }
   },
   "license": "MIT",
+  "scripts": {
+    "build": "npx tsc",
+    "test:skill-writeback": "npx tsx scripts/test-skill-writeback.ts",
+    "test:runtime:static": "npx tsx scripts/test-plugin-registration-static.ts",
+    "test:runtime:projection": "npx tsx scripts/test-projection.ts",
+    "test:runtime:regression": "npx tsx scripts/test-runtime-regression.ts",
+    "test:runtime:gateway": "npx tsx scripts/test-gateway-attempt-full.ts",
+    "test:runtime:full": "npx tsx scripts/test-runtime-full.ts"
+  },
   "devDependencies": {
     "@types/node": "^25.6.0",
     "tsx": "^4.21.0",
