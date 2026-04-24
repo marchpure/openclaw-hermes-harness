@@ -47,6 +47,33 @@ export type HermesRunResponse = {
   };
 };
 
+function extractTouchedSkillNamesFromToolMetas(
+  toolMetas: Map<string, { toolName: string; meta?: string }>,
+): string[] {
+  const names = new Set<string>();
+  for (const value of toolMetas.values()) {
+    const text = value.meta?.trim();
+    if (!text) continue;
+    const matches = text.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/ig) ?? [];
+    for (const match of matches) {
+      const name = match.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i)?.[1];
+      if (name) names.add(name);
+    }
+  }
+  return [...names];
+}
+
+function extractTouchedSkillNamesFromText(text: string | undefined): string[] {
+  if (!text) return [];
+  const names = new Set<string>();
+  const matches = text.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/ig) ?? [];
+  for (const match of matches) {
+    const name = match.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i)?.[1];
+    if (name) names.add(name);
+  }
+  return [...names];
+}
+
 export type HermesRuntimeClient = {
   runAttempt(params: AgentHarnessAttemptParams): Promise<HermesRunResponse>;
 };
@@ -327,7 +354,13 @@ export async function runHermesHarnessAttempt(
     }
 
     const usage = normalizeAcpUsage(result.usage);
-    const touchedSkillNames = extractTouchedSkillNames(result.events);
+    const touchedSkillNames = [
+      ...new Set([
+        ...extractTouchedSkillNames(result.events),
+        ...extractTouchedSkillNamesFromToolMetas(toolMetas),
+        ...extractTouchedSkillNamesFromText(result.text),
+      ]),
+    ];
     // Pull back only prompt-referenced directories. This preserves observable
     // side effects without tarring large workspace caches.
     await mirrorWorkspaceFromContainer(

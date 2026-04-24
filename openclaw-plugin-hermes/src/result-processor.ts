@@ -225,7 +225,11 @@ export function extractTouchedSkillNames(events: AcpSessionEvent[]): string[] {
         e.toolName === "skill_create" ||
         e.toolName === "skill_manage" ||
         (typeof e.text === "string" &&
-          (e.text.includes("skill_create") || e.text.includes("skill_manage")))
+          (
+            e.text.includes("skill_create") ||
+            e.text.includes("skill_manage") ||
+            /skills\/[A-Za-z0-9._-]+\/SKILL\.md/i.test(e.text)
+          ))
       ),
   );
 
