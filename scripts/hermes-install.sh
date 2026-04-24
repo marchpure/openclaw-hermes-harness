@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Hermes Agent 一键部署/升级脚本
-# 用法: curl -fsSL <URL>/hermes.sh | bash
-# 或:   ./hermes.sh [--cleanup]
-# 或:   ./hermes.sh --api-key xxx --provider ark --model doubao-seed-code --base-url https://...
+# 用法: curl -fsSL <URL>/hermes-install.sh | bash
+# 或:   ./hermes-install.sh [--cleanup]
+# 或:   ./hermes-install.sh --api-key xxx --provider ark --model doubao-seed-code --base-url https://...
 
 set -Eeuo pipefail
 
@@ -360,11 +360,12 @@ check_openclaw_compatibility() {
     fi
     log_info "OpenClaw 版本检查通过: ${version_output}"
 
-    # 2026.4.8 版本的 --help 输出格式异常，grep 无法匹配子命令关键词，但命令实际可用，更高版本已修复
-    local skip_help_check_version
-    skip_help_check_version="$(version_to_number "2026.4.8")" || skip_help_check_version=99999999
-    if (( version_num == skip_help_check_version )); then
-        log_info "OpenClaw ${version_output} 为 2026.4.8，跳过 --help 子命令探测（该版本 --help 输出格式不包含子命令关键词，但命令实际可用）"
+    # 2026.4.7 ~ 2026.4.8 版本的 --help 输出格式异常，grep 无法匹配子命令关键词，但命令实际可用，更高版本已修复
+    local skip_help_check_from skip_help_check_to
+    skip_help_check_from="$(version_to_number "2026.4.7")" || skip_help_check_from=99999999
+    skip_help_check_to="$(version_to_number "2026.4.8")" || skip_help_check_to=99999999
+    if (( version_num >= skip_help_check_from && version_num <= skip_help_check_to )); then
+        log_info "OpenClaw ${version_output} 为 2026.4.7~2026.4.8，跳过 --help 子命令探测（该版本 --help 输出格式不包含子命令关键词，但命令实际可用）"
     else
         if ! openclaw plugins --help 2>&1 | grep -Eq '(^|[[:space:]])install([[:space:]]|$)'; then
             die "当前 OpenClaw 不支持 plugins install，无法升级插件"
@@ -581,7 +582,13 @@ read_openclaw_models() {
     fi
 
     if command -v jq &>/dev/null; then
-        OC_PROVIDER="$(jq -r '.models.providers | keys[0] // empty' "${cfg}" 2>/dev/null)" || return 1
+        local primary_val
+        primary_val="$(jq -r '.agents.defaults.model.primary // empty' "${cfg}" 2>/dev/null)" || true
+        if [[ -n "${primary_val}" && "${primary_val}" == */* ]]; then
+            OC_PROVIDER="${primary_val%%/*}"
+        else
+            OC_PROVIDER="$(jq -r '.models.providers | keys[0] // empty' "${cfg}" 2>/dev/null)" || return 1
+        fi
         if [[ -z "${OC_PROVIDER}" ]]; then
             return 1
         fi
@@ -600,7 +607,13 @@ except Exception:
 ps = data.get('models', {}).get('providers', {})
 if not ps:
     sys.exit(1)
-name = list(ps.keys())[0]
+primary = data.get('agents', {}).get('defaults', {}).get('model', {}).get('primary', '')
+if primary and '/' in primary:
+    name = primary.split('/', 1)[0]
+    if name not in ps:
+        name = list(ps.keys())[0]
+else:
+    name = list(ps.keys())[0]
 p = ps[name]
 print(f'OC_PROVIDER={name!r}')
 print(f'OC_BASE_URL={p.get("baseUrl", "")!r}')
