@@ -94,7 +94,13 @@ log_info()  { log_line "INFO" "${GREEN}" "$*"; }
 log_warn()  { log_line "WARN" "${YELLOW}" "$*"; }
 log_error() { log_line "ERROR" "${RED}" "$*"; }
 log_step()  { printf '\n%b%s [STEP]%b %s\n' "${CYAN}" "$(timestamp)" "${NC}" "$1"; }
-die()       { log_error "$@"; exit 1; }
+die() {
+    log_error "$@"
+    if [[ "${ROLLBACK_ARMED:-false}" == true && "${ROLLBACK_IN_PROGRESS:-false}" != true ]]; then
+        rollback_upgrade
+    fi
+    exit 1
+}
 
 # ─── 临时文件清理 trap ────────────────────────────────────────────────────────
 TEMP_FILES=()
