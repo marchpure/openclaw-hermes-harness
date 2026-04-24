@@ -10,7 +10,7 @@ if [ -f .env ]; then
 fi
 
 API_KEY="${OPENAI_API_KEY:?请在 .env 中设置 OPENAI_API_KEY}"
-BASE_URL="${OPENAI_BASE_URL:-https://ark.cn-beijing.volces.com/api/coding/v3}"
+BASE_URL="${OPENAI_BASE_URL:?请在 .env 中设置 OPENAI_BASE_URL。国内可用 https://ark.cn-beijing.volces.com/api/coding/v3，海外可用 https://ark.ap-southeast.bytepluses.com/api/coding/v3}"
 MODEL="${1:-minimax-m2.5}"
 
 echo "=== 模型连通性测试 ==="
