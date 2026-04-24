@@ -316,6 +316,7 @@ export function serializeProjectedContextForPrompt(
   runtime?: {
     runtimeCwd: string;
     projectionPath: string;
+    conversationHistory?: string;
   },
 ): string {
   const parts: string[] = [];
@@ -343,6 +344,9 @@ export function serializeProjectedContextForPrompt(
   }
   if (projected.commandAllowlist?.length) {
     parts.push(`# Allowed Commands\n${projected.commandAllowlist.map((c) => `- ${c}`).join("\n")}`);
+  }
+  if (runtime?.conversationHistory) {
+    parts.push(`# Conversation History\n${runtime.conversationHistory}`);
   }
   if (exposedSkills.length > 0) {
     parts.push(`# Available OpenClaw Skills\n${exposedSkills.map(formatProjectedSkill).join("\n")}`);

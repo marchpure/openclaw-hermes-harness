@@ -20,6 +20,7 @@ export interface PreparedExecution {
   bootstrapPrompt: string;
   sessionBindingHash: string;
   sessionAnchor: string;
+  conversationHistory?: string;
 }
 
 export interface SessionBindingRecord {
@@ -182,6 +183,7 @@ export async function prepareProjectedExecutionEnv(params: {
   model?: string;
   config: HermesPluginConfig;
   sessionAnchor?: string;
+  conversationHistory?: string;
 }): Promise<PreparedExecution> {
   // Step 1: reduce the OpenClaw workspace into the context Hermes actually
   // needs. This is still abstract data and has not been materialized to disk.
@@ -232,9 +234,11 @@ export async function prepareProjectedExecutionEnv(params: {
     bootstrapPrompt: serializeProjectedContextForPrompt(projectedContext, execEnv.projectedSkills, {
       runtimeCwd: execEnv.runtimeExecEnvPath,
       projectionPath: `${execEnv.runtimeExecEnvPath}/projection.json`,
+      conversationHistory: params.conversationHistory,
     }),
     sessionBindingHash,
     sessionAnchor,
+    conversationHistory: params.conversationHistory,
   };
 }
 
