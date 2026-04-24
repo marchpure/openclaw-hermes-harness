@@ -8,6 +8,7 @@
 import type {
   ContextLevel,
   CredentialScope,
+  SkillManifestEntry,
   WritebackLevel,
   StrategyTriple,
 } from "./types.js";
@@ -92,6 +93,77 @@ function matchesAny(text: string, patterns: RegExp[]): boolean {
   return patterns.some((p) => p.test(text));
 }
 
+function normalizeText(text: string): string {
+  return text.toLowerCase();
+}
+
+function tokenizeForOverlap(text: string): string[] {
+  const normalized = normalizeText(text);
+  const englishTokens = normalized.match(/[a-z0-9_]{3,}/g) ?? [];
+  const cjkTokens = normalized.match(/[\u4e00-\u9fff]{2,}/g) ?? [];
+  return [...new Set([...englishTokens, ...cjkTokens])];
+}
+
+const WEB_SEARCH_INTENT_SIGNALS = [
+  /查|搜|找|核实|确认|求证|验证|最新|最近|近期|今天|来源|出处|链接|原文|推荐|对比|价格|政策|汇率|辟谣/,
+  /search|lookup|find|verify|fact.?check|latest|recent|today|source|citation|link|recommend|compare|price|policy/i,
+];
+
+function inferIntentLabels(task: string): string[] {
+  const labels: string[] = [];
+  if (matchesAny(task, WEB_SEARCH_INTENT_SIGNALS)) {
+    labels.push("web_search");
+  }
+  return labels;
+}
+
+function skillSupportsIntent(skill: SkillManifestEntry, intent: string): boolean {
+  const searchableText = [skill.name, skill.description ?? ""].join(" ");
+  if (intent === "web_search") {
+    return /web|search|联网|搜索|查找|查询|核实|来源|出处|链接/i.test(searchableText);
+  }
+  return false;
+}
+
+function inferCredentialScopeFromSkills(
+  task: string,
+  availableSkills: SkillManifestEntry[],
+): { keys: string[]; reason: string[] } {
+  const taskTokens = tokenizeForOverlap(task);
+  const intents = inferIntentLabels(task);
+  if (taskTokens.length === 0 || availableSkills.length === 0) {
+    if (intents.length === 0 || availableSkills.length === 0) {
+      return { keys: [], reason: [] };
+    }
+  }
+
+  const matchedKeys = new Set<string>();
+  const reasons: string[] = [];
+
+  for (const skill of availableSkills) {
+    const declaredKeys = [
+      ...(skill.primaryEnv ? [skill.primaryEnv] : []),
+      ...(skill.requiredEnv ?? []),
+    ];
+    if (declaredKeys.length === 0) continue;
+
+    const searchableText = [skill.name, skill.description ?? ""].join(" ");
+    const skillTokens = tokenizeForOverlap(searchableText);
+    const overlap = taskTokens.filter((token) => skillTokens.includes(token));
+    const matchedIntent = intents.find((intent) => skillSupportsIntent(skill, intent));
+    if (overlap.length === 0 && !matchedIntent) continue;
+
+    declaredKeys.forEach((key) => matchedKeys.add(key));
+    reasons.push(
+      overlap.length > 0
+        ? `${skill.name} matched by skill declaration (${overlap.slice(0, 3).join(", ")})`
+        : `${skill.name} matched by skill intent (${matchedIntent})`,
+    );
+  }
+
+  return { keys: [...matchedKeys], reason: reasons };
+}
+
 function inferContextLevel(task: string): { level: ContextLevel; confidence: number; reason: string } {
   // L3: needs skill/MCP management
   if (matchesAny(task, SKILL_SIGNALS)) {
@@ -112,7 +184,10 @@ function inferContextLevel(task: string): { level: ContextLevel; confidence: num
   return { level: "L0", confidence: 0.7, reason: "Simple task — no tools or context needed" };
 }
 
-function inferCredentialScope(task: string): { scope: CredentialScope; confidence: number; reason: string } {
+function inferCredentialScope(
+  task: string,
+  availableSkills: SkillManifestEntry[] = [],
+): { scope: CredentialScope; confidence: number; reason: string } {
   // C2: all credentials (very rare)
   if (matchesAny(task, ALL_CREDENTIALS_SIGNALS)) {
     return {
@@ -131,6 +206,10 @@ function inferCredentialScope(task: string): { scope: CredentialScope; confidenc
       matchedServices.push(pattern.source.slice(0, 20));
     }
   }
+
+  const skillDeclared = inferCredentialScopeFromSkills(task, availableSkills);
+  skillDeclared.keys.forEach((key) => matchedKeys.add(key));
+  matchedServices.push(...skillDeclared.reason);
 
   if (matchedKeys.size > 0) {
     return {
@@ -173,9 +252,9 @@ function inferWritebackLevel(task: string): { level: WritebackLevel; confidence:
 /**
  * Infer the optimal L/C/W strategy triple for a task.
  */
-export function inferStrategy(task: string): StrategyTriple {
+export function inferStrategy(task: string, options?: { availableSkills?: SkillManifestEntry[] }): StrategyTriple {
   const ctx = inferContextLevel(task);
-  const cred = inferCredentialScope(task);
+  const cred = inferCredentialScope(task, options?.availableSkills ?? []);
   const wb = inferWritebackLevel(task);
 
   // Cross-dimensional consistency checks

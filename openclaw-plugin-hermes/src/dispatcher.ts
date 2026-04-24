@@ -10,9 +10,10 @@
  */
 
 import { HermesAcpClient } from "./acp-client.js";
-import { injectCredentials, buildDockerEnvFlags } from "./credential-injector.js";
+import { injectCredentials, buildCredentialEnvelope } from "./credential-injector.js";
 import { processResult, applyWriteback, extractTouchedSkillNames } from "./result-processor.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
+import { readSkillsManifest } from "./context-assembler.js";
 import {
   mirrorWorkspaceFromContainer,
   mirrorWorkspaceToContainer,
@@ -33,6 +34,7 @@ import type {
   WritebackLevel,
   AcpSessionEvent,
 } from "./types.js";
+import { join } from "node:path";
 
 // ─── Logger ─────────────────────────────────────────────────────────────────
 
@@ -40,6 +42,17 @@ interface Logger {
   info(msg: string, ...args: unknown[]): void;
   warn(msg: string, ...args: unknown[]): void;
   error(msg: string, ...args: unknown[]): void;
+}
+
+function extractTouchedSkillNamesFromText(text: string | undefined): string[] {
+  if (!text) return [];
+  const names = new Set<string>();
+  const matches = text.match(/skills\/(?:[A-Za-z0-9._-]+\/)?([A-Za-z0-9._-]+)\/SKILL\.md/ig) ?? [];
+  for (const match of matches) {
+    const name = match.match(/skills\/(?:[A-Za-z0-9._-]+\/)?([A-Za-z0-9._-]+)\/SKILL\.md/i)?.[1];
+    if (name) names.add(name);
+  }
+  return [...names];
 }
 
 async function resumeOrCreateSession(params: {
@@ -122,7 +135,8 @@ export async function dispatchToHermes(
     };
   } else if (config.autoStrategy) {
     // Auto-infer strategy
-    strategy = inferStrategy(request.task);
+    const availableSkills = await readSkillsManifest(join(workspaceDir, "skills"));
+    strategy = inferStrategy(request.task, { availableSkills });
     logger?.info(`Auto-strategy: ${formatStrategy(strategy)} (confidence: ${strategy.confidence})`);
 
     // Apply overrides if any individual dimension is specified
@@ -144,6 +158,17 @@ export async function dispatchToHermes(
 
   // ── Step 2: Assemble Context ────────────────────────────────────────
 
+  // ── Step 3: Resolve Credentials ─────────────────────────────────────
+
+  const credentialResult = injectCredentials(strategy.credential);
+  const credentialEnvelope = buildCredentialEnvelope(strategy.credential, credentialResult.envVars);
+
+  for (const logLine of credentialResult.auditLog) {
+    logger?.info(logLine);
+  }
+
+  // ── Step 2: Assemble Context ────────────────────────────────────────
+
   let execution;
   try {
     execution = await prepareProjectedExecutionEnv({
@@ -153,6 +178,7 @@ export async function dispatchToHermes(
       contextLevel: strategy.context,
       model: request.model,
       config,
+      credentialEnvelope,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -161,14 +187,6 @@ export async function dispatchToHermes(
   }
 
   const promptText = execution.bootstrapPrompt;
-
-  // ── Step 3: Inject Credentials ──────────────────────────────────────
-
-  const credentialResult = injectCredentials(strategy.credential);
-
-  for (const logLine of credentialResult.auditLog) {
-    logger?.info(logLine);
-  }
 
   // ── Step 4: Execute via ACP ─────────────────────────────────────────
 
@@ -181,7 +199,7 @@ export async function dispatchToHermes(
     await mirrorWorkspaceToContainer(config, workspaceDir);
 
     // Start ACP connection with injected credentials
-    await acpClient.start(credentialResult.envVars, execution.execEnv.runtimeExecEnvPath);
+    await acpClient.start({}, execution.execEnv.runtimeExecEnvPath);
 
     // Resume or create session based on execenv binding.
     const sessionId = await resumeOrCreateSession({
@@ -199,7 +217,12 @@ export async function dispatchToHermes(
     acpText = result.text;
     acpEvents = result.events;
     tokensUsed = result.usage?.total_tokens ?? 0;
-    const touchedSkillNames = extractTouchedSkillNames(acpEvents);
+    const touchedSkillNames = [
+      ...new Set([
+        ...extractTouchedSkillNames(acpEvents),
+        ...extractTouchedSkillNamesFromText(acpText),
+      ]),
+    ];
 
     logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
     await mirrorWorkspaceFromContainer(
@@ -313,6 +336,7 @@ async function dispatchDirectly(
 
   const acpClient = new HermesAcpClient(config, logger as any);
   let acpText = "";
+  let acpEvents: AcpSessionEvent[] = [];
   let tokensUsed = 0;
   let bindingHash: string | null = null;
 
@@ -339,10 +363,23 @@ async function dispatchDirectly(
     const result = await acpClient.prompt(request.task, sessionId, { timeout });
 
     acpText = result.text;
+    acpEvents = result.events;
     tokensUsed = result.usage?.total_tokens ?? 0;
+    const touchedSkillNames = [
+      ...new Set([
+        ...extractTouchedSkillNames(acpEvents),
+        ...extractTouchedSkillNamesFromText(acpText),
+      ]),
+    ];
 
     logger?.info(`Direct dispatch completed: ${acpText.length} chars, ${tokensUsed} tokens`);
-    await mirrorWorkspaceFromContainer(config, workspaceDir, [], execution.execEnv.runtimeExecEnvPath, []);
+    await mirrorWorkspaceFromContainer(
+      config,
+      workspaceDir,
+      [],
+      execution.execEnv.runtimeExecEnvPath,
+      touchedSkillNames,
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger?.error(`Direct dispatch failed: ${msg}`);

@@ -107,9 +107,13 @@ function computeSessionBindingHash(input: {
   model: string;
   projectionVersion: string;
   skillNames: string[];
+  sessionIdentity: string;
 }): string {
   // Hash only the dimensions that determine whether an ACP session can be
-  // reused: workspace root, runtime cwd, projection schema, and exposed skills.
+  // reused: workspace root, runtime cwd, projection schema, exposed skills,
+  // and the explicit OpenClaw session identity. Without session identity,
+  // `openclaw agent --local --session-id ...` can still collide with an older
+  // ACP session that happened to share the same projected execenv.
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -118,6 +122,7 @@ function computeSessionBindingHash(input: {
         model: input.model,
         projectionVersion: input.projectionVersion,
         skills: input.skillNames,
+        sessionIdentity: input.sessionIdentity,
       }),
     )
     .digest("hex");
@@ -214,6 +219,7 @@ export async function prepareProjectedExecutionEnv(params: {
   config: HermesPluginConfig;
   sessionAnchor?: string;
   conversationHistory?: string;
+  credentialEnvelope?: import("./types.js").CredentialEnvelope;
 }): Promise<PreparedExecution> {
   // Step 1: reduce the OpenClaw workspace into the context Hermes actually
   // needs. This is still abstract data and has not been materialized to disk.
@@ -227,7 +233,8 @@ export async function prepareProjectedExecutionEnv(params: {
   // must not be projected into the container.
   const projectableSkills = resolveProjectableSkills(projectedContext.discoveredSkills, params.config);
   const runtimeRoot = buildRuntimeRoot(params.config);
-  const sessionAnchor = sanitizeSessionAnchor(params.sessionAnchor ?? params.taskId);
+  const sessionIdentity = params.sessionAnchor ?? params.taskId;
+  const sessionAnchor = sanitizeSessionAnchor(sessionIdentity);
   const runtimeExecEnvPathHint = `${runtimeRoot}/${sessionAnchor}`;
   const resolvedModel = resolveRuntimeModel(params.model, params.config);
   // The binding hash must be stable before buildExecEnv because session resume
@@ -238,6 +245,7 @@ export async function prepareProjectedExecutionEnv(params: {
     model: resolvedModel,
     projectionVersion: params.config.projectionVersion,
     skillNames: projectableSkills.map((skill) => skill.name),
+    sessionIdentity,
   });
   const execEnv = await buildExecEnv(
     params.config,
@@ -251,6 +259,7 @@ export async function prepareProjectedExecutionEnv(params: {
         contextLevel: params.contextLevel,
         projectionVersion: params.config.projectionVersion,
       },
+      credentialEnvelope: params.credentialEnvelope,
     },
     sessionBindingHash,
   );

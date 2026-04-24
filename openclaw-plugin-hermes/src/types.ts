@@ -295,6 +295,8 @@ export interface SkillManifestEntry {
   name: string;
   path: string;
   description?: string;
+  primaryEnv?: string;
+  requiredEnv?: string[];
 }
 
 export interface ProjectedSkill extends SkillManifestEntry {
@@ -323,6 +325,7 @@ export interface ExecEnvInput {
   contextFiles: ProjectedContextFiles;
   projectedSkills: ProjectedSkill[];
   runtimeConfig: Record<string, unknown>;
+  credentialEnvelope?: CredentialEnvelope;
 }
 
 export interface ExecEnvManifest {
@@ -349,6 +352,7 @@ export interface ExecEnvBuildResult {
   hostExecEnvPath: string;
   runtimeExecEnvPath: string;
   manifestPath: string;
+  credentialManifestPath?: string;
   projectedSkills: ProjectedSkill[];
   sessionBindingHash: string;
 }
@@ -367,6 +371,24 @@ export interface CredentialInjectionResult {
   envVars: Record<string, string>;
   auditLog: string[];
 }
+
+export interface CredentialEnvelope {
+  version: string;
+  scope: CredentialScopeMode;
+  envVars: Record<string, string>;
+}
+
+export interface CredentialEnvelopeManifest {
+  version: string;
+  scope: CredentialScopeMode;
+  generatedAt: string;
+  envFile: string;
+  envKeys: string[];
+}
+
+export const OPENCLAW_RUNTIME_DIR = ".openclaw";
+export const CREDENTIAL_ENV_FILENAME = "credentials.env";
+export const CREDENTIAL_MANIFEST_FILENAME = "credential-manifest.json";
 
 // ─── Health ─────────────────────────────────────────────────────────────────
 

@@ -12,7 +12,12 @@
  * Every injection is audit-logged.
  */
 
-import type { CredentialScope, CredentialEntry, CredentialInjectionResult } from "./types.js";
+import type {
+  CredentialScope,
+  CredentialEntry,
+  CredentialEnvelope,
+  CredentialInjectionResult,
+} from "./types.js";
 
 // ─── Known Credential Registry ──────────────────────────────────────────────
 
@@ -47,7 +52,8 @@ const CREDENTIAL_REGISTRY: Record<string, string[]> = {
   aws: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
 
   // Volcengine (ARK)
-  volcengine: ["ARK_API_KEY", "VOLC_ACCESSKEY", "VOLC_SECRETKEY"],
+  volcengine: ["ARK_API_KEY", "VOLC_ACCESSKEY", "VOLC_SECRETKEY", "VOLCENGINE_ACCESS_KEY", "VOLCENGINE_SECRET_KEY"],
+  volcengine_search: ["WEB_SEARCH_API_KEY"],
 };
 
 /** Flatten all known credential env var names */
@@ -139,6 +145,19 @@ export function buildDockerEnvFlags(envVars: Record<string, string>): string[] {
     flags.push("-e", `${key}=${value}`);
   }
   return flags;
+}
+
+export function buildCredentialEnvelope(
+  scope: CredentialScope,
+  envVars: Record<string, string>,
+): CredentialEnvelope | undefined {
+  if (scope.mode === "none") return undefined;
+  if (Object.keys(envVars).length === 0) return undefined;
+  return {
+    version: "openclaw-credential-envelope-v1",
+    scope: scope.mode,
+    envVars: { ...envVars },
+  };
 }
 
 /**

@@ -46,6 +46,64 @@ async function readJsonIfExists(path: string): Promise<unknown | null> {
   }
 }
 
+function parseSkillFrontmatter(content: string): {
+  description?: string;
+  primaryEnv?: string;
+  requiredEnv?: string[];
+} {
+  const match = content.match(/^---\n([\s\S]*?)\n---\n/);
+  if (!match) return {};
+
+  const frontmatter = match[1];
+  const lines = frontmatter.split("\n");
+  let description: string | undefined;
+  let primaryEnv: string | undefined;
+  const requiredEnv: string[] = [];
+  let inMetadata = false;
+  let inOpenClaw = false;
+  let inRequiredEnv = false;
+
+  for (const rawLine of lines) {
+    const indent = rawLine.length - rawLine.trimStart().length;
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (indent === 0 && line.startsWith("description:")) {
+      description = line.slice("description:".length).trim().replace(/^"|"$/g, "");
+    }
+
+    if (indent === 0) {
+      inMetadata = line === "metadata:";
+      if (!inMetadata) {
+        inOpenClaw = false;
+        inRequiredEnv = false;
+      }
+    } else if (indent === 2 && inMetadata) {
+      inOpenClaw = line === "openclaw:";
+      if (!inOpenClaw) {
+        inRequiredEnv = false;
+      }
+    } else if (indent === 4 && inMetadata && inOpenClaw) {
+      if (line.startsWith("primaryEnv:")) {
+        primaryEnv = line.slice("primaryEnv:".length).trim().replace(/^"|"$/g, "");
+        inRequiredEnv = false;
+      } else if (line === "requiredEnv:") {
+        inRequiredEnv = true;
+      } else {
+        inRequiredEnv = false;
+      }
+    } else if (indent >= 6 && inMetadata && inOpenClaw && inRequiredEnv && line.startsWith("- ")) {
+      requiredEnv.push(line.slice(2).trim().replace(/^"|"$/g, ""));
+    }
+  }
+
+  return {
+    description,
+    primaryEnv,
+    requiredEnv: requiredEnv.length > 0 ? requiredEnv : undefined,
+  };
+}
+
 /**
  * Rough token estimate: ~2.75 chars per token for mixed CJK/English.
  */
@@ -220,11 +278,14 @@ export async function readSkillsManifest(skillsDir: string): Promise<SkillManife
         await stat(skillPath);
         // Read first few lines for description
         const content = await readFile(skillPath, "utf8");
+        const frontmatter = parseSkillFrontmatter(content);
         const descMatch = content.match(/^#\s+.*\n\n(.+)/m);
         skills.push({
           name: entry.name,
           path: skillPath,
-          description: descMatch?.[1]?.slice(0, 200),
+          description: frontmatter.description ?? descMatch?.[1]?.slice(0, 400),
+          primaryEnv: frontmatter.primaryEnv,
+          requiredEnv: frontmatter.requiredEnv,
         });
       } catch {
         // No SKILL.md, skip

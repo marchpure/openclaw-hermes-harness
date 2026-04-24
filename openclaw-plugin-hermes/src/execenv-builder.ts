@@ -4,11 +4,17 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import type {
+  CredentialEnvelopeManifest,
   ExecEnvBuildResult,
   ExecEnvInput,
   ExecEnvManifest,
   HermesPluginConfig,
   ProjectedSkill,
+} from "./types.js";
+import {
+  CREDENTIAL_ENV_FILENAME,
+  CREDENTIAL_MANIFEST_FILENAME,
+  OPENCLAW_RUNTIME_DIR,
 } from "./types.js";
 import {
   resolveHostExecEnvPathFromRuntimePath,
@@ -142,6 +148,44 @@ function buildManifest(input: {
   };
 }
 
+function shellEscapeSingleQuoted(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function writeCredentialEnvelope(
+  hostExecEnvPath: string,
+  envelope: ExecEnvInput["credentialEnvelope"],
+): Promise<string | undefined> {
+  const runtimeDir = join(hostExecEnvPath, OPENCLAW_RUNTIME_DIR);
+  const envFilePath = join(runtimeDir, CREDENTIAL_ENV_FILENAME);
+  const manifestPath = join(runtimeDir, CREDENTIAL_MANIFEST_FILENAME);
+
+  await rm(envFilePath, { force: true });
+  await rm(manifestPath, { force: true });
+
+  if (!envelope || Object.keys(envelope.envVars).length === 0) {
+    return undefined;
+  }
+
+  await mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+
+  const envContent = Object.entries(envelope.envVars)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `export ${key}=${shellEscapeSingleQuoted(value)}`)
+    .join("\n") + "\n";
+
+  await writeFile(envFilePath, envContent, { encoding: "utf8", mode: 0o600 });
+
+  const manifest: CredentialEnvelopeManifest = {
+    version: envelope.version,
+    scope: envelope.scope,
+    generatedAt: new Date().toISOString(),
+    envFile: `${OPENCLAW_RUNTIME_DIR}/${CREDENTIAL_ENV_FILENAME}`,
+    envKeys: Object.keys(envelope.envVars).sort(),
+  };
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2), { encoding: "utf8", mode: 0o600 });
+  return manifestPath;
+}
 function runCommand(command: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -505,7 +549,7 @@ async function syncGlobalHermesSkillsToWorkspace(
         await copySkillDir(join(categoryDir, skillEntry.name), skillEntry.name);
       }
     }
-  } catch {
+  } catch (err) {
     // Hermes global skills may be unavailable in some deployments.
   } finally {
     await rm(tempSyncDir, { recursive: true, force: true }).catch(() => {});

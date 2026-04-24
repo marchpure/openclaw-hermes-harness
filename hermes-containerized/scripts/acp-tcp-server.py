@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import signal
 import sys
 from pathlib import Path
@@ -54,6 +55,67 @@ def _load_env() -> None:
 
 
 logger = logging.getLogger("acp-tcp-server")
+OPENCLAW_RUNTIME_DIR = ".openclaw"
+CREDENTIAL_MANIFEST_FILENAME = "credential-manifest.json"
+
+
+def _read_openclaw_credential_env(cwd: str | None) -> dict[str, str]:
+    """Load OpenClaw session-scoped credential env from the projected execenv."""
+    if not cwd:
+        return {}
+
+    try:
+        runtime_dir = Path(cwd) / OPENCLAW_RUNTIME_DIR
+        manifest_path = runtime_dir / CREDENTIAL_MANIFEST_FILENAME
+        if not manifest_path.is_file():
+            return {}
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        env_file = data.get("envFile") if isinstance(data, dict) else None
+        if not isinstance(env_file, str) or not env_file.strip():
+            return {}
+        env_path = Path(cwd) / env_file
+        if not env_path.is_file():
+            return {}
+
+        env_vars: dict[str, str] = {}
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            key = key.strip()
+            if key.startswith("export "):
+                key = key[len("export "):].strip()
+            if not key:
+                continue
+            try:
+                parsed = shlex.split(raw_value, comments=False, posix=True)
+                value = parsed[0] if parsed else ""
+            except ValueError:
+                value = raw_value.strip().strip("\"'")
+            env_vars[key] = value
+        return env_vars
+    except Exception:
+        logger.debug("Failed to load projected credentials from %s", cwd, exc_info=True)
+        return {}
+
+
+def _register_openclaw_session_env(session_id: str, cwd: str) -> None:
+    try:
+        from tools.terminal_tool import register_task_env_overrides
+    except Exception:
+        logger.debug("Hermes terminal override API unavailable", exc_info=True)
+        return
+
+    overrides: dict[str, str] = {"cwd": cwd}
+    overrides.update(_read_openclaw_credential_env(cwd))
+    register_task_env_overrides(session_id, overrides)
+    logger.info(
+        "Registered ACP session overrides for %s (cwd=%s, env_keys=%s)",
+        session_id,
+        cwd,
+        sorted([key for key in overrides.keys() if key != "cwd"]),
+    )
 
 
 def _read_projected_model(cwd: str | None) -> str | None:
@@ -119,10 +181,9 @@ def _patch_hermes_acp_model_routing() -> None:
         self._persist(state)
 
         try:
-            from tools.terminal_tool import register_task_env_overrides
-            register_task_env_overrides(session_id, {"cwd": cwd})
+            _register_openclaw_session_env(session_id, cwd)
         except Exception:
-            logger.debug("Failed to register ACP task cwd override", exc_info=True)
+            logger.debug("Failed to register ACP task env override", exc_info=True)
 
         logger.info("Created ACP session %s (cwd=%s, model=%s)", session_id, cwd, state.model)
         return state
@@ -147,6 +208,10 @@ def _patch_hermes_acp_model_routing() -> None:
             state.model = getattr(state.agent, "model", "") or resolved_model
             state.history = []
             self._persist(state)
+        try:
+            _register_openclaw_session_env(session_id, cwd)
+        except Exception:
+            logger.debug("Failed to refresh ACP task env override", exc_info=True)
         return state
 
     SessionManager.create_session = create_session

@@ -23,6 +23,8 @@
   "license": "MIT",
   "scripts": {
     "build": "npx tsc",
+    "test:runtime:credential-envelope": "npx tsx scripts/test-credential-envelope.ts",
+    "test:runtime:skill-credentials": "npx tsx scripts/test-strategy-skill-credentials.ts",
     "test:skill-writeback": "npx tsx scripts/test-skill-writeback.ts",
     "test:skill-evolution": "npx tsx scripts/test-skill-evolution.ts",
     "test:runtime:session-history": "npx tsx scripts/test-session-history-projection.ts",

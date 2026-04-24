@@ -228,7 +228,7 @@ export function extractTouchedSkillNames(events: AcpSessionEvent[]): string[] {
           (
             e.text.includes("skill_create") ||
             e.text.includes("skill_manage") ||
-            /skills\/[A-Za-z0-9._-]+\/SKILL\.md/i.test(e.text)
+            /skills\/(?:[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+\/SKILL\.md/i.test(e.text)
           ))
       ),
   );
@@ -237,7 +237,7 @@ export function extractTouchedSkillNames(events: AcpSessionEvent[]): string[] {
     try {
       const skillInfo = parseTouchedSkillEvent(event);
       if (skillInfo?.name) {
-        names.add(skillInfo.name);
+        names.add(normalizeSkillName(skillInfo.name));
       }
     } catch {
       // Ignore malformed tool output; writeback should stay conservative.
@@ -323,7 +323,7 @@ function parseTouchedSkillEvent(
     const data = JSON.parse(text);
     const directName = extractSkillNameFromUnknown(data);
     if (directName) {
-      return { name: directName, path: extractSkillPathFromUnknown(data) };
+      return { name: normalizeSkillName(directName), path: extractSkillPathFromUnknown(data) };
     }
   } catch {
     // Fall through to text heuristics.
@@ -332,13 +332,13 @@ function parseTouchedSkillEvent(
   const regexPatterns = [
     /skill[_\s]name[：:=]\s*["']?([A-Za-z0-9._-]+)/i,
     /(?:create|created|update|updated|patch|patched|edit|edited)\s+skill[：:=\s]+["']?([A-Za-z0-9._-]+)/i,
-    /skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i,
+    /skills\/(?:[A-Za-z0-9._-]+\/)?([A-Za-z0-9._-]+)\/SKILL\.md/i,
   ];
 
   for (const pattern of regexPatterns) {
     const match = text.match(pattern);
     if (match?.[1]) {
-      return { name: match[1], path: "" };
+      return { name: normalizeSkillName(match[1]), path: "" };
     }
   }
 
@@ -348,11 +348,11 @@ function parseTouchedSkillEvent(
 function extractSkillNameFromUnknown(value: unknown): string | null {
   if (typeof value === "string") {
     const trimmed = value.trim();
-    const pathMatch = trimmed.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i);
+    const pathMatch = trimmed.match(/skills\/(?:[A-Za-z0-9._-]+\/)?([A-Za-z0-9._-]+)\/SKILL\.md/i);
     if (pathMatch?.[1]) {
-      return pathMatch[1];
+      return normalizeSkillName(pathMatch[1]);
     }
-    return trimmed ? trimmed : null;
+    return trimmed ? normalizeSkillName(trimmed) : null;
   }
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
@@ -365,7 +365,7 @@ function extractSkillNameFromUnknown(value: unknown): string | null {
   ];
   for (const candidate of directCandidates) {
     if (typeof candidate === "string" && candidate.trim()) {
-      return candidate.trim();
+      return normalizeSkillName(candidate.trim());
     }
   }
 
@@ -387,13 +387,20 @@ function extractSkillNameFromUnknown(value: unknown): string | null {
   }
 
   if (typeof record.path === "string") {
-    const pathMatch = record.path.match(/skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i);
+    const pathMatch = record.path.match(/skills\/(?:[A-Za-z0-9._-]+\/)?([A-Za-z0-9._-]+)\/SKILL\.md/i);
     if (pathMatch?.[1]) {
-      return pathMatch[1];
+      return normalizeSkillName(pathMatch[1]);
     }
   }
 
   return null;
+}
+
+function normalizeSkillName(name: string): string {
+  const trimmed = name.trim().replace(/^\/+|\/+$/g, "");
+  if (!trimmed) return trimmed;
+  const parts = trimmed.split("/");
+  return parts[parts.length - 1] ?? trimmed;
 }
 
 function extractSkillPathFromUnknown(value: unknown): string {
