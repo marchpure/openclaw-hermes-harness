@@ -12,6 +12,7 @@
 import { HermesAcpClient } from "./acp-client.js";
 import { injectCredentials, buildDockerEnvFlags } from "./credential-injector.js";
 import { processResult, applyWriteback } from "./result-processor.js";
+import { extractCreatedSkillNames } from "./result-processor.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
 import {
   mirrorWorkspaceFromContainer,
@@ -199,6 +200,7 @@ export async function dispatchToHermes(
     acpText = result.text;
     acpEvents = result.events;
     tokensUsed = result.usage?.total_tokens ?? 0;
+    const createdSkillNames = extractCreatedSkillNames(acpEvents);
 
     logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
     await mirrorWorkspaceFromContainer(
@@ -206,6 +208,7 @@ export async function dispatchToHermes(
       workspaceDir,
       [],
       execution.execEnv.runtimeExecEnvPath,
+      createdSkillNames,
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -340,7 +343,7 @@ async function dispatchDirectly(
     tokensUsed = result.usage?.total_tokens ?? 0;
 
     logger?.info(`Direct dispatch completed: ${acpText.length} chars, ${tokensUsed} tokens`);
-    await mirrorWorkspaceFromContainer(config, workspaceDir);
+    await mirrorWorkspaceFromContainer(config, workspaceDir, [], execution.execEnv.runtimeExecEnvPath, []);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger?.error(`Direct dispatch failed: ${msg}`);

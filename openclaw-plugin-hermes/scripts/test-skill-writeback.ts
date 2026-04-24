@@ -47,15 +47,22 @@ async function main() {
     "---\nname: new-runtime-skill\ndescription: runtime generated\n---\n# New Runtime Skill\n\ncreated inside runtime execenv\n",
     "utf8",
   );
+  await mkdir(join(hostExecEnvSkillsDir, "unrelated-runtime-skill"), { recursive: true });
+  await writeFile(
+    join(hostExecEnvSkillsDir, "unrelated-runtime-skill", "SKILL.md"),
+    "---\nname: unrelated-runtime-skill\ndescription: should stay isolated\n---\n# Unrelated Runtime Skill\n\nmust not be copied\n",
+    "utf8",
+  );
 
   await mkdir(join(hostExecEnvSkillsDir, "invalid-dir"), { recursive: true });
   await writeFile(join(hostExecEnvSkillsDir, "invalid-dir", "README.md"), "missing skill md", "utf8");
 
-  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath);
+  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath, ["existing-skill", "new-runtime-skill"]);
 
   const newSkillPath = join(workspace, "skills", "new-runtime-skill", "SKILL.md");
   const existingSkillPath = join(workspace, "skills", "existing-skill", "SKILL.md");
   const invalidPath = join(workspace, "skills", "invalid-dir");
+  const unrelatedSkillPath = join(workspace, "skills", "unrelated-runtime-skill");
 
   const newSkill = await mustRead(newSkillPath);
   if (!newSkill.includes("created inside runtime execenv")) {
@@ -76,6 +83,13 @@ async function main() {
     ok("ignores runtime directories without SKILL.md");
   }
 
+  try {
+    await stat(unrelatedSkillPath);
+    fail("unrelated runtime skill should not be mirrored into workspace");
+  } catch {
+    ok("does not mirror unrelated runtime skills");
+  }
+
   const hostGlobalSkillDir = join(config.hermesDataDir!, "skills", "productivity", "global-runtime-skill");
   await mkdir(hostGlobalSkillDir, { recursive: true });
   await writeFile(
@@ -83,15 +97,29 @@ async function main() {
     "---\nname: global-runtime-skill\ndescription: stored in hermes global skills\n---\n# Global Runtime Skill\n\ncreated inside /opt/data/skills\n",
     "utf8",
   );
+  const unrelatedGlobalSkillDir = join(config.hermesDataDir!, "skills", "productivity", "unrelated-global-skill");
+  await mkdir(unrelatedGlobalSkillDir, { recursive: true });
+  await writeFile(
+    join(unrelatedGlobalSkillDir, "SKILL.md"),
+    "---\nname: unrelated-global-skill\ndescription: should stay isolated\n---\n# Unrelated Global Skill\n\nmust not be copied\n",
+    "utf8",
+  );
 
-  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath);
+  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath, ["global-runtime-skill"]);
 
   const globalSkillPath = join(workspace, "skills", "global-runtime-skill", "SKILL.md");
   const globalSkill = await mustRead(globalSkillPath);
   if (!globalSkill.includes("created inside /opt/data/skills")) {
     fail("global Hermes skill was not copied into workspace/skills");
   }
-  ok("copies Hermes global skills from /opt/data/skills into workspace/skills");
+  ok("copies only explicitly created Hermes global skills from /opt/data/skills into workspace/skills");
+
+  try {
+    await stat(join(workspace, "skills", "unrelated-global-skill"));
+    fail("unrelated global Hermes skill should not be mirrored");
+  } catch {
+    ok("does not mirror unrelated global Hermes skills");
+  }
 }
 
 main().catch((err) => {

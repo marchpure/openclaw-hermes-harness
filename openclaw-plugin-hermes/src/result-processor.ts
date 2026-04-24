@@ -171,7 +171,7 @@ async function processFullWriteback(
   events: AcpSessionEvent[],
   options: ProcessorOptions,
 ): Promise<{ skills: string[]; warnings: string[] }> {
-  const skills: string[] = [];
+  const skills = extractCreatedSkillNames(events);
   const warnings: string[] = [];
 
   // Detect if Hermes created any skills
@@ -192,19 +192,6 @@ async function processFullWriteback(
     } else {
       warnings.push("W3 skill creation requires user confirmation — skipped (no confirm callback)");
       return { skills, warnings };
-    }
-
-    // Process skill creation
-    for (const event of skillCreationEvents) {
-      try {
-        const skillInfo = parseSkillCreationEvent(event);
-        if (skillInfo) {
-          skills.push(skillInfo.name);
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        warnings.push(`Failed to process skill creation: ${msg}`);
-      }
     }
   }
 
@@ -227,6 +214,26 @@ async function processFullWriteback(
   }
 
   return { skills, warnings };
+}
+
+export function extractCreatedSkillNames(events: AcpSessionEvent[]): string[] {
+  const names = new Set<string>();
+  const skillCreationEvents = events.filter(
+    (e) => e.type === "tool_result" && e.text?.includes("skill_create"),
+  );
+
+  for (const event of skillCreationEvents) {
+    try {
+      const skillInfo = parseSkillCreationEvent(event);
+      if (skillInfo?.name) {
+        names.add(skillInfo.name);
+      }
+    } catch {
+      // Ignore malformed tool output; writeback should stay conservative.
+    }
+  }
+
+  return [...names];
 }
 
 // ─── Extraction Helpers ─────────────────────────────────────────────────────

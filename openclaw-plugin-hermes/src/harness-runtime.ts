@@ -17,6 +17,7 @@ import {
   resolveStableSessionAnchor,
   writeSessionBinding,
 } from "./runtime-client.js";
+import { extractCreatedSkillNames } from "./result-processor.js";
 import type { AcpSessionEvent, HermesPluginConfig } from "./types.js";
 
 type HarnessMessage = NonNullable<AgentHarnessAttemptResult["messagesSnapshot"]>[number];
@@ -235,6 +236,7 @@ export async function runHermesHarnessAttempt(
     }
 
     const usage = normalizeAcpUsage(result.usage);
+    const createdSkillNames = extractCreatedSkillNames(result.events);
     // Pull back only prompt-referenced directories. This preserves observable
     // side effects without tarring large workspace caches.
     await mirrorWorkspaceFromContainer(
@@ -242,6 +244,7 @@ export async function runHermesHarnessAttempt(
       params.workspaceDir,
       referencedWorkspacePaths,
       execution.execEnv.runtimeExecEnvPath,
+      createdSkillNames,
     );
     const assistantText = result.text;
     const lastAssistant = buildAssistantMessage(params, assistantText, usage, {

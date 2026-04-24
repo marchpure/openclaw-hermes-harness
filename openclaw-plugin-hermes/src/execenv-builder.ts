@@ -310,13 +310,16 @@ async function syncExecEnvSkillsToWorkspace(
   config: HermesPluginConfig,
   workspaceDir: string,
   runtimeExecEnvPath: string,
+  createdSkillNames: string[],
 ): Promise<void> {
   if (!runtimeExecEnvPath.startsWith("/")) return;
+  if (createdSkillNames.length === 0) return;
 
   const workspaceSkillsDir = join(workspaceDir, "skills");
   const runtimeSkillsDir = join(runtimeExecEnvPath, "skills");
   const hostExecEnvSkillsDir = join(resolveExecEnvHostPath(config, runtimeExecEnvPath.split("/").pop() ?? ""), "skills");
   const tempSyncDir = join(tmpdir(), `hermes-skill-sync-${hashText(runtimeExecEnvPath).slice(0, 12)}`);
+  const allowedSkills = new Set(createdSkillNames);
 
   await mkdir(workspaceSkillsDir, { recursive: true });
 
@@ -339,6 +342,7 @@ async function syncExecEnvSkillsToWorkspace(
     const skillEntries = await readdir(sourceDir, { withFileTypes: true });
     for (const entry of skillEntries) {
       if (!entry.isDirectory()) continue;
+      if (!allowedSkills.has(entry.name)) continue;
       const sourceSkillDir = join(sourceDir, entry.name);
       const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
       try {
@@ -363,13 +367,16 @@ async function syncExecEnvSkillsToWorkspace(
 async function syncGlobalHermesSkillsToWorkspace(
   config: HermesPluginConfig,
   workspaceDir: string,
+  createdSkillNames: string[],
 ): Promise<void> {
+  if (createdSkillNames.length === 0) return;
   const workspaceSkillsDir = join(workspaceDir, "skills");
   const runtimeGlobalSkillsDir = "/opt/data/skills";
   const hostGlobalSkillsDir = config.hermesDataDir?.trim()
     ? join(config.hermesDataDir.trim(), "skills")
     : undefined;
   const tempSyncDir = join(tmpdir(), `hermes-global-skill-sync-${hashText(workspaceDir).slice(0, 12)}`);
+  const allowedSkills = new Set(createdSkillNames);
 
   await mkdir(workspaceSkillsDir, { recursive: true });
 
@@ -394,6 +401,7 @@ async function syncGlobalHermesSkillsToWorkspace(
       const skillEntries = await readdir(categoryDir, { withFileTypes: true }).catch(() => []);
       for (const skillEntry of skillEntries) {
         if (!skillEntry.isDirectory()) continue;
+        if (!allowedSkills.has(skillEntry.name)) continue;
         const sourceSkillDir = join(categoryDir, skillEntry.name);
         const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
         try {
@@ -443,6 +451,7 @@ export async function mirrorWorkspaceFromContainer(
   workspaceDir: string,
   referencedPaths: string[] = [],
   runtimeExecEnvPath?: string,
+  createdSkillNames: string[] = [],
 ): Promise<void> {
   if (!config.mirrorExecEnvToContainer) return;
   if (config.transport !== "tcp") return;
@@ -464,13 +473,13 @@ export async function mirrorWorkspaceFromContainer(
   // real OpenClaw workspace. Persist any generated skills back into the host
   // workspace so future turns can discover and use them.
   if (runtimeExecEnvPath) {
-    await syncExecEnvSkillsToWorkspace(config, workspaceDir, runtimeExecEnvPath);
+    await syncExecEnvSkillsToWorkspace(config, workspaceDir, runtimeExecEnvPath, createdSkillNames);
   }
 
   // Hermes skill_manage writes may land in the runtime-global /opt/data/skills
-  // store instead of the projected execenv. Mirror those skills back into the
-  // current OpenClaw workspace so agent-local discovery can see them.
-  await syncGlobalHermesSkillsToWorkspace(config, workspaceDir);
+  // store instead of the projected execenv. Mirror back only the skills that
+  // were explicitly created in this run; never import the full Hermes catalog.
+  await syncGlobalHermesSkillsToWorkspace(config, workspaceDir, createdSkillNames);
 }
 
 export async function buildExecEnv(
