@@ -4,6 +4,7 @@ import type {
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
 import { readFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
 import {
@@ -123,6 +124,7 @@ const ZERO_ASSISTANT_USAGE = {
 
 const MAX_HISTORY_MESSAGES = 12;
 const MAX_HISTORY_CHARS = 12000;
+const SHARED_WORKSPACE_ROOTS = ["/root/.openclaw/workspace"];
 
 const CONTEXT_LEVEL_ORDER = {
   L0: 0,
@@ -174,8 +176,44 @@ function sanitizePromptForHermes(prompt: string): string {
  * keeps file side effects observable without copying the entire workspace.
  */
 function extractWorkspacePaths(prompt: string, workspaceDir: string): string[] {
-  const matches = prompt.match(new RegExp(`${workspaceDir.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}[^\\s'"]*`, "g")) ?? [];
-  return [...new Set(matches)];
+  const paths = new Set<string>();
+  const roots = [
+    workspaceDir.replace(/\\/g, "/"),
+    ...SHARED_WORKSPACE_ROOTS.map((value) => value.replace(/\\/g, "/")),
+  ].sort((left, right) => right.length - left.length);
+  const normalizedPrompt = prompt.replace(/\\/g, "/");
+  const isPathChar = (char: string): boolean => /[A-Za-z0-9._/-]/.test(char);
+
+  for (const root of roots) {
+    let cursor = 0;
+    while (cursor < normalizedPrompt.length) {
+      const index = normalizedPrompt.indexOf(root, cursor);
+      if (index < 0) break;
+      let end = index + root.length;
+      while (end < normalizedPrompt.length && isPathChar(normalizedPrompt[end])) {
+        end += 1;
+      }
+      const candidate = normalizedPrompt.slice(index, end).replace(/\/+/g, "/");
+      if (candidate.startsWith(root)) {
+        paths.add(candidate);
+      }
+      cursor = end;
+    }
+  }
+
+  return [...paths];
+}
+
+async function detectMissingWorkspaceArtifacts(paths: string[]): Promise<string[]> {
+  const missing: string[] = [];
+  for (const path of paths) {
+    try {
+      await stat(path);
+    } catch {
+      missing.push(path);
+    }
+  }
+  return missing;
 }
 
 function flattenMessageContent(content: unknown): string {
@@ -418,6 +456,10 @@ export async function runHermesHarnessAttempt(
       execution.execEnv.runtimeExecEnvPath,
       touchedSkillNames,
     );
+    const missingArtifacts = await detectMissingWorkspaceArtifacts(referencedWorkspacePaths);
+    if (missingArtifacts.length > 0) {
+      logger.warn(`Workspace artifacts still missing after mirror: ${missingArtifacts.join(", ")}`);
+    }
     const assistantText = result.text;
     const lastAssistant = buildAssistantMessage(params, assistantText, usage, {
       aborted: false,

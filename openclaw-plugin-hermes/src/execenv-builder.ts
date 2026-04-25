@@ -35,6 +35,19 @@ const AUTOSKILL_HEADER_LINES = [
   "openclaw_skill_origin: autoskill",
   "openclaw_created_by: hermes-runtime",
 ];
+const SHARED_WORKSPACE_ROOTS = ["/root/.openclaw/workspace"];
+
+function normalizeMirroredRoots(workspaceDir: string): string[] {
+  return [workspaceDir, ...SHARED_WORKSPACE_ROOTS]
+    .filter((value) => value.startsWith("/"))
+    .map((value) => value.replace(/\\/g, "/").replace(/\/+/g, "/"))
+    .sort((left, right) => right.length - left.length);
+}
+
+function isMirroredWorkspacePath(path: string, workspaceDir: string): boolean {
+  const normalizedPath = path.replace(/\\/g, "/").replace(/\/+/g, "/");
+  return normalizeMirroredRoots(workspaceDir).some((root) => normalizedPath.startsWith(root));
+}
 
 async function readAutoskillMetadata(skillFile: string): Promise<{
   managed: boolean;
@@ -388,6 +401,101 @@ function uniqueSortedPaths(paths: string[]): string[] {
   return [...new Set(paths)].sort();
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  return stat(path).then(() => true).catch(() => false);
+}
+
+async function mirrorPathToContainer(config: HermesPluginConfig, hostPath: string): Promise<void> {
+  const container = config.hermesContainerName;
+  const parent = dirname(hostPath);
+  const base = hostPath.slice(parent.length + 1);
+  await runCommand("docker", [
+    "exec",
+    container,
+    "sh",
+    "-lc",
+    `mkdir -p ${JSON.stringify(parent)}`,
+  ]);
+  console.log(`[hermes-sync] host->container file ${hostPath}`);
+
+  await new Promise<void>((resolve, reject) => {
+    const tarCreate = spawn("tar", ["-C", parent, "-cf", "-", base], {
+      env: { ...process.env, COPYFILE_DISABLE: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const tarExtract = spawn("docker", [
+      "exec",
+      "-i",
+      container,
+      "tar",
+      "-C",
+      parent,
+      "-xf",
+      "-",
+    ], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stderr = "";
+    tarCreate.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    tarExtract.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    tarCreate.stdout.pipe(tarExtract.stdin);
+
+    let createDone = false;
+    let extractDone = false;
+    let failed = false;
+    const finishIfDone = () => {
+      if (!failed && createDone && extractDone) resolve();
+    };
+    const fail = (err: Error) => {
+      if (failed) return;
+      failed = true;
+      tarCreate.kill();
+      tarExtract.kill();
+      reject(err);
+    };
+
+    tarCreate.on("error", (err) => fail(err));
+    tarExtract.on("error", (err) => fail(err));
+    tarCreate.on("exit", (code) => {
+      if (code !== 0) return fail(new Error(`tar create failed with exit ${code}: ${stderr.trim()}`));
+      createDone = true;
+      finishIfDone();
+    });
+    tarExtract.on("exit", (code) => {
+      if (code !== 0) return fail(new Error(`docker exec tar extract failed with exit ${code}: ${stderr.trim()}`));
+      extractDone = true;
+      finishIfDone();
+    });
+  });
+}
+
+async function mirrorPathFromContainer(config: HermesPluginConfig, hostPath: string): Promise<void> {
+  const container = config.hermesContainerName;
+  const parent = dirname(hostPath);
+  await mkdir(parent, { recursive: true });
+  console.log(`[hermes-sync] container->host file ${hostPath}`);
+  const existsInContainer = await runCommand("docker", [
+    "exec",
+    container,
+    "sh",
+    "-lc",
+    `test -e ${JSON.stringify(hostPath)}`,
+  ]).then(() => true).catch(() => false);
+  if (!existsInContainer) {
+    return;
+  }
+  await runCommand("docker", [
+    "cp",
+    `${container}:${hostPath}`,
+    hostPath,
+  ]);
+}
+
 async function mirrorDirectoryToContainer(config: HermesPluginConfig, hostDir: string): Promise<void> {
   const container = config.hermesContainerName;
   const runtimeParent = hostDir.slice(0, Math.max(hostDir.lastIndexOf("/"), 1));
@@ -580,11 +688,16 @@ export async function mirrorWorkspaceToContainer(
   if (config.transport !== "tcp") return;
   if (!workspaceDir.startsWith("/")) return;
 
-  const dirs = uniqueSortedPaths(
-    referencedPaths
-      .filter((value) => value.startsWith(workspaceDir))
-      .map((value) => dirname(value)),
+  const normalizedPaths = uniqueSortedPaths(
+    referencedPaths.filter((value) => isMirroredWorkspacePath(value, workspaceDir)),
   );
+  const dirs = uniqueSortedPaths(normalizedPaths.map((value) => dirname(value)));
+
+  for (const path of normalizedPaths) {
+    if (await pathExists(path)) {
+      await mirrorPathToContainer(config, path);
+    }
+  }
 
   for (const dir of dirs) {
     // Sync only the prompt-referenced workspace slices so Hermes can access
@@ -604,11 +717,19 @@ export async function mirrorWorkspaceFromContainer(
   if (config.transport !== "tcp") return;
   if (!workspaceDir.startsWith("/")) return;
 
-  const dirs = uniqueSortedPaths(
-    referencedPaths
-      .filter((value) => value.startsWith(workspaceDir))
-      .map((value) => dirname(value)),
+  const normalizedPaths = uniqueSortedPaths(
+    referencedPaths.filter((value) => isMirroredWorkspacePath(value, workspaceDir)),
   );
+  const dirs = uniqueSortedPaths(normalizedPaths.map((value) => dirname(value)));
+
+  for (const path of normalizedPaths) {
+    await mirrorPathFromContainer(config, path).catch((error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.warn(`[hermes-sync] failed file pull ${path}: ${detail}`);
+    });
+    const exists = await pathExists(path);
+    console.log(`[hermes-sync] host visibility after file pull ${path} exists=${exists}`);
+  }
 
   for (const dir of dirs) {
     // Pull back only the directories touched by the prompt so host-side

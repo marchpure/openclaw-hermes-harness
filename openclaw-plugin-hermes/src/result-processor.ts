@@ -333,6 +333,9 @@ function parseTouchedSkillEvent(
     /skill[_\s]name[：:=]\s*["']?([A-Za-z0-9._-]+)/i,
     /(?:create|created|update|updated|patch|patched|edit|edited)\s+skill[：:=\s]+["']?([A-Za-z0-9._-]+)/i,
     /skills\/(?:[A-Za-z0-9._-]+\/)?([A-Za-z0-9._-]+)\/SKILL\.md/i,
+    /\/opt\/data\/skills\/[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+)\/SKILL\.md/i,
+    /skills\/[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+)\/SKILL\.md/i,
+    /skills\/([A-Za-z0-9._-]+)\/SKILL\.md/i,
   ];
 
   for (const pattern of regexPatterns) {
@@ -348,6 +351,14 @@ function parseTouchedSkillEvent(
 function extractSkillNameFromUnknown(value: unknown): string | null {
   if (typeof value === "string") {
     const trimmed = value.trim();
+    const categorizedOptDataPathMatch = trimmed.match(/\/opt\/data\/skills\/[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+)\/SKILL\.md/i);
+    if (categorizedOptDataPathMatch?.[1]) {
+      return categorizedOptDataPathMatch[1];
+    }
+    const categorizedPathMatch = trimmed.match(/skills\/[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+)\/SKILL\.md/i);
+    if (categorizedPathMatch?.[1]) {
+      return categorizedPathMatch[1];
+    }
     const pathMatch = trimmed.match(/skills\/(?:[A-Za-z0-9._-]+\/)?([A-Za-z0-9._-]+)\/SKILL\.md/i);
     if (pathMatch?.[1]) {
       return normalizeSkillName(pathMatch[1]);
@@ -387,6 +398,14 @@ function extractSkillNameFromUnknown(value: unknown): string | null {
   }
 
   if (typeof record.path === "string") {
+    const categorizedOptDataPathMatch = record.path.match(/\/opt\/data\/skills\/[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+)\/SKILL\.md/i);
+    if (categorizedOptDataPathMatch?.[1]) {
+      return categorizedOptDataPathMatch[1];
+    }
+    const categorizedPathMatch = record.path.match(/skills\/[A-Za-z0-9._-]+\/([A-Za-z0-9._-]+)\/SKILL\.md/i);
+    if (categorizedPathMatch?.[1]) {
+      return categorizedPathMatch[1];
+    }
     const pathMatch = record.path.match(/skills\/(?:[A-Za-z0-9._-]+\/)?([A-Za-z0-9._-]+)\/SKILL\.md/i);
     if (pathMatch?.[1]) {
       return normalizeSkillName(pathMatch[1]);
