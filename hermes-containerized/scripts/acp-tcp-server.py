@@ -57,7 +57,6 @@ def _load_env() -> None:
 logger = logging.getLogger("acp-tcp-server")
 OPENCLAW_RUNTIME_DIR = ".openclaw"
 CREDENTIAL_MANIFEST_FILENAME = "credential-manifest.json"
-_SESSION_MANAGER = None
 
 
 def _read_openclaw_credential_env(cwd: str | None) -> dict[str, str]:
@@ -278,144 +277,6 @@ def _patch_hermes_acp_model_routing() -> None:
     logger.info("Installed OpenClaw dynamic model routing patch for Hermes ACP")
 
 
-def _patch_hermes_runtime_hot_path() -> None:
-    """Short-circuit expensive per-session probes on the OpenClaw ACP path.
-
-    Hermes creates a fresh AIAgent for many OpenClaw turns. In the stock
-    runtime that means:
-    1. probing model metadata over the network to infer context length
-    2. walking the auxiliary-provider auto-detect chain on every session
-
-    OpenClaw already knows the routed model/base URL, so for the ACP bridge we
-    can safely provide stable defaults and avoid repeated cold-start work.
-    """
-    from agent import model_metadata
-    from agent import auxiliary_client
-
-    if getattr(model_metadata, "_openclaw_context_patch", False):
-        return
-
-    original_get_model_context_length = model_metadata.get_model_context_length
-
-    def get_model_context_length(
-        model: str,
-        base_url: str = "",
-        api_key: str = "",
-        config_context_length: int | None = None,
-        provider: str = "",
-    ) -> int:
-        if isinstance(config_context_length, int) and config_context_length > 0:
-            return config_context_length
-
-        model_id = (model or "").strip()
-        provider_id = (provider or "").strip().lower()
-        base = (base_url or "").strip().lower()
-
-        if model_id == "doubao-seed-2-0-pro-260215":
-            if provider_id in {"custom", "ark", "model_square"}:
-                return 200_000
-            if "volceapi.com" in base or "ark.cn-beijing.volces.com" in base:
-                return 200_000
-
-        return original_get_model_context_length(
-            model,
-            base_url=base_url,
-            api_key=api_key,
-            config_context_length=config_context_length,
-            provider=provider,
-        )
-
-    model_metadata.get_model_context_length = get_model_context_length
-    model_metadata._openclaw_context_patch = True
-
-    original_resolve_provider_client = auxiliary_client.resolve_provider_client
-    original_resolve_auto = getattr(auxiliary_client, "_resolve_auto", None)
-
-    def resolve_provider_client(
-        provider: str,
-        model: str = None,
-        async_mode: bool = False,
-        raw_codex: bool = False,
-        explicit_base_url: str = None,
-        explicit_api_key: str = None,
-        api_mode: str = None,
-        main_runtime: dict[str, Any] | None = None,
-    ):
-        normalized = (provider or "").strip().lower()
-
-        # ACP/OpenClaw already routes the main runtime explicitly. Reusing that
-        # avoids the expensive "auto" chain on every short-lived auxiliary call.
-        if normalized in {"", "auto"} and isinstance(main_runtime, dict):
-            main_provider = str(main_runtime.get("provider") or "").strip()
-            main_model = str(main_runtime.get("model") or model or "").strip()
-            main_base_url = str(main_runtime.get("base_url") or explicit_base_url or "").strip()
-            main_api_key = str(main_runtime.get("api_key") or explicit_api_key or "").strip()
-            if main_provider and main_model:
-                return original_resolve_provider_client(
-                    main_provider,
-                    model=main_model,
-                    async_mode=async_mode,
-                    raw_codex=raw_codex,
-                    explicit_base_url=main_base_url or None,
-                    explicit_api_key=main_api_key or None,
-                    api_mode=api_mode,
-                    main_runtime=main_runtime,
-                )
-
-        return original_resolve_provider_client(
-            provider,
-            model=model,
-            async_mode=async_mode,
-            raw_codex=raw_codex,
-            explicit_base_url=explicit_base_url,
-            explicit_api_key=explicit_api_key,
-            api_mode=api_mode,
-            main_runtime=main_runtime,
-        )
-
-    auxiliary_client.resolve_provider_client = resolve_provider_client
-
-    if callable(original_resolve_auto):
-        def _resolve_auto(*args: Any, **kwargs: Any):
-            main_runtime = kwargs.get("main_runtime")
-            if isinstance(main_runtime, dict):
-                main_provider = str(main_runtime.get("provider") or "").strip()
-                main_model = str(main_runtime.get("model") or "").strip()
-                if main_provider and main_model:
-                    return original_resolve_provider_client(
-                        main_provider,
-                        model=main_model,
-                        async_mode=kwargs.get("async_mode", False),
-                        explicit_base_url=main_runtime.get("base_url"),
-                        explicit_api_key=main_runtime.get("api_key"),
-                        api_mode=kwargs.get("api_mode"),
-                        main_runtime=main_runtime,
-                    )
-            return original_resolve_auto(*args, **kwargs)
-
-        auxiliary_client._resolve_auto = _resolve_auto
-
-    logger.info("Installed OpenClaw hot-path patch for Hermes model metadata and auxiliary routing")
-
-
-def _get_shared_session_manager():
-    """Reuse one SessionManager across TCP clients.
-
-    The stock bridge creates a fresh HermesACPAgent per TCP connection. When
-    each agent also constructs its own SessionManager, Hermes repeats provider
-    setup and model metadata probing for every short-lived OpenClaw request.
-    Sharing the manager keeps ACP session state process-local and removes that
-    repeated initialization cost from the hot path.
-    """
-    global _SESSION_MANAGER
-    if _SESSION_MANAGER is None:
-        from acp_adapter.session import SessionManager
-
-        _SESSION_MANAGER = SessionManager()
-        logger.info("Created shared Hermes ACP SessionManager")
-    return _SESSION_MANAGER
-
-
 async def handle_client(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -425,12 +286,11 @@ async def handle_client(
     from acp_adapter.server import HermesACPAgent
 
     _patch_hermes_acp_model_routing()
-    _patch_hermes_runtime_hot_path()
 
     peer = writer.get_extra_info("peername")
     logger.info("Client connected: %s", peer)
 
-    agent = HermesACPAgent(session_manager=_get_shared_session_manager())
+    agent = HermesACPAgent()
 
     try:
         # AgentSideConnection takes:
@@ -477,8 +337,6 @@ async def run_server(host: str, port: int) -> None:
 def main() -> None:
     _setup_logging()
     _load_env()
-    _patch_hermes_acp_model_routing()
-    _get_shared_session_manager()
 
     host = os.environ.get("ACP_TCP_HOST", "0.0.0.0")
     port = int(os.environ.get("ACP_TCP_PORT", "3100"))
