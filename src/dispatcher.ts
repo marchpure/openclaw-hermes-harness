@@ -32,6 +32,7 @@ import type {
   CredentialScope,
   WritebackLevel,
   AcpSessionEvent,
+  HermesAcpSessionOptions,
 } from "./types.js";
 
 // ─── Logger ─────────────────────────────────────────────────────────────────
@@ -44,20 +45,20 @@ interface Logger {
 
 async function resumeOrCreateSession(params: {
   acpClient: HermesAcpClient;
-  runtimeExecEnvPath: string;
+  sessionOptions: HermesAcpSessionOptions;
   bindingHash: string;
   logger?: Logger;
 }): Promise<string> {
   const existingBinding = readSessionBinding(params.bindingHash);
-  if (existingBinding && existingBinding.runtimeExecEnvPath === params.runtimeExecEnvPath) {
+  if (existingBinding && existingBinding.runtimeExecEnvPath === params.sessionOptions.cwd) {
     try {
       const resumed = await params.acpClient.resumeSession(
         existingBinding.sessionId,
-        params.runtimeExecEnvPath,
+        params.sessionOptions,
       );
       writeSessionBinding(params.bindingHash, {
         sessionId: resumed,
-        runtimeExecEnvPath: params.runtimeExecEnvPath,
+        runtimeExecEnvPath: params.sessionOptions.cwd,
         bindingHash: params.bindingHash,
       });
       return resumed;
@@ -68,13 +69,29 @@ async function resumeOrCreateSession(params: {
     }
   }
 
-  const created = await params.acpClient.newSession(params.runtimeExecEnvPath);
+  const created = await params.acpClient.newSession(params.sessionOptions);
   writeSessionBinding(params.bindingHash, {
     sessionId: created,
-    runtimeExecEnvPath: params.runtimeExecEnvPath,
+    runtimeExecEnvPath: params.sessionOptions.cwd,
     bindingHash: params.bindingHash,
   });
   return created;
+}
+
+function buildDispatchSessionOptions(params: {
+  cwd: string;
+  config: HermesPluginConfig;
+  env?: Record<string, string>;
+}): HermesAcpSessionOptions {
+  const mcpServers =
+    params.config.mcpBridge.enabled && Object.keys(params.config.mcpBridge.servers).length > 0
+      ? params.config.mcpBridge.servers
+      : undefined;
+  return {
+    cwd: params.cwd,
+    ...(mcpServers ? { mcpServers } : {}),
+    ...(params.env && Object.keys(params.env).length > 0 ? { env: params.env } : {}),
+  };
 }
 
 // ─── Dispatcher ─────────────────────────────────────────────────────────────
@@ -178,13 +195,19 @@ export async function dispatchToHermes(
   try {
     await mirrorWorkspaceToContainer(config, workspaceDir);
 
-    // Start ACP connection with injected credentials
-    await acpClient.start(credentialResult.envVars, execution.execEnv.runtimeExecEnvPath);
+    await acpClient.start();
 
     // Resume or create session based on execenv binding.
     const sessionId = await resumeOrCreateSession({
       acpClient,
-      runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
+      sessionOptions: buildDispatchSessionOptions({
+        cwd: execution.execEnv.runtimeExecEnvPath,
+        config,
+        env: {
+          ...credentialResult.envVars,
+          ...(config.mcpBridge.enabled ? config.mcpBridge.env : {}),
+        },
+      }),
       bindingHash: execution.sessionBindingHash,
       logger,
     });
@@ -317,10 +340,14 @@ async function dispatchDirectly(
     });
     bindingHash = execution.sessionBindingHash;
     await mirrorWorkspaceToContainer(config, workspaceDir);
-    await acpClient.start({}, execution.execEnv.runtimeExecEnvPath);
+    await acpClient.start();
     const sessionId = await resumeOrCreateSession({
       acpClient,
-      runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
+      sessionOptions: buildDispatchSessionOptions({
+        cwd: execution.execEnv.runtimeExecEnvPath,
+        config,
+        env: config.mcpBridge.enabled ? config.mcpBridge.env : undefined,
+      }),
       bindingHash: execution.sessionBindingHash,
       logger,
     });

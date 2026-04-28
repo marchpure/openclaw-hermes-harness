@@ -170,8 +170,40 @@ export interface DispatchResult {
 
 export type ProjectedCapabilityClass =
   | "projectable-local"
+  | "container-env-required"
   | "host-backed"
   | "unsupported";
+
+export type SkillExecutionPlacement =
+  | "projected-local"
+  | "host-backed"
+  | "container-env-required"
+  | "unsupported";
+
+export interface OpenClawSkillSnapshot {
+  prompt?: string;
+  skills?: Array<{
+    name: string;
+    primaryEnv?: string;
+    requiredEnv?: string[];
+  }>;
+  resolvedSkills?: Array<{
+    name?: string;
+    description?: string;
+    filePath?: string;
+    path?: string;
+    source?: string;
+  }>;
+  skillFilter?: string[];
+  version?: number;
+}
+
+export interface OpenClawAttemptContext {
+  agentId?: string;
+  skillsSnapshot?: OpenClawSkillSnapshot;
+  extraSystemPrompt?: string;
+  bootstrapContextMode?: string;
+}
 
 export interface HermesPluginConfig {
   hermesContainerName: string;
@@ -202,6 +234,13 @@ export interface HermesPluginConfig {
   enableLayeredProtocol: boolean;
   skillProjection: {
     hostBackedDenylist: string[];
+    hostBackedSkillNames: string[];
+    containerEnvSkillNames: string[];
+  };
+  mcpBridge: {
+    enabled: boolean;
+    servers: Record<string, unknown>;
+    env: Record<string, string>;
   };
   execEnvCleanup: {
     enabled: boolean;
@@ -228,6 +267,13 @@ export const DEFAULT_CONFIG: HermesPluginConfig = {
   enableLayeredProtocol: true,
   skillProjection: {
     hostBackedDenylist: ["browser", "feishu"],
+    hostBackedSkillNames: ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "feishu"],
+    containerEnvSkillNames: [],
+  },
+  mcpBridge: {
+    enabled: false,
+    servers: {},
+    env: {},
   },
   execEnvCleanup: {
     enabled: true,
@@ -295,12 +341,18 @@ export interface SkillManifestEntry {
   name: string;
   path: string;
   description?: string;
+  requiredEnv?: string[];
 }
 
 export interface ProjectedSkill extends SkillManifestEntry {
   classification: ProjectedCapabilityClass;
+  placement: SkillExecutionPlacement;
   sourcePath?: string;
   projectedPath?: string;
+  runtimePath?: string;
+  hash?: string;
+  mcpTool?: string;
+  diagnostics?: string[];
 }
 
 export interface ProjectedContextFiles {
@@ -315,6 +367,8 @@ export interface ProjectedContext {
   memory?: ContextPayload["memory"];
   commandAllowlist?: string[];
   discoveredSkills: SkillManifestEntry[];
+  skillsPrompt?: string;
+  skillDiagnostics?: string[];
 }
 
 export interface ExecEnvInput {
@@ -323,6 +377,11 @@ export interface ExecEnvInput {
   contextFiles: ProjectedContextFiles;
   projectedSkills: ProjectedSkill[];
   runtimeConfig: Record<string, unknown>;
+  openClaw?: {
+    agentId?: string;
+    skillsSnapshotVersion?: number;
+    skillsSource?: "snapshot" | "workspace";
+  };
 }
 
 export interface ExecEnvManifest {
@@ -337,6 +396,11 @@ export interface ExecEnvManifest {
     task?: string;
   };
   skills: ProjectedSkill[];
+  openClaw?: {
+    agentId?: string;
+    skillsSnapshotVersion?: number;
+    skillsSource?: "snapshot" | "workspace";
+  };
   hashes: {
     workspace: string;
     skills: string;
@@ -351,6 +415,13 @@ export interface ExecEnvBuildResult {
   manifestPath: string;
   projectedSkills: ProjectedSkill[];
   sessionBindingHash: string;
+}
+
+export interface HermesAcpSessionOptions {
+  cwd: string;
+  mcpServers?: Record<string, unknown>;
+  mcpConfigPath?: string;
+  env?: Record<string, string>;
 }
 
 // ─── Credential Entry ───────────────────────────────────────────────────────

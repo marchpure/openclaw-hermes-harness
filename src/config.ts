@@ -45,6 +45,7 @@ function readHermesAcpPartialConfig(
 ): Partial<HermesAcpPluginConfig> {
   const skillProjection = readObject(input.skillProjection);
   const execEnvCleanup = readObject(input.execEnvCleanup);
+  const mcpBridge = readObject(input.mcpBridge);
   return {
     ...(readNonEmptyString(input.hermesContainerName)
       ? { hermesContainerName: readNonEmptyString(input.hermesContainerName) }
@@ -98,6 +99,28 @@ function readHermesAcpPartialConfig(
                   (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
                 )
               : DEFAULT_CONFIG.skillProjection.hostBackedDenylist,
+            hostBackedSkillNames: Array.isArray(skillProjection.hostBackedSkillNames)
+              ? skillProjection.hostBackedSkillNames.filter(
+                  (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+                )
+              : DEFAULT_CONFIG.skillProjection.hostBackedSkillNames,
+            containerEnvSkillNames: Array.isArray(skillProjection.containerEnvSkillNames)
+              ? skillProjection.containerEnvSkillNames.filter(
+                  (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+                )
+              : DEFAULT_CONFIG.skillProjection.containerEnvSkillNames,
+          },
+        }
+      : {}),
+    ...(mcpBridge
+      ? {
+          mcpBridge: {
+            enabled:
+              typeof mcpBridge.enabled === "boolean"
+                ? mcpBridge.enabled
+                : DEFAULT_CONFIG.mcpBridge.enabled,
+            servers: readRecord(mcpBridge.servers) ?? DEFAULT_CONFIG.mcpBridge.servers,
+            env: readStringRecord(mcpBridge.env) ?? DEFAULT_CONFIG.mcpBridge.env,
           },
         }
       : {}),
@@ -123,6 +146,24 @@ function readObject(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function readRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : undefined;
+}
+
+function readStringRecord(value: unknown): Record<string, string> | undefined {
+  const record = readRecord(value);
+  if (!record) {
+    return undefined;
+  }
+  return Object.fromEntries(
+    Object.entries(record).filter((entry): entry is [string, string] => {
+      return typeof entry[1] === "string";
+    }),
+  );
 }
 
 function readNonEmptyString(value: unknown): string | undefined {

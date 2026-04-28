@@ -15,6 +15,7 @@ import type {
   AcpJsonRpcRequest,
   AcpJsonRpcResponse,
   AcpSessionEvent,
+  HermesAcpSessionOptions,
   HermesPluginConfig,
 } from "./types.js";
 
@@ -63,10 +64,8 @@ export class HermesAcpClient extends EventEmitter {
 
   /**
    * Connect to Hermes over the local ACP TCP bridge, then initialize ACP.
-   * The signature still accepts env/cwd because higher-level callers pass them
-   * as part of the shared runtime contract, even though the TCP bridge ignores them.
    */
-  async start(_env?: Record<string, string>, _cwd?: string): Promise<void> {
+  async start(): Promise<void> {
     if (this.connected) {
       throw new Error("ACP client already connected");
     }
@@ -137,8 +136,8 @@ export class HermesAcpClient extends EventEmitter {
    * Create a new ACP session.
    * ACP method: "session/new"
    */
-  async newSession(cwd: string): Promise<string> {
-    const result = (await this.sendRequest("session/new", { cwd, mcpServers: [] })) as {
+  async newSession(options: HermesAcpSessionOptions): Promise<string> {
+    const result = (await this.sendRequest("session/new", buildSessionParams(options))) as {
       session_id?: string;
       sessionId?: string;
     };
@@ -151,11 +150,10 @@ export class HermesAcpClient extends EventEmitter {
    * Resume an existing ACP session.
    * ACP method: "session/resume"
    */
-  async resumeSession(sessionId: string, cwd: string): Promise<string> {
+  async resumeSession(sessionId: string, options: HermesAcpSessionOptions): Promise<string> {
     const result = (await this.sendRequest("session/resume", {
       session_id: sessionId,
-      cwd,
-      mcpServers: [],
+      ...buildSessionParams(options),
     })) as { session_id?: string; sessionId?: string };
     this.sessionId = result.session_id ?? result.sessionId ?? sessionId;
     this.logger.info(`Session resumed: ${this.sessionId}`);
@@ -525,6 +523,15 @@ export class HermesAcpClient extends EventEmitter {
     }
     this.pendingRequests.clear();
   }
+}
+
+function buildSessionParams(options: HermesAcpSessionOptions): Record<string, unknown> {
+  return {
+    cwd: options.cwd,
+    ...(options.mcpServers ? { mcpServers: options.mcpServers } : { mcpServers: [] }),
+    ...(options.mcpConfigPath ? { mcpConfigPath: options.mcpConfigPath } : {}),
+    ...(options.env ? { env: options.env } : {}),
+  };
 }
 
 function extractAcpText(content: unknown): string | undefined {

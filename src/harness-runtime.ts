@@ -3,6 +3,7 @@ import type {
   AgentHarnessAttemptResult,
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
+import { createHash } from "node:crypto";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
 import {
@@ -17,7 +18,7 @@ import {
   resolveStableSessionAnchor,
   writeSessionBinding,
 } from "./runtime-client.js";
-import type { AcpSessionEvent, HermesPluginConfig } from "./types.js";
+import type { AcpSessionEvent, HermesAcpSessionOptions, HermesPluginConfig } from "./types.js";
 
 type HarnessMessage = NonNullable<AgentHarnessAttemptResult["messagesSnapshot"]>[number];
 
@@ -109,6 +110,36 @@ function extractWorkspacePaths(prompt: string, workspaceDir: string): string[] {
   return [...new Set(matches)];
 }
 
+function hashJson(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function resolveHermesSessionHashes(config: HermesPluginConfig): {
+  mcpConfigHash?: string;
+  credentialScopeHash?: string;
+} {
+  if (!config.mcpBridge.enabled) {
+    return {};
+  }
+  return {
+    mcpConfigHash: hashJson(config.mcpBridge.servers),
+    credentialScopeHash: hashJson(Object.keys(config.mcpBridge.env).sort()),
+  };
+}
+
+function buildHermesSessionOptions(params: {
+  config: HermesPluginConfig;
+  cwd: string;
+}): HermesAcpSessionOptions {
+  const mcpServers = params.config.mcpBridge.enabled ? params.config.mcpBridge.servers : undefined;
+  const env = params.config.mcpBridge.enabled ? params.config.mcpBridge.env : undefined;
+  return {
+    cwd: params.cwd,
+    ...(mcpServers && Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+    ...(env && Object.keys(env).length > 0 ? { env } : {}),
+  };
+}
+
 /**
  * Create the OpenClaw harness-facing runtime client.
  */
@@ -167,6 +198,7 @@ export async function runHermesHarnessAttempt(
   console.log(
     `[hermes-acp] anchor sessionKey=${params.sessionKey ?? ""} sessionId=${params.sessionId ?? ""} sessionFile=${params.sessionFile ?? ""} agentId=${params.agentId ?? ""} -> ${sessionAnchor}`,
   );
+  const sessionHashes = resolveHermesSessionHashes(config);
 
   const execution = await prepareProjectedExecutionEnv({
     task: sanitizedPrompt,
@@ -177,13 +209,24 @@ export async function runHermesHarnessAttempt(
     model: params.modelId,
     config,
     sessionAnchor,
+    openClawContext: {
+      agentId: params.agentId,
+      skillsSnapshot: params.skillsSnapshot,
+      extraSystemPrompt: params.extraSystemPrompt,
+    },
+    mcpConfigHash: sessionHashes.mcpConfigHash,
+    credentialScopeHash: sessionHashes.credentialScopeHash,
+  });
+  const sessionOptions = buildHermesSessionOptions({
+    config,
+    cwd: execution.execEnv.runtimeExecEnvPath,
   });
 
   try {
     // Mirror prompt-referenced host paths before ACP starts so Hermes file
     // writes can later be pulled back to the OpenClaw host.
     await mirrorWorkspaceToContainer(config, params.workspaceDir, referencedWorkspacePaths);
-    await client.start({}, execution.execEnv.runtimeExecEnvPath);
+    await client.start();
     webui.lifecycleStart({ startedAt: Date.now() });
     publishHermesHarnessAgentEvent(params, {
       stream: "lifecycle",
@@ -191,7 +234,7 @@ export async function runHermesHarnessAttempt(
     });
     const sessionId = await resumeOrCreateSession({
       client,
-      runtimeExecEnvPath: execution.execEnv.runtimeExecEnvPath,
+      sessionOptions,
       bindingHash: execution.sessionBindingHash,
     });
 
@@ -328,19 +371,19 @@ export async function runHermesHarnessAttempt(
  */
 async function resumeOrCreateSession(params: {
   client: HermesAcpClient;
-  runtimeExecEnvPath: string;
+  sessionOptions: HermesAcpSessionOptions;
   bindingHash: string;
 }): Promise<string> {
   // The binding hash encodes whether the projected context and workdir remain
   // semantically equivalent. Equivalent bindings can safely resume; otherwise
   // create a fresh ACP session to avoid stale context bleed-through.
   const existing = readSessionBinding(params.bindingHash);
-  if (existing && existing.runtimeExecEnvPath === params.runtimeExecEnvPath) {
+  if (existing && existing.runtimeExecEnvPath === params.sessionOptions.cwd) {
     try {
-      const resumed = await params.client.resumeSession(existing.sessionId, params.runtimeExecEnvPath);
+      const resumed = await params.client.resumeSession(existing.sessionId, params.sessionOptions);
       writeSessionBinding(params.bindingHash, {
         sessionId: resumed,
-        runtimeExecEnvPath: params.runtimeExecEnvPath,
+        runtimeExecEnvPath: params.sessionOptions.cwd,
         bindingHash: params.bindingHash,
       });
       return resumed;
@@ -349,10 +392,10 @@ async function resumeOrCreateSession(params: {
     }
   }
 
-  const created = await params.client.newSession(params.runtimeExecEnvPath);
+  const created = await params.client.newSession(params.sessionOptions);
   writeSessionBinding(params.bindingHash, {
     sessionId: created,
-    runtimeExecEnvPath: params.runtimeExecEnvPath,
+    runtimeExecEnvPath: params.sessionOptions.cwd,
     bindingHash: params.bindingHash,
   });
   return created;

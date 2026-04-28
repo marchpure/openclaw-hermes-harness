@@ -136,12 +136,12 @@ async function testAcpE2E() {
   try {
     // Step 1: Start
     info("启动 ACP 连接...");
-    await client.start({}, WORKSPACE);
+    await client.start();
     ok("ACP 初始化成功");
 
     // Step 2: New session
     info("创建会话...");
-    const sessionId = await client.newSession("/opt/data");
+    const sessionId = await client.newSession({ cwd: "/opt/data" });
     ok(`会话已创建: ${sessionId}`);
 
     // Step 3: Prompt

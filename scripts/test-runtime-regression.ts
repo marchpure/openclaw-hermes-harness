@@ -213,9 +213,11 @@ async function testAcpResumeRoundTrip() {
 
   const client = new HermesAcpClient(config);
   try {
-    await client.start({}, execution.execEnv.runtimeExecEnvPath);
-    const sessionId = await client.newSession(execution.execEnv.runtimeExecEnvPath);
-    const resumed = await client.resumeSession(sessionId, execution.execEnv.runtimeExecEnvPath);
+    await client.start();
+    const sessionId = await client.newSession({ cwd: execution.execEnv.runtimeExecEnvPath });
+    const resumed = await client.resumeSession(sessionId, {
+      cwd: execution.execEnv.runtimeExecEnvPath,
+    });
     assert(resumed === sessionId, "resume should keep the same session id when ACP supports it");
     return { sessionId, resumed };
   } finally {
