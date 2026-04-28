@@ -81,6 +81,34 @@
           "hostBackedDenylist": {
             "type": "array",
             "items": { "type": "string" }
+          },
+          "hostBackedSkillNames": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Skill names that must be invoked through the OpenClaw host MCP bridge instead of projected into the Hermes container."
+          },
+          "containerEnvSkillNames": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Skill names that are projected into Hermes but require session-scoped runtime environment grants."
+          }
+        }
+      },
+      "mcpBridge": {
+        "type": "object",
+        "description": "Optional session-scoped MCP bridge payload passed to Hermes ACP sessions.",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "servers": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "ACP-compatible MCP server definitions exposed to Hermes for this session."
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Session-scoped environment passed with MCP bridge sessions. Secrets must be injected by the host runtime and must not be written to projection files."
           }
         }
       },

@@ -18,8 +18,7 @@ type PromptCall = {
 };
 
 type StartCall = {
-  env: Record<string, string> | undefined;
-  cwd: string | undefined;
+  called: boolean;
 };
 
 type MockState = {
@@ -51,23 +50,22 @@ async function createWorkspace(): Promise<string> {
 }
 
 function installMockAcpClient(state: MockState): void {
-  HermesAcpClient.prototype.start = async function start(
-    env?: Record<string, string>,
-    cwd?: string,
-  ): Promise<void> {
-    state.startCalls.push({ env, cwd });
+  HermesAcpClient.prototype.start = async function start(): Promise<void> {
+    state.startCalls.push({ called: true });
   };
 
-  HermesAcpClient.prototype.newSession = async function newSession(cwd: string): Promise<string> {
-    state.newSessionCwds.push(cwd);
+  HermesAcpClient.prototype.newSession = async function newSession(options: {
+    cwd: string;
+  }): Promise<string> {
+    state.newSessionCwds.push(options.cwd);
     return "mock-hermes-session-1";
   };
 
   HermesAcpClient.prototype.resumeSession = async function resumeSession(
     sessionId: string,
-    cwd: string,
+    options: { cwd: string },
   ): Promise<string> {
-    state.resumeCalls.push({ sessionId, cwd });
+    state.resumeCalls.push({ sessionId, cwd: options.cwd });
     return sessionId;
   };
 
@@ -286,11 +284,7 @@ async function main(): Promise<void> {
   assert(mockState.resumeCalls.length === 0, "first attempt should not resume a missing binding");
   assert(mockState.newSessionCwds.length === 1, "first attempt should create one Hermes session");
   assert(
-    mockState.startCalls[0]?.cwd === mockState.newSessionCwds[0],
-    "start cwd and newSession cwd should be the same projected execenv path",
-  );
-  assert(
-    mockState.startCalls[0]?.cwd?.endsWith(expectedAnchor),
+    mockState.newSessionCwds[0]?.endsWith(expectedAnchor),
     "projected execenv path should be anchored by the gateway sessionKey-derived stable anchor",
   );
   assert(mockState.promptCalls.length === 1, "prompt should be sent exactly once");
@@ -305,8 +299,9 @@ async function main(): Promise<void> {
     "projected prompt should include projectable workspace skills",
   );
   assert(
-    !mockState.promptCalls[0]?.prompt.includes("**browser**"),
-    "host-backed browser skill should not be exposed as a projected OpenClaw skill",
+    mockState.promptCalls[0]?.prompt.includes("**browser**") &&
+      mockState.promptCalls[0]?.prompt.includes("openclaw.skill.invoke"),
+    "host-backed browser skill should be exposed through the MCP invocation contract",
   );
 
   const bindingStore = JSON.parse(
@@ -371,7 +366,7 @@ async function main(): Promise<void> {
     JSON.stringify(
       {
         sessionAnchor: expectedAnchor,
-        execEnvPath: mockState.startCalls[0]?.cwd,
+        execEnvPath: mockState.newSessionCwds[0],
         promptSessionId: mockState.promptCalls[0]?.sessionId,
         callbackEvents,
         partialReplies,

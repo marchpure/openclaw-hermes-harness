@@ -63,12 +63,15 @@ async function main() {
     "summary-helper should be exposed",
   );
   assert(
-    !executionA.exposedSkills.some((skill) => skill.name === "browser"),
-    "browser should not be exposed as a projected skill",
+    executionA.exposedSkills.some(
+      (skill) => skill.name === "browser" && skill.placement === "host-backed",
+    ),
+    "browser should be exposed as a host-backed skill",
   );
   assert(
-    !executionA.bootstrapPrompt.includes("**browser**"),
-    "bootstrap prompt should not advertise browser as an OpenClaw skill",
+    executionA.bootstrapPrompt.includes("**browser**") &&
+      executionA.bootstrapPrompt.includes("openclaw.skill.invoke"),
+    "bootstrap prompt should advertise browser through the host-backed MCP contract",
   );
 
   console.log("projection test: ok");

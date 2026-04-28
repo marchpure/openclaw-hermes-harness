@@ -1,7 +1,7 @@
 import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import type {
   ExecEnvBuildResult,
@@ -76,9 +76,15 @@ async function copyProjectedSkill(
   runtimeExecEnvPath: string,
   skill: ProjectedSkill,
 ): Promise<ProjectedSkill> {
-  if (!skill.sourcePath) return skill;
+  if (
+    (skill.placement !== "projected-local" && skill.placement !== "container-env-required") ||
+    !skill.sourcePath
+  ) {
+    return skill;
+  }
 
-  const skillDir = join(hostExecEnvPath, "skills", skill.name);
+  const skillDirName = skill.runtimePath ? basename(skill.runtimePath) : skill.name;
+  const skillDir = join(hostExecEnvPath, "skills", skillDirName);
   const sourceSkillPath = skill.sourcePath;
   const sourceSkillDir = dirname(sourceSkillPath);
   await mkdir(join(hostExecEnvPath, "skills"), { recursive: true });
@@ -93,7 +99,8 @@ async function copyProjectedSkill(
 
   return {
     ...skill,
-    projectedPath: join(runtimeExecEnvPath, "skills", skill.name, "SKILL.md"),
+    runtimePath: join(runtimeExecEnvPath, "skills", skillDirName, "SKILL.md"),
+    projectedPath: join(runtimeExecEnvPath, "skills", skillDirName, "SKILL.md"),
   };
 }
 
@@ -110,13 +117,22 @@ function buildManifest(input: {
   const skillsHash = hashText(JSON.stringify(input.projectedSkills.map((skill) => ({
     name: skill.name,
     classification: skill.classification,
+    placement: skill.placement,
     sourcePath: skill.sourcePath,
+    requiredEnv: skill.requiredEnv,
+    hash: skill.hash,
   }))));
   const projectionHash = hashText(
     JSON.stringify({
       version: input.config.projectionVersion,
       files: input.execEnvInput.contextFiles,
       runtimeConfig: input.execEnvInput.runtimeConfig,
+      skills: input.projectedSkills.map((skill) => ({
+        name: skill.name,
+        placement: skill.placement,
+        sourcePath: skill.sourcePath,
+        requiredEnv: skill.requiredEnv,
+      })),
     }),
   );
 
@@ -132,6 +148,7 @@ function buildManifest(input: {
       task: input.execEnvInput.contextFiles.task ? "TASK.md" : undefined,
     },
     skills: input.projectedSkills,
+    openClaw: input.execEnvInput.openClaw,
     hashes: {
       workspace: workspaceHash,
       skills: skillsHash,

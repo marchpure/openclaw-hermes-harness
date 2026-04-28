@@ -93,9 +93,14 @@ async function testWorkspaceIsolation() {
     "workspace B prompt should include code identity",
   );
   assert(
-    !executionA.bootstrapPrompt.includes("**browser**") &&
-      !executionB.bootstrapPrompt.includes("**browser**"),
-    "browser should be filtered in both workspaces",
+    executionA.exposedSkills.some((skill) => skill.name === "browser" && skill.placement === "host-backed") &&
+      executionB.exposedSkills.some((skill) => skill.name === "browser" && skill.placement === "host-backed"),
+    "browser should be exposed as a host-backed skill in both workspaces",
+  );
+  assert(
+    executionA.bootstrapPrompt.includes("**browser**") &&
+      executionA.bootstrapPrompt.includes("openclaw.skill.invoke"),
+    "browser should be advertised through the host-backed MCP contract",
   );
 
   const soulA = await readFile(join(executionA.execEnv.hostExecEnvPath, "SOUL.md"), "utf8");
@@ -176,8 +181,18 @@ async function testStrictProjection() {
   });
 
   assert(
-    execution.exposedSkills.map((skill) => skill.name).join(",") === "ops-helper",
-    "strict projection should only expose ops-helper",
+    execution.exposedSkills.some((skill) => skill.name === "ops-helper" && skill.placement === "projected-local"),
+    "strict projection should expose ops-helper as a projected-local skill",
+  );
+  assert(
+    execution.exposedSkills.some((skill) => skill.name === "browser" && skill.placement === "host-backed") &&
+      execution.exposedSkills.some((skill) => skill.name === "feishu" && skill.placement === "host-backed"),
+    "strict projection should keep host-backed skills as MCP-backed metadata",
+  );
+  assert(
+    !execution.exposedSkills.some((skill) => skill.name === "browser" && skill.projectedPath) &&
+      !execution.exposedSkills.some((skill) => skill.name === "feishu" && skill.projectedPath),
+    "host-backed skills should not be copied as local skill files",
   );
 
   return {
@@ -213,9 +228,11 @@ async function testAcpResumeRoundTrip() {
 
   const client = new HermesAcpClient(config);
   try {
-    await client.start({}, execution.execEnv.runtimeExecEnvPath);
-    const sessionId = await client.newSession(execution.execEnv.runtimeExecEnvPath);
-    const resumed = await client.resumeSession(sessionId, execution.execEnv.runtimeExecEnvPath);
+    await client.start();
+    const sessionId = await client.newSession({ cwd: execution.execEnv.runtimeExecEnvPath });
+    const resumed = await client.resumeSession(sessionId, {
+      cwd: execution.execEnv.runtimeExecEnvPath,
+    });
     assert(resumed === sessionId, "resume should keep the same session id when ACP supports it");
     return { sessionId, resumed };
   } finally {

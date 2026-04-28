@@ -16,6 +16,7 @@ import type {
   ContextLevel,
   ContextPayload,
   HermesPluginConfig,
+  OpenClawAttemptContext,
   ProjectedContext,
   ProjectedSkill,
   SkillManifestEntry,
@@ -94,6 +95,7 @@ export interface AssemblerOptions {
   workspaceDir: string;
   config: HermesPluginConfig;
   includeWorkspaceSkills?: boolean;
+  openClawContext?: OpenClawAttemptContext;
 }
 
 /**
@@ -191,7 +193,7 @@ export async function assembleContext(
 
   // Read skills manifest
   const skillsDir = join(workspaceDir, "skills");
-  if (level === "L3" || includeWorkspaceSkills) {
+  if (!options.openClawContext?.skillsSnapshot && (level === "L3" || includeWorkspaceSkills)) {
     payload.skills = await readSkillsManifest(skillsDir);
   }
 
@@ -214,10 +216,11 @@ export async function readSkillsManifest(skillsDir: string): Promise<SkillManife
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       const skillPath = join(skillsDir, entry.name, "SKILL.md");
       try {
-        await stat(skillPath);
+        const skillStat = await stat(skillPath);
+        if (!skillStat.isFile()) continue;
         // Read first few lines for description
         const content = await readFile(skillPath, "utf8");
         const descMatch = content.match(/^#\s+.*\n\n(.+)/m);
@@ -256,14 +259,41 @@ export async function assembleProjectedContext(
     memory: payload.memory,
     commandAllowlist: payload.toolConfig?.commandAllowlist,
     discoveredSkills: payload.skills ?? [],
+    skillsPrompt: options.openClawContext?.skillsSnapshot?.prompt,
   };
 }
 
 function formatProjectedSkill(skill: ProjectedSkill): string {
-  const label = skill.classification === "projectable-local"
-    ? "available"
-    : skill.classification;
-  return `- **${skill.name}** (${label}): ${skill.description ?? "(no description)"}`;
+  const description = skill.description ?? "(no description)";
+  if (skill.placement === "host-backed") {
+    return [
+      `- **${skill.name}** (host-backed): ${description}`,
+      `  Execution: OpenClaw MCP bridge.`,
+      `  MCP tool: ${skill.mcpTool ?? "openclaw.skill.invoke"}.`,
+      `  Do not run this skill's host CLI directly inside the Hermes container.`,
+    ].join("\n");
+  }
+  if (skill.placement === "container-env-required") {
+    return [
+      `- **${skill.name}** (container-env-required): ${description}`,
+      skill.requiredEnv?.length
+        ? `  Required env: ${skill.requiredEnv.join(", ")}.`
+        : `  Required env: see the skill's SKILL.md.`,
+      skill.runtimePath ? `  Runtime file: ${skill.runtimePath}.` : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (skill.placement === "projected-local") {
+    return [
+      `- **${skill.name}** (projected-local): ${description}`,
+      skill.runtimePath ? `  Runtime file: ${skill.runtimePath}.` : undefined,
+      `  Execution: local in the Hermes container.`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  return `- **${skill.name}** (unsupported): ${description}`;
 }
 
 /**
@@ -349,7 +379,16 @@ export function serializeProjectedContextForPrompt(
     parts.push(`# Conversation History\n${runtime.conversationHistory}`);
   }
   if (exposedSkills.length > 0) {
-    parts.push(`# Available OpenClaw Skills\n${exposedSkills.map(formatProjectedSkill).join("\n")}`);
+    const promptCatalog = projected.skillsPrompt?.trim();
+    parts.push(
+      [
+        "# Available OpenClaw Skills",
+        "The following skills are selected by OpenClaw for this session. Only these skills are available.",
+        ...(promptCatalog ? ["", "OpenClaw skill catalog:", promptCatalog] : []),
+        "",
+        exposedSkills.map(formatProjectedSkill).join("\n"),
+      ].join("\n"),
+    );
   }
 
   parts.push(
@@ -362,9 +401,8 @@ export function serializeProjectedContextForPrompt(
           ]
         : []),
       "Only use the skills listed under # Available OpenClaw Skills as OpenClaw-provided capabilities.",
-      "Treat # Available OpenClaw Skills and the projected SKILL.md file paths below as the source of truth for OpenClaw skills in this session.",
-      "Do not use internal skill discovery tools, generic runtime skill registries, or empty skill-list results to deny a skill that is explicitly listed under # Available OpenClaw Skills.",
-      "If asked whether a projected OpenClaw skill exists, answer from the projected skill list and projected file paths first.",
+      "When a projected-local or container-env-required skill matches the task, read its runtime SKILL.md first and resolve relative references against that skill directory.",
+      "When a host-backed skill matches the task, call the listed OpenClaw MCP tool instead of running host-specific CLIs inside the container.",
       "If a capability is not listed there, do not claim it is available from the current OpenClaw workspace.",
       "If realtime or browser-based work is requested but no matching OpenClaw skill is listed, explain the limitation naturally instead of exposing internal errors.",
       ...(runtime
