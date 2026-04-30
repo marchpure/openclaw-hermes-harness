@@ -1124,13 +1124,17 @@ phase4_install_plugin() {
         tmp="$(mktemp)"
         register_temp "${tmp}"
         jq --arg cn "${CONTAINER_NAME}" --arg dm "${DEFAULT_MODEL_VAL}" \
+           --arg oe "http://localhost:4318" \
            --arg pk "${PLUGIN_CONFIG_KEY}" \
            '.plugins.entries[$pk].config = {
                "hermesContainerName": $cn,
                "defaultModel": $dm,
                "autoStrategy": true,
                "enableLayeredProtocol": false,
-               "timeout": 600
+               "timeout": 600,
+               "otel": {
+                   "endpoint": $oe
+               }
            } | .plugins.entries[$pk].enabled = true' "${OPENCLAW_CONFIG}" > "${tmp}" \
            && mv "${tmp}" "${OPENCLAW_CONFIG}"
     else
@@ -1146,7 +1150,10 @@ hermes['config'] = {
     'defaultModel': dm,
     'autoStrategy': True,
     'enableLayeredProtocol': False,
-    'timeout': 600
+    'timeout': 600,
+    'otel': {
+        'endpoint': 'http://localhost:4318'
+    }
 }
 with open(cf, 'w') as f:
     json.dump(d, f, indent=2, ensure_ascii=False)
