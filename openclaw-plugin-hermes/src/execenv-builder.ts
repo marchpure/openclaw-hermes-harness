@@ -25,6 +25,12 @@ const AUTOSKILL_HEADER_LINES = [
   "openclaw_created_by: hermes-runtime",
 ];
 
+type RuntimeSkillSyncCandidate = {
+  name: string;
+  sourceDir: string;
+  allowNew: boolean;
+};
+
 async function readAutoskillMetadata(skillFile: string): Promise<{
   managed: boolean;
   autoskill: boolean;
@@ -382,7 +388,6 @@ async function syncExecEnvSkillsToWorkspace(
   createdSkillNames: string[],
 ): Promise<void> {
   if (!runtimeExecEnvPath.startsWith("/")) return;
-  if (createdSkillNames.length === 0) return;
 
   const workspaceSkillsDir = join(workspaceDir, "skills");
   const runtimeSkillsDir = join(runtimeExecEnvPath, "skills");
@@ -408,11 +413,36 @@ async function syncExecEnvSkillsToWorkspace(
       throw new Error("host execenv skills is not a directory");
     }
 
+    const projectedSkillNames = new Set<string>();
+    const projectionPath = join(sourceDir, "..", "projection.json");
+    try {
+      const projection = JSON.parse(await readFile(projectionPath, "utf8")) as {
+        skills?: Array<{ name?: unknown }>;
+      };
+      for (const skill of projection.skills ?? []) {
+        if (typeof skill.name === "string" && skill.name.trim()) {
+          projectedSkillNames.add(skill.name.trim());
+        }
+      }
+    } catch {
+      // Missing projection metadata should not block explicit writeback.
+    }
+
     const skillEntries = await readdir(sourceDir, { withFileTypes: true });
+    const candidates: RuntimeSkillSyncCandidate[] = [];
     for (const entry of skillEntries) {
       if (!entry.isDirectory()) continue;
-      if (!allowedSkills.has(entry.name)) continue;
-      const sourceSkillDir = join(sourceDir, entry.name);
+      if (createdSkillNames.length > 0 && !allowedSkills.has(entry.name)) continue;
+      if (!allowedSkills.has(entry.name) && projectedSkillNames.has(entry.name)) continue;
+      candidates.push({
+        name: entry.name,
+        sourceDir: join(sourceDir, entry.name),
+        allowNew: allowedSkills.has(entry.name) || !projectedSkillNames.has(entry.name),
+      });
+    }
+
+    for (const candidate of candidates) {
+      const sourceSkillDir = candidate.sourceDir;
       const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
       try {
         const skillFileStat = await stat(sourceSkillFile);
@@ -420,7 +450,7 @@ async function syncExecEnvSkillsToWorkspace(
       } catch {
         continue;
       }
-      const targetSkillDir = join(workspaceSkillsDir, entry.name);
+      const targetSkillDir = join(workspaceSkillsDir, candidate.name);
       const targetSkillFile = join(targetSkillDir, "SKILL.md");
       const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
       if (targetExists) {
@@ -428,15 +458,15 @@ async function syncExecEnvSkillsToWorkspace(
         if (!meta.managed || !meta.autoskill) {
           continue;
         }
+      } else if (!candidate.allowNew) {
+        continue;
       }
       await cp(sourceSkillDir, targetSkillDir, {
         recursive: true,
         force: true,
         dereference: true,
       });
-      if (!targetExists) {
-        await ensureAutoskillMetadata(targetSkillDir);
-      }
+      await ensureAutoskillMetadata(targetSkillDir);
     }
   } catch {
     // No projected runtime skills yet; nothing to sync back.
@@ -450,7 +480,6 @@ async function syncGlobalHermesSkillsToWorkspace(
   workspaceDir: string,
   createdSkillNames: string[],
 ): Promise<void> {
-  if (createdSkillNames.length === 0) return;
   const workspaceSkillsDir = join(workspaceDir, "skills");
   const runtimeGlobalSkillsDir = "/opt/data/skills";
   const hostGlobalSkillsDir = config.hermesDataDir?.trim()
@@ -475,39 +504,46 @@ async function syncGlobalHermesSkillsToWorkspace(
       await streamDirectoryFromContainer(config.hermesContainerName, runtimeGlobalSkillsDir, tempSyncDir);
     }
 
-    const categoryEntries = await readdir(sourceDir, { withFileTypes: true });
-    for (const categoryEntry of categoryEntries) {
-      if (!categoryEntry.isDirectory()) continue;
-      const categoryDir = join(sourceDir, categoryEntry.name);
-      const skillEntries = await readdir(categoryDir, { withFileTypes: true }).catch(() => []);
-      for (const skillEntry of skillEntries) {
-        if (!skillEntry.isDirectory()) continue;
-        if (!allowedSkills.has(skillEntry.name)) continue;
-        const sourceSkillDir = join(categoryDir, skillEntry.name);
-        const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
-        try {
-          const skillFileStat = await stat(sourceSkillFile);
-          if (!skillFileStat.isFile()) continue;
-        } catch {
-          continue;
+    const copyIfAllowed = async (sourceSkillDir: string, skillName: string): Promise<void> => {
+      const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
+      try {
+        const skillFileStat = await stat(sourceSkillFile);
+        if (!skillFileStat.isFile()) return;
+      } catch {
+        return;
+      }
+      const targetSkillDir = join(workspaceSkillsDir, skillName);
+      const targetSkillFile = join(targetSkillDir, "SKILL.md");
+      const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
+      if (createdSkillNames.length > 0 && !allowedSkills.has(skillName)) return;
+      if (createdSkillNames.length === 0 && !targetExists) return;
+      if (targetExists) {
+        const meta = await readAutoskillMetadata(targetSkillFile);
+        if (!meta.managed || !meta.autoskill) {
+          return;
         }
-        const targetSkillDir = join(workspaceSkillsDir, skillEntry.name);
-        const targetSkillFile = join(targetSkillDir, "SKILL.md");
-        const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
-        if (targetExists) {
-          const meta = await readAutoskillMetadata(targetSkillFile);
-          if (!meta.managed || !meta.autoskill) {
-            continue;
-          }
-        }
-        await cp(sourceSkillDir, targetSkillDir, {
-          recursive: true,
-          force: true,
-          dereference: true,
-        });
-        if (!targetExists) {
-          await ensureAutoskillMetadata(targetSkillDir);
-        }
+      }
+      await cp(sourceSkillDir, targetSkillDir, {
+        recursive: true,
+        force: true,
+        dereference: true,
+      });
+      await ensureAutoskillMetadata(targetSkillDir);
+    };
+
+    const rootEntries = await readdir(sourceDir, { withFileTypes: true });
+    for (const rootEntry of rootEntries) {
+      if (!rootEntry.isDirectory()) continue;
+      const rootChildDir = join(sourceDir, rootEntry.name);
+
+      // Hermes may write autoskills either directly under /opt/data/skills/<name>
+      // or under /opt/data/skills/<category>/<name>. Support both layouts.
+      await copyIfAllowed(rootChildDir, rootEntry.name);
+
+      const nestedSkillEntries = await readdir(rootChildDir, { withFileTypes: true }).catch(() => []);
+      for (const nestedSkillEntry of nestedSkillEntries) {
+        if (!nestedSkillEntry.isDirectory()) continue;
+        await copyIfAllowed(join(rootChildDir, nestedSkillEntry.name), nestedSkillEntry.name);
       }
     }
   } catch {

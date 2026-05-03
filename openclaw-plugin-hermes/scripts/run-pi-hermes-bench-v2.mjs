@@ -2,9 +2,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+const repoRoot = existsSync("/root/work/openclaw-hermes-harness")
+  ? "/root/work/openclaw-hermes-harness"
+  : "/root/openclaw-hermes-harness";
 const workspace = "/root/.openclaw/workspace";
 const fixtureDir = join(workspace, "agent-loop-bench-fixtures-v2");
-const outRoot = "/root/openclaw-hermes-harness/artifacts/pi-hermes-bench-v2";
+const outRoot = join(repoRoot, "artifacts/pi-hermes-bench-v2");
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const outDir = join(outRoot, runId);
 mkdirSync(outDir, { recursive: true });
@@ -13,15 +16,17 @@ mkdirSync(fixtureDir, { recursive: true });
 const runtimes = [
   {
     id: "pi",
-    agentId: "pi-bench",
+    agentId: process.env.PI_BENCH_AGENT_ID ?? "main",
     expectProvider: "ark",
     expectModel: "doubao-seed-2-0-pro-260215",
+    enabled: process.env.RUN_PI_BENCH === "1",
   },
   {
     id: "hermes",
-    agentId: "hermes-bench",
+    agentId: process.env.HERMES_BENCH_AGENT_ID ?? "ai-1111",
     expectProvider: "hermes",
     expectModel: "default",
+    enabled: true,
   },
 ];
 
@@ -83,8 +88,11 @@ const cases = [
 ];
 
 function extractJson(text) {
+  if (!text) return null;
   const idx = text.lastIndexOf("\n{");
-  const raw = (idx >= 0 ? text.slice(idx + 1) : text.slice(text.indexOf("{"))).trim();
+  const firstJson = text.indexOf("{");
+  if (idx < 0 && firstJson < 0) return null;
+  const raw = (idx >= 0 ? text.slice(idx + 1) : text.slice(firstJson)).trim();
   try {
     return JSON.parse(raw);
   } catch {
@@ -128,7 +136,7 @@ function runCase(rt, testCase, iteration = 1) {
     "openclaw",
     ["agent", "--local", "--agent", rt.agentId, "--session-id", sessionId, "--message", prompt, "--json", "--timeout", "180"],
     {
-      cwd: "/root/openclaw-hermes-harness",
+      cwd: repoRoot,
       encoding: "utf8",
       maxBuffer: 20 * 1024 * 1024,
       timeout: 240 * 1000,
@@ -176,6 +184,7 @@ function runCase(rt, testCase, iteration = 1) {
 
 const results = [];
 for (const rt of runtimes) {
+  if (!rt.enabled) continue;
   for (const testCase of cases) {
     results.push(runCase(rt, testCase, 1));
     persistProgress(results);

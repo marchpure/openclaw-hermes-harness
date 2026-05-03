@@ -67,6 +67,23 @@ async function main() {
     "---\nname: unrelated-runtime-skill\ndescription: should stay isolated\n---\n# Unrelated Runtime Skill\n\nmust not be copied\n",
     "utf8",
   );
+  await mkdir(join(hostExecEnvSkillsDir, "direct-autoskill"), { recursive: true });
+  await writeFile(
+    join(hostExecEnvSkillsDir, "direct-autoskill", "SKILL.md"),
+    "---\nname: direct-autoskill\ndescription: created by direct runtime file write\n---\n# Direct Autoskill\n\ncreated by direct execenv write\n",
+    "utf8",
+  );
+  await writeFile(
+    join(config.hermesDataDir!, "execenv", taskId, "projection.json"),
+    JSON.stringify({
+      skills: [
+        { name: "existing-skill" },
+        { name: "managed-existing-skill" },
+        { name: "unrelated-runtime-skill" },
+      ],
+    }),
+    "utf8",
+  );
 
   await mkdir(join(hostExecEnvSkillsDir, "invalid-dir"), { recursive: true });
   await writeFile(join(hostExecEnvSkillsDir, "invalid-dir", "README.md"), "missing skill md", "utf8");
@@ -84,6 +101,7 @@ async function main() {
   const managedExistingSkillPath = join(workspace, "skills", "managed-existing-skill", "SKILL.md");
   const invalidPath = join(workspace, "skills", "invalid-dir");
   const unrelatedSkillPath = join(workspace, "skills", "unrelated-runtime-skill");
+  const directAutoskillPath = join(workspace, "skills", "direct-autoskill", "SKILL.md");
 
   const newSkill = await mustRead(newSkillPath);
   if (!newSkill.includes("created inside runtime execenv")) {
@@ -101,6 +119,9 @@ async function main() {
   if (!managedExistingSkill.includes("runtime updated version")) {
     fail("autoskill-managed existing workspace skill was not refreshed from runtime execenv");
   }
+  if (!managedExistingSkill.includes("openclaw_skill_origin: autoskill")) {
+    fail("refreshed autoskill-managed existing workspace skill lost autoskill metadata");
+  }
   ok("refreshes autoskill-managed existing workspace skill from runtime execenv");
 
   try {
@@ -116,6 +137,17 @@ async function main() {
   } catch {
     ok("does not mirror unrelated runtime skills");
   }
+
+  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath, []);
+
+  const directAutoskill = await mustRead(directAutoskillPath);
+  if (!directAutoskill.includes("created by direct execenv write")) {
+    fail("direct runtime autoskill was not copied into workspace/skills");
+  }
+  if (!directAutoskill.includes("openclaw_skill_origin: autoskill")) {
+    fail("direct runtime autoskill did not receive autoskill metadata");
+  }
+  ok("copies direct execenv-created autoskills without explicit skill_manage event");
 
   const hostGlobalSkillDir = join(config.hermesDataDir!, "skills", "productivity", "global-runtime-skill");
   await mkdir(hostGlobalSkillDir, { recursive: true });
@@ -140,6 +172,64 @@ async function main() {
     fail("global Hermes skill was not copied into workspace/skills");
   }
   ok("copies only explicitly created Hermes global skills from /opt/data/skills into workspace/skills");
+
+  const hostFlatGlobalSkillDir = join(config.hermesDataDir!, "skills", "flat-global-runtime-skill");
+  await mkdir(hostFlatGlobalSkillDir, { recursive: true });
+  await writeFile(
+    join(hostFlatGlobalSkillDir, "SKILL.md"),
+    "---\nname: flat-global-runtime-skill\ndescription: stored directly in hermes global skills\n---\n# Flat Global Runtime Skill\n\ncreated directly inside /opt/data/skills\n",
+    "utf8",
+  );
+
+  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath, ["flat-global-runtime-skill"]);
+
+  const flatGlobalSkillPath = join(workspace, "skills", "flat-global-runtime-skill", "SKILL.md");
+  const flatGlobalSkill = await mustRead(flatGlobalSkillPath);
+  if (!flatGlobalSkill.includes("created directly inside /opt/data/skills")) {
+    fail("flat global Hermes skill was not copied into workspace/skills");
+  }
+  ok("copies explicitly created flat Hermes global skills from /opt/data/skills/<skill>");
+
+  await mkdir(join(workspace, "skills", "global-managed-improved"), { recursive: true });
+  await writeFile(
+    join(workspace, "skills", "global-managed-improved", "SKILL.md"),
+    "---\nopenclaw_managed: true\nopenclaw_skill_origin: autoskill\nopenclaw_created_by: hermes-runtime\nname: global-managed-improved\ndescription: workspace baseline\n---\n# Global Managed\n\nv1\n",
+    "utf8",
+  );
+  const hostGlobalManagedImprovedDir = join(config.hermesDataDir!, "skills", "global-managed-improved");
+  await mkdir(hostGlobalManagedImprovedDir, { recursive: true });
+  await writeFile(
+    join(hostGlobalManagedImprovedDir, "SKILL.md"),
+    "---\nname: global-managed-improved\ndescription: improved in global Hermes skills\n---\n# Global Managed\n\nv2\n",
+    "utf8",
+  );
+
+  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath, []);
+
+  const globalManagedImproved = await mustRead(join(workspace, "skills", "global-managed-improved", "SKILL.md"));
+  if (!globalManagedImproved.includes("v2")) {
+    fail("managed global autoskill was not refreshed when explicit skill event names were unavailable");
+  }
+  if (!globalManagedImproved.includes("openclaw_created_by: hermes-runtime")) {
+    fail("managed global autoskill lost autoskill metadata after refresh");
+  }
+  ok("refreshes existing managed global autoskills when explicit skill event names are unavailable");
+
+  const unrelatedFlatGlobalSkillDir = join(config.hermesDataDir!, "skills", "unrelated-flat-global-skill");
+  await mkdir(unrelatedFlatGlobalSkillDir, { recursive: true });
+  await writeFile(
+    join(unrelatedFlatGlobalSkillDir, "SKILL.md"),
+    "---\nname: unrelated-flat-global-skill\ndescription: should stay isolated\n---\n# Unrelated Flat Global Skill\n\nmust not be copied without explicit event\n",
+    "utf8",
+  );
+
+  await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath, []);
+  try {
+    await stat(join(workspace, "skills", "unrelated-flat-global-skill"));
+    fail("unrelated flat global Hermes skill should not be created without explicit skill event");
+  } catch {
+    ok("does not create new global Hermes skills when explicit skill event names are unavailable");
+  }
 
   try {
     await stat(join(workspace, "skills", "unrelated-global-skill"));

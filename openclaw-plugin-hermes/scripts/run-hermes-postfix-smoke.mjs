@@ -1,4 +1,10 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+
+const repoRoot = existsSync("/root/work/openclaw-hermes-harness")
+  ? "/root/work/openclaw-hermes-harness"
+  : "/root/openclaw-hermes-harness";
+const hermesAgentId = process.env.HERMES_BENCH_AGENT_ID ?? "ai-1111";
 
 const cases = [
   {
@@ -12,8 +18,11 @@ const cases = [
 ];
 
 function extractJson(text) {
+  if (!text) return null;
   const idx = text.lastIndexOf("\n{");
-  const raw = (idx >= 0 ? text.slice(idx + 1) : text.slice(text.indexOf("{"))).trim();
+  const firstJson = text.indexOf("{");
+  if (idx < 0 && firstJson < 0) return null;
+  const raw = (idx >= 0 ? text.slice(idx + 1) : text.slice(firstJson)).trim();
   try {
     return JSON.parse(raw);
   } catch {
@@ -25,11 +34,13 @@ for (const testCase of cases) {
   const sessionId = `hermes-postfix-${testCase.id}-${Date.now()}`;
   const child = spawnSync(
     "openclaw",
-    ["agent", "--local", "--agent", "hermes-bench", "--session-id", sessionId, "--message", testCase.prompt, "--json", "--timeout", "180"],
+    ["agent", "--local", "--agent", hermesAgentId, "--session-id", sessionId, "--message", testCase.prompt, "--json", "--timeout", "180"],
     {
-      cwd: "/root/openclaw-hermes-harness",
+      cwd: repoRoot,
       encoding: "utf8",
       maxBuffer: 20 * 1024 * 1024,
+      timeout: 240 * 1000,
+      killSignal: "SIGKILL",
     },
   );
   const parsed = extractJson(child.stderr) ?? extractJson(child.stdout) ?? {};
@@ -37,6 +48,10 @@ for (const testCase of cases) {
   console.log(JSON.stringify({
     caseId: testCase.id,
     sessionId,
+    agentId: hermesAgentId,
+    status: child.status,
+    signal: child.signal,
+    error: child.error?.message,
     durationMs: meta.durationMs,
     provider: meta.agentMeta?.provider,
     model: meta.agentMeta?.model,
