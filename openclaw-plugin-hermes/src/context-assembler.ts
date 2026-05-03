@@ -269,9 +269,12 @@ function formatProjectedSkill(skill: ProjectedSkill): string {
     return [
       `- **${skill.name}** (host-backed): ${description}`,
       `  Execution: OpenClaw MCP bridge.`,
-      `  MCP tool: ${skill.mcpTool ?? "openclaw.skill.invoke"}.`,
+      `  MCP tool: ${skill.mcpTool ?? "OpenClaw MCP tools"}.`,
+      skill.mcpToolHint ? `  Bridge hint: ${skill.mcpToolHint}` : undefined,
       `  Do not run this skill's host CLI directly inside the Hermes container.`,
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
   if (skill.placement === "container-env-required") {
     return [
@@ -402,7 +405,8 @@ export function serializeProjectedContextForPrompt(
         : []),
       "Only use the skills listed under # Available OpenClaw Skills as OpenClaw-provided capabilities.",
       "When a projected-local or container-env-required skill matches the task, read its runtime SKILL.md first and resolve relative references against that skill directory.",
-      "When a host-backed skill matches the task, call the listed OpenClaw MCP tool instead of running host-specific CLIs inside the container.",
+      "When a host-backed skill matches the task, call the listed concrete OpenClaw MCP tool or tool family instead of running host-specific CLIs inside the container.",
+      "Do not call `openclaw.skill.invoke`; Hermes must use the actual MCP tools exposed by tools/list.",
       "If a capability is not listed there, do not claim it is available from the current OpenClaw workspace.",
       "If realtime or browser-based work is requested but no matching OpenClaw skill is listed, explain the limitation naturally instead of exposing internal errors.",
       ...(runtime

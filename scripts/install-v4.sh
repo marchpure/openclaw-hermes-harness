@@ -335,9 +335,10 @@ text = text.replace(
                "tcpPort": 3100,
                "timeout": 1800,
                "skillProjection": {
-                 "hostBackedDenylist": ["browser", "feishu"],
-                 "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser-use", "compute-use"],
-                 "containerEnvSkillNames": []
+                 "hostBackedDenylist": ["browser", "browser-use", "feishu"],
+                 "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"],
+                 "containerEnvSkillNames": [],
+                 "alwaysExposeSkillNames": ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]
                },
                "mcpBridge": {
                  "enabled": true,
@@ -361,9 +362,10 @@ text = text.replace(
     'tcpPort': 3100,
     'timeout': 1800,
     'skillProjection': {
-        'hostBackedDenylist': ['browser', 'feishu'],
-        'hostBackedSkillNames': ['lark-doc', 'lark-calendar', 'lark-im', 'lark-sheets', 'lark-base', 'lark-drive', 'lark-task', 'lark-mail', 'feishu', 'browser-use', 'compute-use'],
+        'hostBackedDenylist': ['browser', 'browser-use', 'feishu'],
+        'hostBackedSkillNames': ['lark-doc', 'lark-calendar', 'lark-im', 'lark-sheets', 'lark-base', 'lark-drive', 'lark-task', 'lark-mail', 'feishu', 'browser', 'browser-use'],
         'containerEnvSkillNames': [],
+        'alwaysExposeSkillNames': ['browser-use', 'computer-use', 'byted-web-search', 'web_search', 'opencli', 'byted-seedream-image-generate', 'byted-seedance-video-generate', 'arkdrive-netdisk'],
     },
     'mcpBridge': {
         'enabled': True,
@@ -416,9 +418,10 @@ normalize_runtime_entries() {
               "tcpPort": $tcp_port,
               "timeout": 1800,
               "skillProjection": {
-                "hostBackedDenylist": ["browser", "feishu"],
-                "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser-use", "compute-use"],
-                "containerEnvSkillNames": []
+                "hostBackedDenylist": ["browser", "browser-use", "feishu"],
+                "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"],
+                "containerEnvSkillNames": [],
+                "alwaysExposeSkillNames": ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]
               },
               "mcpBridge": {
                 "enabled": true,
@@ -470,9 +473,10 @@ cfg.update({
     "tcpPort": tcp_port,
     "timeout": 1800,
     "skillProjection": {
-        "hostBackedDenylist": ["browser", "feishu"],
-        "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser-use", "compute-use"],
+        "hostBackedDenylist": ["browser", "browser-use", "feishu"],
+        "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"],
         "containerEnvSkillNames": [],
+        "alwaysExposeSkillNames": ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"],
     },
     "mcpBridge": {
         "enabled": True,

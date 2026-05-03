@@ -3,7 +3,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { assembleProjectedContext, serializeProjectedContextForPrompt } from "./context-assembler.js";
+import {
+  assembleProjectedContext,
+  readSkillsManifest,
+  serializeProjectedContextForPrompt,
+} from "./context-assembler.js";
 import { buildExecEnv } from "./execenv-builder.js";
 import type {
   ContextLevel,
@@ -132,6 +136,66 @@ function normalizeSkillName(name: string): string {
   return name.trim().toLowerCase();
 }
 
+const HOST_BACKED_MCP_TOOL_HINTS: Record<string, { tool: string; hint: string }> = {
+  browser: {
+    tool: "browser",
+    hint: "Use the OpenClaw MCP `browser` tool for status/start/open/snapshot/screenshot/actions.",
+  },
+  "browser-use": {
+    tool: "browser",
+    hint: "Use the OpenClaw MCP `browser` tool; read the projected browser-use SKILL.md when it is available for operating rules.",
+  },
+  feishu: {
+    tool: "feishu_*",
+    hint: "Use the OpenClaw MCP `feishu_*` tools, for example `feishu_oauth_batch_auth`, `feishu_fetch_doc`, `feishu_create_doc`, and `feishu_update_doc`.",
+  },
+  "lark-doc": {
+    tool: "feishu_*",
+    hint: "Use the OpenClaw MCP Feishu document tools such as `feishu_fetch_doc`, `feishu_create_doc`, and `feishu_update_doc`.",
+  },
+  "lark-calendar": {
+    tool: "feishu_*",
+    hint: "Use the OpenClaw MCP Feishu calendar tools exposed in the current tool list.",
+  },
+  "lark-im": {
+    tool: "message / feishu_*",
+    hint: "Use the OpenClaw MCP `message` tool for channel replies/sends and Feishu IM tools for Feishu-specific operations.",
+  },
+  "lark-sheets": {
+    tool: "feishu_*",
+    hint: "Use the OpenClaw MCP Feishu spreadsheet tools exposed in the current tool list.",
+  },
+  "lark-base": {
+    tool: "feishu_*",
+    hint: "Use the OpenClaw MCP Feishu Base tools exposed in the current tool list.",
+  },
+  "lark-drive": {
+    tool: "feishu_*",
+    hint: "Use the OpenClaw MCP Feishu Drive tools exposed in the current tool list.",
+  },
+  "lark-task": {
+    tool: "feishu_*",
+    hint: "Use the OpenClaw MCP Feishu task tools exposed in the current tool list.",
+  },
+  "lark-mail": {
+    tool: "feishu_*",
+    hint: "Use the OpenClaw MCP Feishu mail tools exposed in the current tool list.",
+  },
+};
+
+function resolveHostBackedMcpHint(name: string): { mcpTool: string; mcpToolHint: string } {
+  const normalized = normalizeSkillName(name);
+  const entry =
+    HOST_BACKED_MCP_TOOL_HINTS[normalized] ??
+    (normalized.startsWith("lark-") ? HOST_BACKED_MCP_TOOL_HINTS["lark-doc"] : undefined);
+  return {
+    mcpTool: entry?.tool ?? "OpenClaw MCP tools",
+    mcpToolHint:
+      entry?.hint ??
+      "Use the concrete OpenClaw MCP tool exposed in the current tool list for this capability; do not call `openclaw.skill.invoke`.",
+  };
+}
+
 function sanitizeSkillDirName(name: string, used: Set<string>): string {
   const base =
     name
@@ -152,6 +216,23 @@ function hashJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function getSkillAliasNames(name: string): string[] {
+  const aliases: Record<string, string[]> = {
+    browser: ["browser-use"],
+    "browser-use": ["browser"],
+    "byted-web-search": ["web_search"],
+    web_search: ["byted-web-search"],
+    "byted-seedream-image-generate": ["image-generate"],
+    "image-generate": ["byted-seedream-image-generate"],
+    "byted-seedance-video-generate": ["video-generate"],
+    "video-generate": ["byted-seedance-video-generate"],
+    "arkdrive-netdisk": ["workspace-netdrive"],
+    "workspace-netdrive": ["arkdrive-netdisk"],
+    opencli: ["OpenCLI"],
+  };
+  return aliases[normalizeSkillName(name)] ?? [];
+}
+
 function readSnapshotSkillPath(skill: NonNullable<OpenClawSkillSnapshot["resolvedSkills"]>[number]) {
   const raw = skill.filePath ?? skill.path;
   return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
@@ -161,7 +242,7 @@ function classifySkill(params: {
   name: string;
   sourcePath?: string;
   config: HermesPluginConfig;
-}): Pick<ProjectedSkill, "classification" | "placement" | "mcpTool" | "diagnostics"> {
+}): Pick<ProjectedSkill, "classification" | "placement" | "mcpTool" | "mcpToolHint" | "diagnostics"> {
   const hostBackedNames = new Set(
     [
       ...params.config.skillProjection.hostBackedDenylist,
@@ -173,10 +254,11 @@ function classifySkill(params: {
   );
   const normalized = normalizeSkillName(params.name);
   if (hostBackedNames.has(normalized) || normalized.startsWith("lark-")) {
+    const mcpHint = resolveHostBackedMcpHint(params.name);
     return {
       classification: "host-backed",
       placement: "host-backed",
-      mcpTool: "openclaw.skill.invoke",
+      ...mcpHint,
     };
   }
   if (containerEnvNames.has(normalized)) {
@@ -291,6 +373,73 @@ function resolveProjectableSkills(
   });
 }
 
+async function mergeAlwaysExposeSkills(
+  skills: ProjectedSkill[],
+  workspaceDir: string,
+  config: HermesPluginConfig,
+): Promise<ProjectedSkill[]> {
+  const requestedNames = config.skillProjection.alwaysExposeSkillNames
+    .map((name) => name.trim())
+    .filter(Boolean);
+  if (requestedNames.length === 0) {
+    return skills;
+  }
+
+  const manifest = [
+    ...(await readSkillsManifest(join(workspaceDir, "skills"))),
+    ...(await readSkillsManifest(join(resolveOpenClawStateDir(), "workspace", "skills"))),
+  ];
+  const manifestByName = new Map(manifest.map((skill) => [normalizeSkillName(skill.name), skill]));
+  const existingNames = new Set(
+    skills.flatMap((skill) => [
+      normalizeSkillName(skill.name),
+      ...getSkillAliasNames(skill.name).map(normalizeSkillName),
+    ]),
+  );
+  const usedTargetNames = new Set(
+    skills
+      .map((skill) => skill.runtimePath)
+      .filter((value): value is string => typeof value === "string" && value.length > 0),
+  );
+
+  const additions: ProjectedSkill[] = [];
+  for (const requestedName of requestedNames) {
+    const candidates = [requestedName, ...getSkillAliasNames(requestedName)];
+    if (candidates.some((candidate) => existingNames.has(normalizeSkillName(candidate)))) {
+      continue;
+    }
+
+    const manifestSkill = candidates
+      .map((candidate) => manifestByName.get(normalizeSkillName(candidate)))
+      .find((candidate): candidate is SkillManifestEntry => Boolean(candidate));
+    if (!manifestSkill) {
+      continue;
+    }
+
+    const classification = classifySkill({
+      name: manifestSkill.name,
+      sourcePath: manifestSkill.path,
+      config,
+    });
+    if (classification.placement === "unsupported") {
+      continue;
+    }
+
+    additions.push({
+      ...manifestSkill,
+      ...classification,
+      sourcePath: manifestSkill.path,
+      runtimePath: sanitizeSkillDirName(manifestSkill.name, usedTargetNames),
+    });
+    existingNames.add(normalizeSkillName(manifestSkill.name));
+    for (const alias of getSkillAliasNames(manifestSkill.name)) {
+      existingNames.add(normalizeSkillName(alias));
+    }
+  }
+
+  return additions.length > 0 ? [...skills, ...additions] : skills;
+}
+
 export function resolveStableSessionAnchor(params: {
   workspaceDir: string;
   sessionKey?: string;
@@ -345,8 +494,13 @@ export async function prepareProjectedExecutionEnv(params: {
     params.openClawContext?.skillsSnapshot,
     params.config,
   );
-  const projectableSkills =
+  const selectedSkills =
     snapshotSkills?.skills ?? resolveProjectableSkills(projectedContext.discoveredSkills, params.config);
+  const projectableSkills = await mergeAlwaysExposeSkills(
+    selectedSkills,
+    params.workspaceDir,
+    params.config,
+  );
   const runtimeRoot = buildRuntimeRoot(params.config);
   const sessionAnchor = sanitizeSessionAnchor(params.sessionAnchor ?? params.taskId);
   const runtimeExecEnvPathHint = `${runtimeRoot}/${sessionAnchor}`;

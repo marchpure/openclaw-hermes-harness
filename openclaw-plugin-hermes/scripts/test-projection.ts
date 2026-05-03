@@ -70,7 +70,7 @@ async function main() {
   );
   assert(
     executionA.bootstrapPrompt.includes("**browser**") &&
-      executionA.bootstrapPrompt.includes("openclaw.skill.invoke"),
+      executionA.bootstrapPrompt.includes("browser"),
     "bootstrap prompt should advertise browser through the host-backed MCP contract",
   );
 

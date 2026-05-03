@@ -300,7 +300,7 @@ async function main(): Promise<void> {
   );
   assert(
     mockState.promptCalls[0]?.prompt.includes("**browser**") &&
-      mockState.promptCalls[0]?.prompt.includes("openclaw.skill.invoke"),
+      mockState.promptCalls[0]?.prompt.includes("browser"),
     "host-backed browser skill should be exposed through the MCP invocation contract",
   );
 

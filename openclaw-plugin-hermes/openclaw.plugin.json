@@ -109,6 +109,11 @@
             "type": "array",
             "items": { "type": "string" },
             "description": "Skill names that are projected into Hermes but require session-scoped runtime environment grants."
+          },
+          "alwaysExposeSkillNames": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Workspace skill names that should be projected into Hermes even when OpenClaw's per-turn skill snapshot did not select them."
           }
         }
       },

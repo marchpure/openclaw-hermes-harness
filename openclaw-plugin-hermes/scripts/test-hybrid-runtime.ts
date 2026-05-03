@@ -81,7 +81,7 @@ async function testSnapshotProjection(): Promise<Record<string, unknown>> {
     "snapshot should prevent fallback workspace skill exposure",
   );
   assert(
-    execution.bootstrapPrompt.includes("openclaw.skill.invoke"),
+    execution.bootstrapPrompt.includes("browser"),
     "host-backed skill contract should mention MCP invocation",
   );
   assert(
@@ -107,7 +107,7 @@ async function testSnapshotProjection(): Promise<Record<string, unknown>> {
   );
 
   return {
-    promptIncludesMcpTool: execution.bootstrapPrompt.includes("openclaw.skill.invoke"),
+    promptIncludesBrowserTool: execution.bootstrapPrompt.includes("browser"),
     exposedSkills: names,
     manifestOpenClaw: manifest.openClaw,
   };

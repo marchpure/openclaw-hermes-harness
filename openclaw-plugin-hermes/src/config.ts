@@ -109,6 +109,11 @@ function readHermesAcpPartialConfig(
                   (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
                 )
               : DEFAULT_CONFIG.skillProjection.containerEnvSkillNames,
+            alwaysExposeSkillNames: Array.isArray(skillProjection.alwaysExposeSkillNames)
+              ? skillProjection.alwaysExposeSkillNames.filter(
+                  (entry): entry is string => typeof entry === "string" && entry.trim().length > 0,
+                )
+              : DEFAULT_CONFIG.skillProjection.alwaysExposeSkillNames,
           },
         }
       : {}),

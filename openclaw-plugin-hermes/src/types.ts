@@ -236,6 +236,7 @@ export interface HermesPluginConfig {
     hostBackedDenylist: string[];
     hostBackedSkillNames: string[];
     containerEnvSkillNames: string[];
+    alwaysExposeSkillNames: string[];
   };
   mcpBridge: {
     enabled: boolean;
@@ -266,9 +267,31 @@ export const DEFAULT_CONFIG: HermesPluginConfig = {
   autoStrategy: true,
   enableLayeredProtocol: true,
   skillProjection: {
-    hostBackedDenylist: ["browser", "feishu"],
-    hostBackedSkillNames: ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "feishu"],
+    hostBackedDenylist: ["browser", "browser-use", "feishu"],
+    hostBackedSkillNames: [
+      "lark-doc",
+      "lark-calendar",
+      "lark-im",
+      "lark-sheets",
+      "lark-base",
+      "lark-drive",
+      "lark-task",
+      "lark-mail",
+      "feishu",
+      "browser",
+      "browser-use",
+    ],
     containerEnvSkillNames: [],
+    alwaysExposeSkillNames: [
+      "browser-use",
+      "computer-use",
+      "byted-web-search",
+      "web_search",
+      "opencli",
+      "byted-seedream-image-generate",
+      "byted-seedance-video-generate",
+      "arkdrive-netdisk",
+    ],
   },
   mcpBridge: {
     enabled: false,
@@ -352,6 +375,7 @@ export interface ProjectedSkill extends SkillManifestEntry {
   runtimePath?: string;
   hash?: string;
   mcpTool?: string;
+  mcpToolHint?: string;
   diagnostics?: string[];
 }
 

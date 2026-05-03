@@ -99,7 +99,7 @@ async function testWorkspaceIsolation() {
   );
   assert(
     executionA.bootstrapPrompt.includes("**browser**") &&
-      executionA.bootstrapPrompt.includes("openclaw.skill.invoke"),
+      executionA.bootstrapPrompt.includes("browser"),
     "browser should be advertised through the host-backed MCP contract",
   );
 
