@@ -37,6 +37,12 @@ const defaultLogger: Logger = {
 
 const STREAM_IDLE_FINALIZE_MS = 2500;
 
+type AcpEnvVariable = { name: string; value: string };
+type AcpMcpServer =
+  | { type: "stdio"; name: string; command: string; args: string[]; env: AcpEnvVariable[] }
+  | { type: "http"; name: string; url: string; headers: AcpEnvVariable[] }
+  | { type: "sse"; name: string; url: string; headers: AcpEnvVariable[] };
+
 // ─── ACP Client ─────────────────────────────────────────────────────────────
 
 export class HermesAcpClient extends EventEmitter {
@@ -545,10 +551,77 @@ export class HermesAcpClient extends EventEmitter {
 function buildSessionParams(options: HermesAcpSessionOptions): Record<string, unknown> {
   return {
     cwd: options.cwd,
-    ...(options.mcpServers ? { mcpServers: options.mcpServers } : { mcpServers: [] }),
+    mcpServers: normalizeAcpMcpServers(options.mcpServers),
     ...(options.mcpConfigPath ? { mcpConfigPath: options.mcpConfigPath } : {}),
     ...(options.env ? { env: options.env } : {}),
   };
+}
+
+function normalizeAcpMcpServers(mcpServers: HermesAcpSessionOptions["mcpServers"]): AcpMcpServer[] {
+  if (!mcpServers) return [];
+  if (Array.isArray(mcpServers)) {
+    return mcpServers
+      .map((server) => normalizeAcpMcpServer(undefined, server))
+      .filter((server): server is AcpMcpServer => Boolean(server));
+  }
+  return Object.entries(mcpServers)
+    .map(([name, server]) => normalizeAcpMcpServer(name, server))
+    .filter((server): server is AcpMcpServer => Boolean(server));
+}
+
+function normalizeAcpMcpServer(name: string | undefined, value: unknown): AcpMcpServer | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const server = value as Record<string, unknown>;
+  const resolvedName = readNonEmptyString(server.name) ?? name;
+  if (!resolvedName) return undefined;
+
+  const type = readNonEmptyString(server.type);
+  const url = readNonEmptyString(server.url);
+  if (url) {
+    const headers = normalizeNameValueList(server.headers);
+    return {
+      type: type === "sse" ? "sse" : "http",
+      name: resolvedName,
+      url,
+      headers,
+    };
+  }
+
+  const command = readNonEmptyString(server.command);
+  if (!command) return undefined;
+  return {
+    type: "stdio",
+    name: resolvedName,
+    command,
+    args: normalizeStringList(server.args),
+    env: normalizeNameValueList(server.env),
+  };
+}
+
+function normalizeStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function normalizeNameValueList(value: unknown): AcpEnvVariable[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+      const record = entry as Record<string, unknown>;
+      const name = readNonEmptyString(record.name);
+      const rawValue = typeof record.value === "string" ? record.value : undefined;
+      return name && rawValue !== undefined ? [{ name, value: rawValue }] : [];
+    });
+  }
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value as Record<string, unknown>).flatMap(([envName, envValue]) => {
+    return typeof envValue === "string" ? [{ name: envName, value: envValue }] : [];
+  });
+}
+
+function readNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
 }
 
 function extractAcpText(content: unknown): string | undefined {

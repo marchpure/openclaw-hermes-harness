@@ -192,10 +192,15 @@ async function testAcpSessionOptions(): Promise<Record<string, unknown>> {
       params?: Record<string, unknown>;
     };
     assert(newSessionRequest?.params?.cwd === "/runtime/execenv/session-a", "newSession should send cwd");
-    assert(Boolean(newSessionRequest?.params?.mcpServers), "newSession should send mcpServers");
+    assert(Array.isArray(newSessionRequest?.params?.mcpServers), "newSession should send ACP mcpServers array");
     assert(Boolean(newSessionRequest?.params?.env), "newSession should send env");
-    assert(Boolean(resumeRequest?.params?.mcpServers), "resumeSession should send mcpServers");
+    assert(Array.isArray(resumeRequest?.params?.mcpServers), "resumeSession should send ACP mcpServers array");
     assert(Boolean(resumeRequest?.params?.env), "resumeSession should send fresh env");
+
+    const acpMcpServers = newSessionRequest.params?.mcpServers as Array<Record<string, unknown>>;
+    assert(acpMcpServers[0]?.name === "openclaw", "mcp server should include name");
+    assert(acpMcpServers[0]?.type === "http", "url mcp server should default to http");
+    assert(acpMcpServers[0]?.url === "http://127.0.0.1:18789/mcp", "mcp server should include url");
 
     return {
       requestMethods: requests.map((request) => request.method),

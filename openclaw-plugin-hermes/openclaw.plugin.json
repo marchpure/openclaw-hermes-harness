@@ -41,6 +41,24 @@
         ],
         "description": "Default context level for task dispatch"
       },
+      "runtimeMinContextLevel": {
+        "type": "string",
+        "enum": [
+          "L0",
+          "L1",
+          "L2",
+          "L3"
+        ],
+        "description": "Minimum context level projected for /model hermes agent harness attempts"
+      },
+      "runtimeProjectWorkspaceSkills": {
+        "type": "boolean",
+        "description": "Expose OpenClaw-selected workspace skills to Hermes runtime projections"
+      },
+      "mirrorExecEnvToContainer": {
+        "type": "boolean",
+        "description": "Mirror projected execution environments into the Hermes container before ACP turns"
+      },
       "defaultCredentialScope": {
         "type": "string",
         "enum": [
