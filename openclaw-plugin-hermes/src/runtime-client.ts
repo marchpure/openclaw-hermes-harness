@@ -88,9 +88,11 @@ function computeSessionBindingHash(input: {
   credentialScopeHash?: string;
   extraPromptHash?: string;
   agentId?: string;
+  sessionAnchor?: string;
 }): string {
   // Hash only the dimensions that determine whether an ACP session can be
-  // reused: workspace root, runtime cwd, projection schema, and exposed skills.
+  // reused: workspace root, runtime cwd, projection schema, exposed skills,
+  // and the explicit OpenClaw session identity.
   return createHash("sha256")
     .update(
       JSON.stringify({
@@ -103,6 +105,7 @@ function computeSessionBindingHash(input: {
         credentialScopeHash: input.credentialScopeHash,
         extraPromptHash: input.extraPromptHash,
         agentId: input.agentId,
+        sessionAnchor: input.sessionAnchor,
       }),
     )
     .digest("hex");
@@ -519,6 +522,7 @@ export async function prepareProjectedExecutionEnv(params: {
       ? createHash("sha256").update(params.openClawContext.extraSystemPrompt).digest("hex")
       : undefined,
     agentId: params.openClawContext?.agentId,
+    sessionAnchor,
   });
   const execEnv = await buildExecEnv(
     params.config,

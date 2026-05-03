@@ -5,6 +5,7 @@ import type {
 } from "openclaw/plugin-sdk/agent-harness";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { basename, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
@@ -329,6 +330,17 @@ async function loadConversationHistory(
   const sessionFile = typeof params.sessionFile === "string" ? params.sessionFile.trim() : "";
   if (!sessionFile) {
     return { messages: [] };
+  }
+  const explicitSessionId = typeof params.sessionId === "string" ? params.sessionId.trim() : "";
+  if (explicitSessionId) {
+    const fileName = basename(sessionFile);
+    const sessionFileId = fileName.slice(0, fileName.length - extname(fileName).length);
+    if (sessionFileId && sessionFileId !== explicitSessionId) {
+      console.warn(
+        `[hermes-acp] conversation history skipped: sessionId=${explicitSessionId} does not match sessionFile=${sessionFile}`,
+      );
+      return { messages: [] };
+    }
   }
 
   try {
