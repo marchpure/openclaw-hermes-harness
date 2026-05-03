@@ -362,6 +362,26 @@ function uniqueSortedPaths(paths: string[]): string[] {
   return [...new Set(paths)].sort();
 }
 
+function shouldPullRuntimeExecEnvFromContainer(
+  config: HermesPluginConfig,
+  runtimeExecEnvPath: string,
+): boolean {
+  if (!config.mirrorExecEnvToContainer) return false;
+  if (config.transport !== "tcp") return false;
+  const hermesDataDir = config.hermesDataDir?.trim();
+  if (hermesDataDir && runtimeExecEnvPath.startsWith("/opt/data/")) {
+    return false;
+  }
+  if (hermesDataDir && runtimeExecEnvPath.startsWith(`${hermesDataDir}/`)) {
+    return false;
+  }
+  // In the packaged Hermes container, runtime cwd is a copied projection
+  // rather than a bind mount unless it lives under the /opt/data mount. Pull
+  // runtime writes back from the container even if a stale host projection or
+  // cache exists at another path.
+  return true;
+}
+
 async function mirrorDirectoryToContainer(config: HermesPluginConfig, hostDir: string): Promise<void> {
   const container = config.hermesContainerName;
   const runtimeParent = hostDir.slice(0, Math.max(hostDir.lastIndexOf("/"), 1));
@@ -400,11 +420,12 @@ async function syncExecEnvSkillsToWorkspace(
   try {
     let sourceDir = hostExecEnvSkillsDir;
     const hostMatchesRuntime = hostExecEnvSkillsDir === runtimeSkillsDir;
+    const mustPullFromContainer = shouldPullRuntimeExecEnvFromContainer(config, runtimeSkillsDir);
     const hostExecEnvAvailable = await stat(hostExecEnvSkillsDir)
       .then((info) => info.isDirectory())
       .catch(() => false);
 
-    if (!hostMatchesRuntime && !hostExecEnvAvailable) {
+    if (mustPullFromContainer || (!hostMatchesRuntime && !hostExecEnvAvailable)) {
       await rm(tempSyncDir, { recursive: true, force: true });
       await mkdir(tempSyncDir, { recursive: true });
       await streamDirectoryFromContainer(config.hermesContainerName, runtimeSkillsDir, tempSyncDir);
@@ -470,6 +491,73 @@ async function syncExecEnvSkillsToWorkspace(
     }
   } catch {
     // No projected runtime skills yet; nothing to sync back.
+  } finally {
+    await rm(tempSyncDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function syncExecEnvFilesToWorkspace(
+  config: HermesPluginConfig,
+  workspaceDir: string,
+  runtimeExecEnvPath: string,
+): Promise<void> {
+  if (!runtimeExecEnvPath.startsWith("/")) return;
+
+  const hostExecEnvPath = resolveExecEnvHostPath(config, runtimeExecEnvPath.split("/").pop() ?? "");
+  const tempSyncDir = join(tmpdir(), `hermes-file-sync-${hashText(runtimeExecEnvPath).slice(0, 12)}`);
+  const excludedRootEntries = new Set([
+    "AGENT.md",
+    "AGENTS.md",
+    "BOOTSTRAP.md",
+    "HEARTBEAT.md",
+    "IDENTITY.md",
+    "SOUL.md",
+    "TASK.md",
+    "TOOLS.md",
+    "USER.md",
+    "projection.json",
+    "runtime-config.json",
+    "skills",
+  ]);
+
+  try {
+    let sourceDir = hostExecEnvPath;
+    const hostMatchesRuntime = hostExecEnvPath === runtimeExecEnvPath;
+    const mustPullFromContainer = shouldPullRuntimeExecEnvFromContainer(config, runtimeExecEnvPath);
+    const hostExecEnvAvailable = await stat(hostExecEnvPath)
+      .then((info) => info.isDirectory())
+      .catch(() => false);
+
+    if (mustPullFromContainer || (!hostMatchesRuntime && !hostExecEnvAvailable)) {
+      await rm(tempSyncDir, { recursive: true, force: true });
+      await mkdir(tempSyncDir, { recursive: true });
+      await streamDirectoryFromContainer(config.hermesContainerName, runtimeExecEnvPath, tempSyncDir);
+      sourceDir = tempSyncDir;
+    } else if (!hostExecEnvAvailable) {
+      return;
+    }
+
+    const entries = await readdir(sourceDir, { withFileTypes: true });
+    const copiedEntries: string[] = [];
+    for (const entry of entries) {
+      if (excludedRootEntries.has(entry.name)) continue;
+      await mkdir(workspaceDir, { recursive: true });
+      await cp(join(sourceDir, entry.name), join(workspaceDir, entry.name), {
+        recursive: true,
+        force: true,
+        dereference: true,
+      });
+      copiedEntries.push(entry.name);
+    }
+    if (copiedEntries.length > 0) {
+      console.log(`[hermes-acp] runtime file writeback copied: ${copiedEntries.join(", ")}`);
+    }
+  } catch (err) {
+    console.warn(
+      `[hermes-acp] runtime file writeback skipped for ${runtimeExecEnvPath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    // Runtime file side effects are best-effort; explicit path mirroring and
+    // autoskill writeback still run independently.
   } finally {
     await rm(tempSyncDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -602,6 +690,7 @@ export async function mirrorWorkspaceFromContainer(
   // real OpenClaw workspace. Persist any generated skills back into the host
   // workspace so future turns can discover and use them.
   if (runtimeExecEnvPath) {
+    await syncExecEnvFilesToWorkspace(config, workspaceDir, runtimeExecEnvPath);
     await syncExecEnvSkillsToWorkspace(config, workspaceDir, runtimeExecEnvPath, createdSkillNames);
   }
 

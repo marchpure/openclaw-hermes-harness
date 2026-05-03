@@ -84,6 +84,13 @@ async function main() {
     }),
     "utf8",
   );
+  await writeFile(join(config.hermesDataDir!, "execenv", taskId, "SOUL.md"), "runtime soul copy should not overwrite host\n", "utf8");
+  await mkdir(join(hostExecEnvSkillsDir, "..", "hermes-real-regression-fixtures"), { recursive: true });
+  await writeFile(
+    join(hostExecEnvSkillsDir, "..", "hermes-real-regression-fixtures", "relative-write.txt"),
+    "relative runtime writeback\n",
+    "utf8",
+  );
 
   await mkdir(join(hostExecEnvSkillsDir, "invalid-dir"), { recursive: true });
   await writeFile(join(hostExecEnvSkillsDir, "invalid-dir", "README.md"), "missing skill md", "utf8");
@@ -108,6 +115,19 @@ async function main() {
     fail("new runtime skill was not copied into workspace/skills");
   }
   ok("copies new runtime-generated skill into workspace/skills");
+
+  const relativeWriteback = await mustRead(join(workspace, "hermes-real-regression-fixtures", "relative-write.txt"));
+  if (!relativeWriteback.includes("relative runtime writeback")) {
+    fail("runtime relative file write was not copied back into workspace");
+  }
+  ok("copies runtime relative file writes back into workspace");
+
+  try {
+    await stat(join(workspace, "projection.json"));
+    fail("runtime projection metadata should not be copied into workspace");
+  } catch {
+    ok("does not copy runtime projection metadata into workspace");
+  }
 
   const existingSkill = await mustRead(existingSkillPath);
   if (!existingSkill.includes("workspace version")) {
