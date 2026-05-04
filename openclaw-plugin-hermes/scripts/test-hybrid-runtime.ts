@@ -123,7 +123,12 @@ async function testSnapshotProjection(): Promise<Record<string, unknown>> {
   };
 }
 
-async function withMockAcpServer<T>(fn: (port: number, requests: Array<Record<string, unknown>>) => Promise<T>): Promise<T> {
+async function withMockAcpServer<T>(
+  fn: (port: number, requests: Array<Record<string, unknown>>) => Promise<T>,
+  options?: {
+    omitPromptResponse?: boolean;
+  },
+): Promise<T> {
   const requests: Array<Record<string, unknown>> = [];
   const server = createServer((socket: Socket) => {
     let buffer = "";
@@ -147,6 +152,17 @@ async function withMockAcpServer<T>(fn: (port: number, requests: Array<Record<st
               : method === "session/resume"
                 ? { session_id: "mock-session" }
                 : {};
+        if (method === "session/prompt" && options?.omitPromptResponse) {
+          socket.write(`${JSON.stringify({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionUpdate: "agent_message_text",
+              text: "streamed without terminal response",
+            },
+          })}\n`);
+          continue;
+        }
         socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
       }
     });
@@ -230,10 +246,75 @@ async function testAcpSessionOptions(): Promise<Record<string, unknown>> {
   });
 }
 
+async function testAcpPromptIdleFinalize(): Promise<Record<string, unknown>> {
+  return await withMockAcpServer(async (port, requests) => {
+    const config: HermesPluginConfig = {
+      ...DEFAULT_CONFIG,
+      tcpPort: port,
+      timeout: 10,
+    };
+    const client = new HermesAcpClient(config);
+    await client.start();
+    const sessionId = await client.newSession({ cwd: "/runtime/execenv/session-idle" });
+    const started = Date.now();
+    const result = await client.prompt("stream without final JSON-RPC response", sessionId, {
+      timeout: 30_000,
+    });
+    await client.close();
+
+    assert(result.text === "streamed without terminal response", "idle finalize should return accumulated stream text");
+    assert(Date.now() - started < 10_000, "idle finalize should not wait for the long prompt timeout");
+    assert(
+      requests.some((request) => request.method === "session/prompt"),
+      "mock server should receive session/prompt",
+    );
+    return {
+      text: result.text,
+      requestMethods: requests.map((request) => request.method),
+    };
+  }, { omitPromptResponse: true });
+}
+
+async function testAcpPromptPreAbortedSignal(): Promise<Record<string, unknown>> {
+  return await withMockAcpServer(async (port, requests) => {
+    const config: HermesPluginConfig = {
+      ...DEFAULT_CONFIG,
+      tcpPort: port,
+      timeout: 10,
+    };
+    const client = new HermesAcpClient(config);
+    await client.start();
+    const sessionId = await client.newSession({ cwd: "/runtime/execenv/session-aborted" });
+    const controller = new AbortController();
+    controller.abort();
+
+    let rejectedMessage = "";
+    try {
+      await client.prompt("should not be sent", sessionId, { signal: controller.signal });
+    } catch (err) {
+      rejectedMessage = err instanceof Error ? err.message : String(err);
+    }
+    await client.close();
+
+    assert(rejectedMessage === "Prompt aborted", "pre-aborted prompt should reject immediately");
+    assert(
+      !requests.some((request) => request.method === "session/prompt"),
+      "pre-aborted prompt should not send session/prompt",
+    );
+
+    return {
+      rejectedMessage,
+      requestMethods: requests.map((request) => request.method),
+    };
+  });
+}
+
 async function main() {
   const projection = await testSnapshotProjection();
   const acp = await testAcpSessionOptions();
-  console.log(JSON.stringify({ ok: true, projection, acp }, null, 2));
+  const idleFinalize = await testAcpPromptIdleFinalize();
+  const preAborted = await testAcpPromptPreAbortedSignal();
+  console.log(JSON.stringify({ ok: true, projection, acp, idleFinalize, preAborted }, null, 2));
 }
 
 main().catch((error) => {

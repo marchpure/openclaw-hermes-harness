@@ -282,6 +282,10 @@ export class HermesAcpClient extends EventEmitter {
           this.cancel(sid).catch(() => {});
           settle(() => reject(new Error("Prompt aborted")));
         };
+        if (options.signal.aborted) {
+          abortHandler();
+          return;
+        }
         options.signal.addEventListener("abort", abortHandler, { once: true });
       }
 
@@ -289,7 +293,7 @@ export class HermesAcpClient extends EventEmitter {
       const promptRequest = this.sendRequest("session/prompt", {
         session_id: sid,
         prompt: [{ type: "text", text }],
-      });
+      }, timeout + 10000);
       promptRequestId = promptRequest.id;
       promptRequest.promise.then((result) => {
         const promptResult = result as Record<string, unknown>;
@@ -399,7 +403,11 @@ export class HermesAcpClient extends EventEmitter {
     this.socket.write(data);
   }
 
-  private sendRequest(method: string, params?: Record<string, unknown>): { id: number; promise: Promise<unknown> } {
+  private sendRequest(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutOverrideMs?: number,
+  ): { id: number; promise: Promise<unknown> } {
     const id = ++this.requestId;
     const request: AcpJsonRpcRequest = {
       jsonrpc: "2.0",
@@ -409,9 +417,9 @@ export class HermesAcpClient extends EventEmitter {
     };
 
     const promise = new Promise<unknown>((resolve, reject) => {
-      const timeoutMs = method === "session/prompt"
+      const timeoutMs = timeoutOverrideMs ?? (method === "session/prompt"
         ? (this.config.timeout * 1000 + 10000)
-        : 30000;
+        : 30000);
 
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
