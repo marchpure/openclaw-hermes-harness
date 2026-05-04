@@ -98,13 +98,18 @@ export class HermesAcpClient extends EventEmitter {
       this.logger.info(`TCP connecting: ${tcpHost}:${tcpPort}`);
 
       this.socket = net.createConnection({ host: tcpHost, port: tcpPort });
+      let startSettled = false;
 
       const connectTimeout = setTimeout(() => {
-        reject(new Error(`TCP connection to ${tcpHost}:${tcpPort} timed out after 10s`));
+        if (startSettled) return;
+        startSettled = true;
         this.socket?.destroy();
+        reject(new Error(`TCP connection to ${tcpHost}:${tcpPort} timed out after 10s`));
       }, 10000);
 
       this.socket.on("connect", () => {
+        if (startSettled) return;
+        startSettled = true;
         clearTimeout(connectTimeout);
         this.logger.info(`TCP connected: ${tcpHost}:${tcpPort}`);
 
@@ -116,11 +121,14 @@ export class HermesAcpClient extends EventEmitter {
       });
 
       this.socket.on("error", (err: Error) => {
-        clearTimeout(connectTimeout);
         this.logger.error(`TCP error: ${err.message}`);
         if (!this.connected) {
+          if (startSettled) return;
+          startSettled = true;
+          clearTimeout(connectTimeout);
           reject(err);
         } else {
+          clearTimeout(connectTimeout);
           this.connected = false;
           this.rejectAllPending(err);
           this.emit("error", err);
@@ -128,10 +136,13 @@ export class HermesAcpClient extends EventEmitter {
       });
 
       this.socket.on("close", () => {
+        const wasConnected = this.connected;
         this.connected = false;
         this.logger.info("TCP connection closed");
         this.rejectAllPending(new Error("TCP connection closed"));
-        this.emit("exit", { code: null, signal: null });
+        if (wasConnected) {
+          this.emit("exit", { code: null, signal: null });
+        }
       });
     });
   }

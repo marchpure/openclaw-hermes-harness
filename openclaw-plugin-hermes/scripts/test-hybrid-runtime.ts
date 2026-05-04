@@ -126,6 +126,7 @@ async function testSnapshotProjection(): Promise<Record<string, unknown>> {
 async function withMockAcpServer<T>(
   fn: (port: number, requests: Array<Record<string, unknown>>) => Promise<T>,
   options?: {
+    closeOnInitialize?: boolean;
     omitPromptResponse?: boolean;
   },
 ): Promise<T> {
@@ -144,6 +145,10 @@ async function withMockAcpServer<T>(
         requests.push(request);
         const id = request.id;
         const method = request.method;
+        if (method === "initialize" && options?.closeOnInitialize) {
+          socket.end();
+          continue;
+        }
         const result =
           method === "initialize"
             ? { protocol_version: 1 }
@@ -309,12 +314,45 @@ async function testAcpPromptPreAbortedSignal(): Promise<Record<string, unknown>>
   });
 }
 
+async function testAcpInitializeDisconnect(): Promise<Record<string, unknown>> {
+  return await withMockAcpServer(async (port, requests) => {
+    const config: HermesPluginConfig = {
+      ...DEFAULT_CONFIG,
+      tcpPort: port,
+      timeout: 10,
+    };
+    const client = new HermesAcpClient(config);
+
+    let rejectedMessage = "";
+    try {
+      await client.start();
+    } catch (err) {
+      rejectedMessage = err instanceof Error ? err.message : String(err);
+    }
+    await client.close();
+
+    assert(rejectedMessage === "TCP connection closed", "initialize disconnect should reject pending initialize");
+    assert(client.isConnected === false, "client should remain disconnected after initialize failure");
+    assert(
+      requests.some((request) => request.method === "initialize"),
+      "mock server should receive initialize before closing",
+    );
+
+    return {
+      rejectedMessage,
+      requestMethods: requests.map((request) => request.method),
+      connected: client.isConnected,
+    };
+  }, { closeOnInitialize: true });
+}
+
 async function main() {
   const projection = await testSnapshotProjection();
   const acp = await testAcpSessionOptions();
   const idleFinalize = await testAcpPromptIdleFinalize();
   const preAborted = await testAcpPromptPreAbortedSignal();
-  console.log(JSON.stringify({ ok: true, projection, acp, idleFinalize, preAborted }, null, 2));
+  const initializeDisconnect = await testAcpInitializeDisconnect();
+  console.log(JSON.stringify({ ok: true, projection, acp, idleFinalize, preAborted, initializeDisconnect }, null, 2));
 }
 
 main().catch((error) => {
