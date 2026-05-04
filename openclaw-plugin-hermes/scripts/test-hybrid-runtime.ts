@@ -68,6 +68,11 @@ async function testSnapshotProjection(): Promise<Record<string, unknown>> {
             description: "Create Lark documents",
             path: "/host/lark-doc/SKILL.md",
           },
+          {
+            name: "feishu-fetch-doc",
+            description: "Fetch Feishu documents",
+            path: "/host/feishu-fetch-doc/SKILL.md",
+          },
         ],
       },
     },
@@ -76,6 +81,7 @@ async function testSnapshotProjection(): Promise<Record<string, unknown>> {
   const names = execution.exposedSkills.map((skill) => `${skill.name}:${skill.placement}`).sort();
   assert(names.includes("projected-helper:projected-local"), "projected skill should be local");
   assert(names.includes("lark-doc:host-backed"), "lark-doc should be host-backed");
+  assert(names.includes("feishu-fetch-doc:host-backed"), "feishu-fetch-doc should be host-backed");
   assert(
     !execution.bootstrapPrompt.includes("hidden-workspace-skill"),
     "snapshot should prevent fallback workspace skill exposure",
@@ -104,6 +110,10 @@ async function testSnapshotProjection(): Promise<Record<string, unknown>> {
   assert(
     manifest.skills?.some((skill) => skill.name === "lark-doc" && skill.placement === "host-backed"),
     "manifest should include host-backed skill metadata",
+  );
+  assert(
+    manifest.skills?.some((skill) => skill.name === "feishu-fetch-doc" && skill.placement === "host-backed"),
+    "manifest should include Feishu host-backed skill metadata",
   );
 
   return {
@@ -166,7 +176,10 @@ async function testAcpSessionOptions(): Promise<Record<string, unknown>> {
     const sessionId = await client.newSession({
       cwd: "/runtime/execenv/session-a",
       mcpServers: {
-        openclaw: { url: "http://127.0.0.1:18789/mcp" },
+        openclaw: {
+          url: "http://127.0.0.1:18789/mcp",
+          _meta: { openclaw: { timeout: 600, connectTimeout: 60 } },
+        },
       },
       env: {
         OPENCLAW_MCP_TOKEN: "secret-token",
@@ -176,7 +189,10 @@ async function testAcpSessionOptions(): Promise<Record<string, unknown>> {
     await client.resumeSession(sessionId, {
       cwd: "/runtime/execenv/session-a",
       mcpServers: {
-        openclaw: { url: "http://127.0.0.1:18789/mcp" },
+        openclaw: {
+          url: "http://127.0.0.1:18789/mcp",
+          _meta: { openclaw: { timeout: 600, connectTimeout: 60 } },
+        },
       },
       env: {
         OPENCLAW_MCP_TOKEN: "secret-token-2",
@@ -201,6 +217,10 @@ async function testAcpSessionOptions(): Promise<Record<string, unknown>> {
     assert(acpMcpServers[0]?.name === "openclaw", "mcp server should include name");
     assert(acpMcpServers[0]?.type === "http", "url mcp server should default to http");
     assert(acpMcpServers[0]?.url === "http://127.0.0.1:18789/mcp", "mcp server should include url");
+    assert(
+      (acpMcpServers[0]?._meta as Record<string, unknown> | undefined)?.openclaw,
+      "mcp server should preserve ACP _meta for runtime-specific options",
+    );
 
     return {
       requestMethods: requests.map((request) => request.method),

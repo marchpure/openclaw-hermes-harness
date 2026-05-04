@@ -39,9 +39,9 @@ const STREAM_IDLE_FINALIZE_MS = 2500;
 
 type AcpEnvVariable = { name: string; value: string };
 type AcpMcpServer =
-  | { type: "stdio"; name: string; command: string; args: string[]; env: AcpEnvVariable[] }
-  | { type: "http"; name: string; url: string; headers: AcpEnvVariable[] }
-  | { type: "sse"; name: string; url: string; headers: AcpEnvVariable[] };
+  | { type: "stdio"; name: string; command: string; args: string[]; env: AcpEnvVariable[]; _meta?: Record<string, unknown> }
+  | { type: "http"; name: string; url: string; headers: AcpEnvVariable[]; _meta?: Record<string, unknown> }
+  | { type: "sse"; name: string; url: string; headers: AcpEnvVariable[]; _meta?: Record<string, unknown> };
 
 // ─── ACP Client ─────────────────────────────────────────────────────────────
 
@@ -584,6 +584,7 @@ function normalizeAcpMcpServer(name: string | undefined, value: unknown): AcpMcp
       name: resolvedName,
       url,
       headers,
+      ...normalizeAcpMeta(server._meta),
     };
   }
 
@@ -595,7 +596,13 @@ function normalizeAcpMcpServer(name: string | undefined, value: unknown): AcpMcp
     command,
     args: normalizeStringList(server.args),
     env: normalizeNameValueList(server.env),
+    ...normalizeAcpMeta(server._meta),
   };
+}
+
+function normalizeAcpMeta(value: unknown): { _meta?: Record<string, unknown> } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return { _meta: value as Record<string, unknown> };
 }
 
 function normalizeStringList(value: unknown): string[] {

@@ -164,6 +164,7 @@ async function testStrictProjection() {
     skills: [
       { name: "browser", body: "# Browser\n\nSearch the web." },
       { name: "feishu", body: "# Feishu\n\nAccess Lark docs." },
+      { name: "feishu-fetch-doc", body: "# Feishu Fetch Doc\n\nFetch Lark docs through host tools." },
       { name: "ops-helper", body: "# Ops Helper\n\nList checks in order." },
     ],
   });
@@ -186,12 +187,14 @@ async function testStrictProjection() {
   );
   assert(
     execution.exposedSkills.some((skill) => skill.name === "browser" && skill.placement === "host-backed") &&
-      execution.exposedSkills.some((skill) => skill.name === "feishu" && skill.placement === "host-backed"),
+      execution.exposedSkills.some((skill) => skill.name === "feishu" && skill.placement === "host-backed") &&
+      execution.exposedSkills.some((skill) => skill.name === "feishu-fetch-doc" && skill.placement === "host-backed"),
     "strict projection should keep host-backed skills as MCP-backed metadata",
   );
   assert(
     !execution.exposedSkills.some((skill) => skill.name === "browser" && skill.projectedPath) &&
-      !execution.exposedSkills.some((skill) => skill.name === "feishu" && skill.projectedPath),
+      !execution.exposedSkills.some((skill) => skill.name === "feishu" && skill.projectedPath) &&
+      !execution.exposedSkills.some((skill) => skill.name === "feishu-fetch-doc" && skill.projectedPath),
     "host-backed skills should not be copied as local skill files",
   );
 

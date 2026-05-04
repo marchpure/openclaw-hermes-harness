@@ -14,6 +14,7 @@ Environment:
 """
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -73,6 +74,198 @@ def _read_projected_model(cwd: str | None) -> str | None:
     return None
 
 
+def _to_positive_float(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number <= 0:
+        return default
+    return number
+
+
+def _read_openclaw_mcp_meta(server: Any) -> dict[str, Any]:
+    raw_meta = getattr(server, "field_meta", None)
+    if raw_meta is None and hasattr(server, "model_dump"):
+        try:
+            raw_meta = server.model_dump(by_alias=True).get("_meta")
+        except Exception:
+            raw_meta = None
+    if not isinstance(raw_meta, dict):
+        return {}
+    openclaw_meta = raw_meta.get("openclaw")
+    return openclaw_meta if isinstance(openclaw_meta, dict) else {}
+
+
+def _patch_hermes_mcp_runtime_options() -> None:
+    """Make ACP-provided MCP runtime options survive into Hermes MCP calls.
+
+    The upstream Hermes ACP adapter currently converts ACP HTTP MCP servers to
+    only {url, headers}, dropping `_meta` and any runtime-specific timeouts.
+    It also leaves MCP SDK call_tool read timeouts at the SDK default. OpenClaw
+    passes its loopback bridge options under `_meta.openclaw` so ACP clients
+    remain spec-compatible while this container adapter maps them into Hermes'
+    native mcp_servers config shape.
+    """
+    from acp.schema import McpServerHttp, McpServerSse, McpServerStdio
+    from acp_adapter.server import HermesACPAgent
+
+    if getattr(HermesACPAgent, "_openclaw_mcp_options_patch", False):
+        return
+
+    def force_reconnect_session_scoped_servers(server_names: list[str]) -> None:
+        if not server_names:
+            return
+        try:
+            import tools.mcp_tool as mcp_tool
+        except Exception:
+            logger.debug("MCP tool module unavailable during reconnect refresh", exc_info=True)
+            return
+
+        mcp_tool._ensure_mcp_loop()
+
+        async def shutdown_existing() -> None:
+            for server_name in server_names:
+                with mcp_tool._lock:
+                    server = mcp_tool._servers.pop(server_name, None)
+                    mcp_tool._server_error_counts.pop(server_name, None)
+                    mcp_tool._server_breaker_opened_at.pop(server_name, None)
+                if server is None:
+                    continue
+                try:
+                    await server.shutdown()
+                    logger.info("MCP server '%s': refreshed session-scoped OpenClaw bridge", server_name)
+                except Exception:
+                    logger.debug("Failed to shut down stale MCP server '%s'", server_name, exc_info=True)
+
+        try:
+            mcp_tool._run_on_mcp_loop(shutdown_existing(), timeout=15)
+        except Exception:
+            logger.debug("Failed to refresh session-scoped MCP servers", exc_info=True)
+
+    async def register_session_mcp_servers(self: Any, state: Any, mcp_servers: list | None) -> None:
+        if not mcp_servers:
+            return
+
+        try:
+            from tools.mcp_tool import register_mcp_servers
+
+            config_map: dict[str, dict] = {}
+            session_scoped_server_names: list[str] = []
+            for server in mcp_servers:
+                name = server.name
+                meta = _read_openclaw_mcp_meta(server)
+                if meta:
+                    session_scoped_server_names.append(name)
+                timeout = _to_positive_float(meta.get("timeout"), 600.0)
+                connect_timeout = _to_positive_float(
+                    meta.get("connectTimeout", meta.get("connect_timeout")),
+                    60.0,
+                )
+                if isinstance(server, McpServerStdio):
+                    config = {
+                        "command": server.command,
+                        "args": list(server.args),
+                        "env": {item.name: item.value for item in server.env},
+                    }
+                else:
+                    config = {
+                        "url": server.url,
+                        "headers": {item.name: item.value for item in server.headers},
+                    }
+                    if isinstance(server, McpServerSse):
+                        config["type"] = "sse"
+                config["timeout"] = timeout
+                config["connect_timeout"] = connect_timeout
+                config_map[name] = config
+
+            force_reconnect_session_scoped_servers(session_scoped_server_names)
+            await asyncio.to_thread(register_mcp_servers, config_map)
+        except Exception:
+            logger.warning(
+                "Session %s: failed to register ACP MCP servers",
+                state.session_id,
+                exc_info=True,
+            )
+            return
+
+        try:
+            from model_tools import get_tool_definitions
+            from acp_adapter.session import _expand_acp_enabled_toolsets
+
+            enabled_toolsets = _expand_acp_enabled_toolsets(
+                getattr(state.agent, "enabled_toolsets", None) or ["hermes-acp"],
+                mcp_server_names=[server.name for server in mcp_servers],
+            )
+            state.agent.enabled_toolsets = enabled_toolsets
+            disabled_toolsets = getattr(state.agent, "disabled_toolsets", None)
+            state.agent.tools = get_tool_definitions(
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
+                quiet_mode=True,
+            )
+            state.agent.valid_tool_names = {
+                tool["function"]["name"] for tool in state.agent.tools or []
+            }
+            invalidate = getattr(state.agent, "_invalidate_system_prompt", None)
+            if callable(invalidate):
+                invalidate()
+            logger.info(
+                "Session %s: refreshed tool surface after ACP MCP registration (%d tools)",
+                state.session_id,
+                len(state.agent.tools or []),
+            )
+        except Exception:
+            logger.warning(
+                "Session %s: failed to refresh tool surface after ACP MCP registration",
+                state.session_id,
+                exc_info=True,
+            )
+
+    HermesACPAgent._register_session_mcp_servers = register_session_mcp_servers
+    HermesACPAgent._openclaw_mcp_options_patch = True
+
+    try:
+        import tools.mcp_tool as mcp_tool
+    except Exception:
+        logger.warning("Failed to import Hermes MCP tool module for timeout patch", exc_info=True)
+        return
+
+    if getattr(mcp_tool, "_openclaw_call_timeout_patch", False):
+        return
+
+    original_make_tool_handler = mcp_tool._make_tool_handler
+
+    def make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
+        handler = original_make_tool_handler(server_name, tool_name, tool_timeout)
+
+        def wrapped(args: dict, **kwargs: Any) -> str:
+            with mcp_tool._lock:
+                server = mcp_tool._servers.get(server_name)
+            if server and server.session:
+                original_call_tool = server.session.call_tool
+
+                async def call_tool_with_timeout(name: str, arguments: dict | None = None, **call_kwargs: Any):
+                    call_kwargs.setdefault(
+                        "read_timeout_seconds",
+                        datetime.timedelta(seconds=float(tool_timeout)),
+                    )
+                    return await original_call_tool(name, arguments=arguments, **call_kwargs)
+
+                server.session.call_tool = call_tool_with_timeout
+                try:
+                    return handler(args, **kwargs)
+                finally:
+                    server.session.call_tool = original_call_tool
+            return handler(args, **kwargs)
+
+        return wrapped
+
+    mcp_tool._make_tool_handler = make_tool_handler
+    mcp_tool._openclaw_call_timeout_patch = True
+    logger.info("Installed OpenClaw MCP runtime options patch for Hermes ACP")
+
+
 def _patch_hermes_acp_model_routing() -> None:
     """Teach Hermes' ACP adapter to create sessions with per-request models.
 
@@ -85,6 +278,8 @@ def _patch_hermes_acp_model_routing() -> None:
 
     if getattr(SessionManager, "_openclaw_model_patch", False):
         return
+
+    _patch_hermes_mcp_runtime_options()
 
     original_create_session = SessionManager.create_session
     original_update_cwd = SessionManager.update_cwd

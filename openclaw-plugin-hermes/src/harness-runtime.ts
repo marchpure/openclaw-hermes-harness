@@ -3,9 +3,9 @@ import type {
   AgentHarnessAttemptResult,
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
-import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
@@ -25,11 +25,15 @@ import { extractTouchedSkillNames } from "./result-processor.js";
 import type { AcpSessionEvent, HermesAcpSessionOptions, HermesPluginConfig } from "./types.js";
 
 type HarnessMessage = NonNullable<AgentHarnessAttemptResult["messagesSnapshot"]>[number];
-type McpLoopbackRuntime = { port: number; token: string };
-type McpHttpModule = {
-  i?: () => McpLoopbackRuntime | undefined;
-  n?: (port?: number) => Promise<unknown>;
-  r?: (port: number) => { mcpServers?: Record<string, unknown> };
+type AgentHarnessMcpBridge = {
+  mcpServers?: Record<string, unknown>;
+  env?: Record<string, string>;
+  mcpConfigHash?: string;
+  mcpResumeHash?: string;
+  credentialScopeHash?: string;
+};
+type AgentHarnessRuntimeModule = {
+  prepareAgentHarnessMcpBridge?: (params: Record<string, unknown>) => Promise<AgentHarnessMcpBridge>;
 };
 
 export type HermesRunResponse = {
@@ -69,7 +73,6 @@ const ZERO_ASSISTANT_USAGE = {
 const MAX_HISTORY_MESSAGES = 12;
 const MAX_HISTORY_CHARS = 12000;
 const MAX_ACP_PROMPT_CHARS = 48000;
-const OPENCLAW_MCP_HTTP_MODULE = "/usr/lib/node_modules/openclaw/dist/mcp-http-DkuYmsG-.js";
 
 const CONTEXT_LEVEL_ORDER = {
   L0: 0,
@@ -144,28 +147,6 @@ function extractWorkspacePaths(prompt: string, workspaceDir: string): string[] {
   return [...new Set(matches)];
 }
 
-function hashJson(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function substituteEnvPlaceholders(value: unknown, env: Record<string, string>): unknown {
-  if (typeof value === "string") {
-    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, name: string) => env[name] ?? "");
-  }
-  if (Array.isArray(value)) {
-    return value.map((entry) => substituteEnvPlaceholders(entry, env));
-  }
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
-      key,
-      substituteEnvPlaceholders(entry, env),
-    ]),
-  );
-}
-
 function resolveFeishuSenderIdFromPrompt(prompt: string): string | undefined {
   const systemLineMatch = /^System:\s*\[[^\n]*\]\s*Feishu\[[^\]]+\]\s+(?:DM|message in group)[^\n|]*(?:\|\s*)?(ou_[A-Za-z0-9_-]+)/m.exec(
     prompt,
@@ -177,122 +158,94 @@ function resolveFeishuSenderIdFromPrompt(prompt: string): string | undefined {
   return senderLineMatch?.[1];
 }
 
-function addOpenClawLoopbackHeaders(
-  server: unknown,
-  headers: Record<string, string>,
-): Record<string, unknown> | undefined {
-  if (!server || typeof server !== "object" || Array.isArray(server)) {
-    return undefined;
-  }
-  const record = server as Record<string, unknown>;
-  const existingHeaders =
-    record.headers && typeof record.headers === "object" && !Array.isArray(record.headers)
-      ? (record.headers as Record<string, unknown>)
-      : {};
-  return {
-    ...record,
-    headers: {
-      ...existingHeaders,
-      ...headers,
-    },
-  };
-}
-
-function resolveHermesSessionHashes(config: HermesPluginConfig): {
-  mcpConfigHash?: string;
-  credentialScopeHash?: string;
-} {
-  if (!config.mcpBridge.enabled) {
-    return {};
-  }
-  return {
-    mcpConfigHash: hashJson({
-      servers: config.mcpBridge.servers,
-      openclawLoopback: config.mcpBridge.servers.openclaw ? "configured" : "auto",
-    }),
-    credentialScopeHash: hashJson(Object.keys(config.mcpBridge.env).sort()),
-  };
-}
-
-async function resolveOpenClawMcpLoopback(params: {
+async function prepareHermesMcpBridge(params: {
   config: HermesPluginConfig;
+  openClawConfig?: unknown;
+  workspaceDir?: string;
   sessionKey?: string;
   agentId?: string;
   agentAccountId?: string;
+  messageChannel?: string;
   messageProvider?: string;
   messageTo?: string;
   messageThreadId?: string | number;
+  currentChannelId?: string;
+  currentThreadTs?: string;
   currentMessageId?: string | number;
   senderId?: string;
   senderIsOwner?: boolean;
-}): Promise<{ mcpServers?: Record<string, unknown>; env?: Record<string, string> }> {
+}): Promise<AgentHarnessMcpBridge> {
   if (!params.config.mcpBridge.enabled) return {};
-  if (params.config.mcpBridge.servers.openclaw) return {};
 
   try {
-    const module = (await import(pathToFileURL(OPENCLAW_MCP_HTTP_MODULE).href)) as McpHttpModule;
-    let runtime = module.i?.();
-    if (!runtime) {
-      await module.n?.();
-      runtime = module.i?.();
+    const module = await loadAgentHarnessRuntimeModule();
+    const prepare = module.prepareAgentHarnessMcpBridge;
+    if (!prepare) {
+      console.warn("[hermes-acp] OpenClaw MCP bridge helper unavailable");
+      return {
+        mcpServers: params.config.mcpBridge.servers,
+        env: params.config.mcpBridge.env,
+      };
     }
-    if (!runtime) return {};
-    const generated = module.r?.(runtime.port);
-    const openclawServer = generated?.mcpServers?.openclaw;
-    if (!openclawServer) return {};
-    const env = {
-      OPENCLAW_MCP_TOKEN: runtime.token,
-      OPENCLAW_MCP_AGENT_ID: params.agentId ?? "",
-      OPENCLAW_MCP_ACCOUNT_ID: params.agentAccountId ?? "",
-      OPENCLAW_MCP_SESSION_KEY: params.sessionKey ?? "",
-      OPENCLAW_MCP_MESSAGE_CHANNEL: params.messageProvider ?? "",
-      OPENCLAW_MCP_MESSAGE_TO: params.messageTo != null ? String(params.messageTo) : "",
-      OPENCLAW_MCP_THREAD_ID: params.messageThreadId != null ? String(params.messageThreadId) : "",
-      OPENCLAW_MCP_CURRENT_MESSAGE_ID: params.currentMessageId != null ? String(params.currentMessageId) : "",
-      OPENCLAW_MCP_SENDER_ID: params.senderId ?? "",
-      OPENCLAW_MCP_SENDER_IS_OWNER: params.senderIsOwner === true ? "true" : "false",
-    };
-    const serverWithHeaders = addOpenClawLoopbackHeaders(openclawServer, {
-      "x-openclaw-sender-id": "${OPENCLAW_MCP_SENDER_ID}",
-      "x-openclaw-message-to": "${OPENCLAW_MCP_MESSAGE_TO}",
-      "x-openclaw-thread-id": "${OPENCLAW_MCP_THREAD_ID}",
-      "x-openclaw-current-message-id": "${OPENCLAW_MCP_CURRENT_MESSAGE_ID}",
+    return await prepare({
+      enabled: true,
+      config: params.openClawConfig,
+      workspaceDir: params.workspaceDir,
+      configuredServers: params.config.mcpBridge.servers,
+      configuredEnv: params.config.mcpBridge.env,
+      sessionKey: params.sessionKey,
+      agentId: params.agentId,
+      accountId: params.agentAccountId,
+      messageChannel: params.messageChannel,
+      messageProvider: params.messageProvider,
+      messageTo: params.messageTo,
+      messageThreadId: params.messageThreadId,
+      currentChannelId: params.currentChannelId,
+      currentThreadTs: params.currentThreadTs,
+      currentMessageId: params.currentMessageId,
+      requesterSenderId: params.senderId,
+      senderIsOwner: params.senderIsOwner,
     });
-    return {
-      mcpServers: serverWithHeaders ? { openclaw: substituteEnvPlaceholders(serverWithHeaders, env) } : undefined,
-      env,
-    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[hermes-acp] OpenClaw MCP loopback unavailable: ${message}`);
-    return {};
+    console.warn(`[hermes-acp] OpenClaw MCP bridge unavailable: ${message}`);
+    return {
+      mcpServers: params.config.mcpBridge.servers,
+      env: params.config.mcpBridge.env,
+    };
   }
 }
 
-async function buildHermesSessionOptions(params: {
-  config: HermesPluginConfig;
+async function loadAgentHarnessRuntimeModule(): Promise<AgentHarnessRuntimeModule> {
+  const require = createRequire(import.meta.url);
+  const candidates: string[] = [];
+  try {
+    candidates.push(require.resolve("openclaw/plugin-sdk/agent-harness-runtime"));
+  } catch {}
+  try {
+    const sdkEntry = require.resolve("openclaw/plugin-sdk/agent-harness");
+    const pkgRoot = dirname(dirname(sdkEntry));
+    candidates.push(join(pkgRoot, "plugin-sdk", "agent-harness-runtime.js"));
+  } catch {}
+  candidates.push("/usr/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js");
+  candidates.push("/usr/local/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js");
+
+  for (const candidate of candidates) {
+    try {
+      return (await import(pathToFileURL(candidate).href)) as AgentHarnessRuntimeModule;
+    } catch {
+      // Try the next real installed OpenClaw location.
+    }
+  }
+  throw new Error("OpenClaw agent-harness-runtime SDK entry not found");
+}
+
+function buildHermesSessionOptions(params: {
   cwd: string;
-  sessionKey?: string;
-  agentId?: string;
-  agentAccountId?: string;
-  messageProvider?: string;
-  messageTo?: string;
-  messageThreadId?: string | number;
-  currentMessageId?: string | number;
-  senderId?: string;
-  senderIsOwner?: boolean;
-}): Promise<HermesAcpSessionOptions> {
-  const loopback = await resolveOpenClawMcpLoopback(params);
-  const configuredServers = params.config.mcpBridge.enabled ? params.config.mcpBridge.servers : undefined;
-  const configuredEnv = params.config.mcpBridge.enabled ? params.config.mcpBridge.env : undefined;
-  const mcpServers = {
-    ...(configuredServers ?? {}),
-    ...(loopback.mcpServers ?? {}),
-  };
-  const env = {
-    ...(configuredEnv ?? {}),
-    ...(loopback.env ?? {}),
-  };
+  mcpBridge: AgentHarnessMcpBridge;
+}): HermesAcpSessionOptions {
+  const mcpServers = params.mcpBridge.mcpServers ?? {};
+  const env = params.mcpBridge.env ?? {};
   return {
     cwd: params.cwd,
     ...(mcpServers && Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
@@ -455,7 +408,26 @@ export async function runHermesHarnessAttempt(
   console.log(
     `[hermes-acp] anchor sessionKey=${params.sessionKey ?? ""} sessionId=${params.sessionId ?? ""} sessionFile=${params.sessionFile ?? ""} agentId=${params.agentId ?? ""} -> ${sessionAnchor}`,
   );
-  const sessionHashes = resolveHermesSessionHashes(config);
+  const mcpBridge = await prepareHermesMcpBridge({
+    config,
+    openClawConfig: params.config,
+    workspaceDir: params.workspaceDir,
+    sessionKey: params.sessionKey,
+    agentId: params.agentId,
+    agentAccountId: params.agentAccountId,
+    messageChannel: params.messageChannel,
+    messageProvider: params.messageProvider,
+    messageTo: params.messageTo,
+    messageThreadId: params.messageThreadId,
+    currentChannelId: params.currentChannelId,
+    currentThreadTs: params.currentThreadTs,
+    currentMessageId: params.currentMessageId,
+    senderId:
+      params.senderId ??
+      resolveFeishuSenderIdFromPrompt(sanitizedPrompt) ??
+      resolveFeishuSenderIdFromPrompt(params.prompt),
+    senderIsOwner: params.senderIsOwner,
+  });
 
   const execution = await prepareProjectedExecutionEnv({
     task: sanitizedPrompt,
@@ -472,24 +444,12 @@ export async function runHermesHarnessAttempt(
       skillsSnapshot: params.skillsSnapshot,
       extraSystemPrompt: params.extraSystemPrompt,
     },
-    mcpConfigHash: sessionHashes.mcpConfigHash,
-    credentialScopeHash: sessionHashes.credentialScopeHash,
+    mcpConfigHash: mcpBridge.mcpResumeHash ?? mcpBridge.mcpConfigHash,
+    credentialScopeHash: mcpBridge.credentialScopeHash,
   });
-  const sessionOptions = await buildHermesSessionOptions({
-    config,
+  const sessionOptions = buildHermesSessionOptions({
     cwd: execution.execEnv.runtimeExecEnvPath,
-    sessionKey: params.sessionKey,
-    agentId: params.agentId,
-    agentAccountId: (params as { agentAccountId?: string }).agentAccountId,
-    messageProvider: (params as { messageProvider?: string }).messageProvider,
-    messageTo: (params as { messageTo?: string }).messageTo,
-    messageThreadId: (params as { messageThreadId?: string | number }).messageThreadId,
-    currentMessageId: (params as { currentMessageId?: string | number }).currentMessageId,
-    senderId:
-      (params as { senderId?: string }).senderId ??
-      resolveFeishuSenderIdFromPrompt(sanitizedPrompt) ??
-      resolveFeishuSenderIdFromPrompt(params.prompt),
-    senderIsOwner: (params as { senderIsOwner?: boolean }).senderIsOwner,
+    mcpBridge,
   });
 
   try {

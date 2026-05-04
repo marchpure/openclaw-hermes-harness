@@ -14,6 +14,7 @@ const agentId = process.env.REGRESSION_AGENT_ID ?? "ai-1111";
 const runtimeId = process.env.REGRESSION_RUNTIME_ID ?? "hermes";
 const expectProvider = process.env.REGRESSION_EXPECT_PROVIDER ?? "hermes";
 const expectModel = process.env.REGRESSION_EXPECT_MODEL ?? "default";
+const modelOverride = process.env.REGRESSION_MODEL_OVERRIDE ?? "";
 const maxMs = Number(process.env.REGRESSION_MAX_MS ?? 90_000);
 const killAfterJsonMs = Number(process.env.REGRESSION_KILL_AFTER_JSON_MS ?? 3_000);
 const retries = Number(process.env.REGRESSION_RETRIES ?? 1);
@@ -29,6 +30,13 @@ const workspace = `/root/.openclaw/.arkclaw-team/projects/project-1/workspaces/$
 const fixtureDir = join(workspace, "hermes-real-regression-fixtures");
 mkdirSync(fixtureDir, { recursive: true });
 const routeBase = process.env.REGRESSION_ROUTE_BASE ?? "+1555000";
+const runTag = runId.replace(/[^0-9A-Za-z]/g, "").slice(-12).toLowerCase();
+const autoSkillName = `${runtimeId}-real-autoskill-${runTag}`;
+const improveSkillName = `${runtimeId}-real-skillimprove-${runTag}`;
+const autoSkillDir = join(workspace, "skills", autoSkillName);
+const improveSkillDir = join(workspace, "skills", improveSkillName);
+const autoSkillFile = join(autoSkillDir, "SKILL.md");
+const improveSkillFile = join(improveSkillDir, "SKILL.md");
 
 const cases = [
   {
@@ -69,6 +77,22 @@ const cases = [
     check: (_parsed, visible) => visible.includes(`${runtimeId.toUpperCase()}_LIST_OK`),
   },
   {
+    id: "compute-use",
+    before: () => rmSync(join(fixtureDir, `${runtimeId}-compute.json`), { force: true }),
+    prompt: `请必须调用 terminal/exec/process 这类真实 compute 工具执行命令来计算 1234567 * 89 + 42，不要心算。然后把 JSON 写入这个绝对路径文件：${join(fixtureDir, `${runtimeId}-compute.json`)}。JSON 必须包含 {"runtime":"${runtimeId}","value":109876505}。写完后只回复 ${runtimeId.toUpperCase()}_COMPUTE_OK。`,
+    check: (parsed, visible) => {
+      const target = join(fixtureDir, `${runtimeId}-compute.json`);
+      let data = {};
+      try {
+        data = JSON.parse(existsSync(target) ? readFileSync(target, "utf8") : "{}");
+      } catch {}
+      return visible.includes(`${runtimeId.toUpperCase()}_COMPUTE_OK`) &&
+        data.runtime === runtimeId &&
+        data.value === 109876505 &&
+        (parsed.meta?.toolSummary?.tools ?? []).some((name) => /^(terminal|exec|process)\b/i.test(String(name)));
+    },
+  },
+  {
     id: "agents-list-mcp",
     prompt: `请调用当前可用的 OpenClaw agents_list/agents MCP 工具查看 agent 列表，确认能看到 ai-1111 或 main 后，只回复 ${runtimeId.toUpperCase()}_AGENTS_OK。`,
     check: (parsed, visible) =>
@@ -102,14 +126,60 @@ const cases = [
     check: (_parsed, visible) => visible.includes(`${runtimeId.toUpperCase()}_P0_SKILLS_OK`),
   },
   {
+    id: "feishu-tool-visibility-mcp",
+    prompt: `这是一个严格工具调用测试。请必须调用 OpenClaw MCP 的 mcp_openclaw_list_resources 或等价资源/工具列表工具，确认工具列表中存在飞书工具，例如 mcp_openclaw_feishu_doc 或 mcp_openclaw_feishu_fetch_doc。不能只根据提示文字判断；如果没有实际调用列表工具，本用例会失败。确认后只回复 ${runtimeId.toUpperCase()}_FEISHU_TOOL_VISIBLE_OK；如果不存在，请列出你实际看到的 OpenClaw MCP 工具名并以 ${runtimeId.toUpperCase()}_FEISHU_TOOL_VISIBLE_DIAG 结尾。`,
+    check: (parsed, visible) =>
+      visible.includes(`${runtimeId.toUpperCase()}_FEISHU_TOOL_VISIBLE_OK`) &&
+      (parsed.meta?.toolSummary?.tools ?? []).some((name) => /mcp_openclaw_/i.test(String(name))),
+    diagnostic: (parsed, visible) =>
+      visible.includes(`${runtimeId.toUpperCase()}_FEISHU_TOOL_VISIBLE_DIAG`) &&
+      (parsed.meta?.toolSummary?.tools ?? []).some((name) => /mcp_openclaw_/i.test(String(name))),
+  },
+  {
     id: "feishu-fetch-doc-mcp",
-    prompt: `请调用当前可用的飞书/feishu MCP 工具读取这个文档的标题或摘要：https://bytedance.larkoffice.com/docx/Oe9Udos8dovO53x3Zqlcgtlynoc。读取成功后只回复 ${runtimeId.toUpperCase()}_FEISHU_OK；如果工具返回成功但你无法理解内容，也请说明具体原因并以 ${runtimeId.toUpperCase()}_FEISHU_DIAG 结尾。`,
+    prompt: `请必须调用当前 tools/list 中实际存在的 OpenClaw 飞书 MCP 工具读取这个文档：https://bytedance.larkoffice.com/docx/Oe9Udos8dovO53x3Zqlcgtlynoc。工具名通常带 mcp_openclaw_ 前缀；优先使用 stock OpenClaw 的 mcp_openclaw_feishu_doc 并传 action=read、doc_token=Oe9Udos8dovO53x3Zqlcgtlynoc；如果只看到 openclaw-lark 的 mcp_openclaw_feishu_fetch_doc，也可以调用它并传 doc_id 为原始 URL。不要读取容器内 feishu-fetch-doc/SKILL.md，不要运行 opencli，也不要用浏览器替代。读取成功后只回复 ${runtimeId.toUpperCase()}_FEISHU_OK；如果飞书工具被调用但返回需要授权或权限不足，请说明具体错误并以 ${runtimeId.toUpperCase()}_FEISHU_AUTH_REQUIRED 结尾；如果没有任何飞书工具可用，请说明具体原因并以 ${runtimeId.toUpperCase()}_FEISHU_DIAG 结尾。`,
     check: (parsed, visible) =>
       visible.includes(`${runtimeId.toUpperCase()}_FEISHU_OK`) &&
-      (parsed.meta?.toolSummary?.tools ?? []).some((name) => /feishu/i.test(String(name))),
+      (parsed.meta?.toolSummary?.tools ?? []).some((name) => /mcp_openclaw_.*feishu/i.test(String(name))),
     diagnostic: (parsed, visible) =>
-      visible.includes(`${runtimeId.toUpperCase()}_FEISHU_DIAG`) &&
-      (parsed.meta?.toolSummary?.tools ?? []).some((name) => /feishu/i.test(String(name))),
+      (visible.includes(`${runtimeId.toUpperCase()}_FEISHU_DIAG`) ||
+        visible.includes(`${runtimeId.toUpperCase()}_FEISHU_AUTH_REQUIRED`)) &&
+      (parsed.meta?.toolSummary?.tools ?? []).some((name) => /mcp_openclaw_.*feishu/i.test(String(name))),
+  },
+  {
+    id: "autoskill-create",
+    before: () => rmSync(autoSkillDir, { recursive: true, force: true }),
+    prompt: `请使用 Hermes runtime 的 autoskill/skill_manage 能力创建一个新的 autoskill，名称必须是 ${autoSkillName}。SKILL.md 必须包含 frontmatter name: ${autoSkillName}，description 中包含 real autoskill regression，并且正文包含 ${runtimeId.toUpperCase()}_AUTOSKILL_CONTENT。完成后只回复 ${runtimeId.toUpperCase()}_AUTOSKILL_OK。`,
+    check: (parsed, visible) => {
+      const content = existsSync(autoSkillFile) ? readFileSync(autoSkillFile, "utf8") : "";
+      return visible.includes(`${runtimeId.toUpperCase()}_AUTOSKILL_OK`) &&
+        content.includes(`name: ${autoSkillName}`) &&
+        content.includes("real autoskill regression") &&
+        content.includes(`${runtimeId.toUpperCase()}_AUTOSKILL_CONTENT`) &&
+        content.includes("openclaw_skill_origin: autoskill") &&
+        (parsed.meta?.toolSummary?.tools ?? []).some((name) => /skill_manage|skill_create|terminal|exec/i.test(String(name)));
+    },
+  },
+  {
+    id: "skillimprove-update",
+    before: () => {
+      rmSync(improveSkillDir, { recursive: true, force: true });
+      mkdirSync(improveSkillDir, { recursive: true });
+      writeFileSync(
+        improveSkillFile,
+        `---\nopenclaw_managed: true\nopenclaw_skill_origin: autoskill\nopenclaw_created_by: hermes-runtime\nname: ${improveSkillName}\ndescription: baseline skillimprove regression\n---\n# ${improveSkillName}\n\nBASELINE_ONLY\n`,
+      );
+    },
+    prompt: `请使用 Hermes runtime 的 skillimprove/skill_manage 能力改进已有 autoskill ${improveSkillName}。必须保留 openclaw_skill_origin: autoskill 元数据，并把 SKILL.md 正文中的 BASELINE_ONLY 替换或扩展为 ${runtimeId.toUpperCase()}_SKILLIMPROVE_CONTENT。完成后只回复 ${runtimeId.toUpperCase()}_SKILLIMPROVE_OK。`,
+    check: (parsed, visible) => {
+      const content = existsSync(improveSkillFile) ? readFileSync(improveSkillFile, "utf8") : "";
+      return visible.includes(`${runtimeId.toUpperCase()}_SKILLIMPROVE_OK`) &&
+        content.includes(`name: ${improveSkillName}`) &&
+        content.includes("openclaw_skill_origin: autoskill") &&
+        content.includes(`${runtimeId.toUpperCase()}_SKILLIMPROVE_CONTENT`) &&
+        !content.includes("BASELINE_ONLY") &&
+        (parsed.meta?.toolSummary?.tools ?? []).some((name) => /skill_manage|skill_create|terminal|exec/i.test(String(name)));
+    },
   },
 ];
 
@@ -194,7 +264,22 @@ async function runCaseAttempt(testCase, attempt) {
   const startedAt = Date.now();
   const child = spawn(
     "openclaw",
-    ["agent", "--local", "--agent", agentId, "--to", routeTarget, "--session-id", sessionId, "--message", testCase.prompt, "--json", "--timeout", String(Math.ceil(maxMs / 1000))],
+    [
+      "agent",
+      "--local",
+      "--agent",
+      agentId,
+      "--to",
+      routeTarget,
+      "--session-id",
+      sessionId,
+      ...(modelOverride ? ["--model", modelOverride] : []),
+      "--message",
+      testCase.prompt,
+      "--json",
+      "--timeout",
+      String(Math.ceil(maxMs / 1000)),
+    ],
     {
       cwd: repoRoot,
       detached: true,
@@ -205,6 +290,10 @@ async function runCaseAttempt(testCase, attempt) {
   child.stdout.on("data", (chunk) => {
     stdout += chunk.toString();
     writeFileSync(stdoutPath, stdout);
+    parsed = extractJson(stdout) ?? extractJson(stderr);
+    if (parsed && !jsonSeenAt) {
+      jsonSeenAt = Date.now();
+    }
   });
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString();
@@ -216,18 +305,37 @@ async function runCaseAttempt(testCase, attempt) {
   });
 
   const status = await new Promise((resolve) => {
+    let settled = false;
+    let exitStatus = { code: null, signal: null };
+    const settle = (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(maxTimer);
+      clearInterval(pollTimer);
+      resolve(status);
+    };
     const maxTimer = setTimeout(() => {
       killProcessGroup(child);
+      setTimeout(() => settle(exitStatus), 5_000).unref();
     }, maxMs);
     const pollTimer = setInterval(() => {
       if (jsonSeenAt && Date.now() - jsonSeenAt >= killAfterJsonMs) {
         killProcessGroup(child);
+        settle({ ...exitStatus, signal: exitStatus.signal ?? "json_seen" });
       }
     }, 250);
     child.on("exit", (code, signal) => {
-      clearTimeout(maxTimer);
-      clearInterval(pollTimer);
-      resolve({ code, signal });
+      exitStatus = { code, signal };
+      if (!jsonSeenAt) {
+        settle(exitStatus);
+      }
+    });
+    child.on("close", (code, signal) => {
+      exitStatus = { code, signal };
+      settle(exitStatus);
+    });
+    child.on("error", (error) => {
+      settle({ code: 1, signal: `error:${error.code ?? error.message}` });
     });
   });
 
@@ -309,6 +417,7 @@ const summary = {
   agentId,
   expectProvider,
   expectModel,
+  modelOverride: modelOverride || null,
   retries,
   total: results.length,
   passed: results.filter((result) => result.ok).length,

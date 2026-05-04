@@ -27,6 +27,7 @@ fi
 
 BASE_INSTALL_SCRIPT="${SCRIPT_DIR:+${SCRIPT_DIR}/hermes-install.sh}"
 LOCAL_PLUGIN_DIR="${REPO_ROOT:+${REPO_ROOT}/openclaw-plugin-hermes}"
+LOCAL_ACP_TCP_SERVER_PATCH="${REPO_ROOT:+${REPO_ROOT}/hermes-containerized/scripts/acp-tcp-server.py}"
 
 MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION:-2026.4.15}"
 DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR:-/var/cache/hermes-agent}"
@@ -36,6 +37,45 @@ PLUGIN_LEGACY_DIR_NAME="${PLUGIN_LEGACY_DIR_NAME:-hermes}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/root/.openclaw/openclaw.json}"
 OPENCLAW_EXTENSIONS_DIR="${OPENCLAW_EXTENSIONS_DIR:-/root/.openclaw/extensions}"
 
+OPENCLAW_LARK_TOOL_ALLOWLIST=(
+    "feishu_ask_user_question"
+    "feishu_bitable_app"
+    "feishu_bitable_app_table"
+    "feishu_bitable_app_table_field"
+    "feishu_bitable_app_table_record"
+    "feishu_bitable_app_table_view"
+    "feishu_calendar_calendar"
+    "feishu_calendar_event"
+    "feishu_calendar_event_attendee"
+    "feishu_calendar_freebusy"
+    "feishu_chat"
+    "feishu_chat_members"
+    "feishu_create_doc"
+    "feishu_doc_comments"
+    "feishu_doc_media"
+    "feishu_drive_file"
+    "feishu_fetch_doc"
+    "feishu_get_user"
+    "feishu_im_bot_image"
+    "feishu_im_user_fetch_resource"
+    "feishu_im_user_get_messages"
+    "feishu_im_user_get_thread_messages"
+    "feishu_im_user_message"
+    "feishu_im_user_search_messages"
+    "feishu_oauth"
+    "feishu_oauth_batch_auth"
+    "feishu_search_doc_wiki"
+    "feishu_search_user"
+    "feishu_sheet"
+    "feishu_task_comment"
+    "feishu_task_subtask"
+    "feishu_task_task"
+    "feishu_task_tasklist"
+    "feishu_update_doc"
+    "feishu_wiki_space"
+    "feishu_wiki_space_node"
+)
+
 HERMES_IMAGE_REF="${HERMES_IMAGE_REF:-iaas-test01-cn-beijing.cr.volces.com/hermes/hermes-dockerimage:v1.2.0}"
 HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"
 CONTAINER_NAME="${CONTAINER_NAME:-hermes-agent}"
@@ -43,6 +83,7 @@ DATA_DIR="${DATA_DIR:-/opt/hermes-data}"
 ACP_TCP_HOST="${ACP_TCP_HOST:-127.0.0.1}"
 ACP_TCP_PORT="${ACP_TCP_PORT:-3100}"
 ACP_PORT="${ACP_PORT:-${ACP_TCP_PORT}}"
+ACP_TCP_SERVER_PATCH_HOST_PATH="${ACP_TCP_SERVER_PATCH_HOST_PATH:-${DATA_DIR}/openclaw-acp-tcp-server.py}"
 
 if [[ -t 1 ]]; then
     RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' CYAN='\033[0;36m' NC='\033[0m'
@@ -104,6 +145,8 @@ resolve_plugin_tarball() {
         local tmp_dir pack_output plugin_tar
         tmp_dir="$(mktemp -d)"
         TEMP_DIRS+=("${tmp_dir}")
+        { log_info "构建本地 Hermes 插件源码"; } >&2
+        (cd "${LOCAL_PLUGIN_DIR}" && npm run build >&2)
         pack_output="$(cd "${LOCAL_PLUGIN_DIR}" && npm pack --pack-destination "${tmp_dir}" --json)"
         plugin_tar="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[0]["filename"])' <<<"${pack_output}")"
         plugin_tar="${tmp_dir}/${plugin_tar}"
@@ -299,7 +342,15 @@ text = text.replace(
         --log-opt max-size=20m \\
         --log-opt max-file=5 \\
         "${image_ref}" >/dev/null''',
-    '''    docker run -d \\
+    '''    local -a openclaw_patch_mount=()
+    if [[ -n "${ACP_TCP_SERVER_PATCH_HOST_PATH:-}" && -f "${ACP_TCP_SERVER_PATCH_HOST_PATH}" ]]; then
+        openclaw_patch_mount=(-v "${ACP_TCP_SERVER_PATCH_HOST_PATH}:/opt/hermes/acp-tcp-server.py:ro")
+        log_info "使用 OpenClaw patched ACP TCP server: ${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+    else
+        log_warn "未找到 OpenClaw patched ACP TCP server，Hermes MCP bridge 将使用镜像内置 ACP server"
+    fi
+
+    docker run -d \\
         --name "${CONTAINER_NAME}" \\
         --init \\
         --restart unless-stopped \\
@@ -313,6 +364,7 @@ text = text.replace(
         --security-opt no-new-privileges=true \\
         --tmpfs /tmp:size=256M \\
         -v "${DATA_DIR}:/opt/data" \\
+        "${openclaw_patch_mount[@]}" \\
         --cpus="${CPU_LIMIT}" \\
         --memory="${MEM_LIMIT}" \\
         --log-driver json-file \\
@@ -393,6 +445,9 @@ normalize_runtime_entries() {
         TEMP_DIRS+=("${tmp}")
         default_model="$(jq -r --arg pk "${PLUGIN_CONFIG_KEY}" '.plugins.entries[$pk].config.defaultModel // "doubao-seed-2-0-pro-260215"' "${OPENCLAW_CONFIG}" 2>/dev/null)"
 
+        local lark_tools_json
+        lark_tools_json="$(printf '%s\n' "${OPENCLAW_LARK_TOOL_ALLOWLIST[@]}" | jq -R . | jq -s .)"
+
         jq \
           --arg pk "${PLUGIN_CONFIG_KEY}" \
           --arg legacy_pk "hermes" \
@@ -400,9 +455,21 @@ normalize_runtime_entries() {
           --arg dm "${default_model:-doubao-seed-2-0-pro-260215}" \
           --arg tcp_host "${ACP_TCP_HOST}" \
           --argjson tcp_port "${ACP_TCP_PORT}" \
+          --argjson lark_tools "${lark_tools_json}" \
           '
-          del(.plugins.entries[$legacy_pk])
-          | .plugins.allow = (((.plugins.allow // []) | map(select(. != $legacy_pk))) + [$pk] | unique)
+          (.channels.feishu.enabled == true and (.channels.feishu.appId? // "" | length) > 0 and (.channels.feishu.appSecret? // "" | length) > 0) as $feishu_ready
+          | del(.plugins.entries[$legacy_pk])
+          | .plugins.allow = (((.plugins.allow // []) | map(select(. != $legacy_pk and . != "feishu"))) + [$pk] | unique)
+          | if $feishu_ready then
+              .tools = (.tools // {})
+              | .tools.alsoAllow = (((.tools.alsoAllow // [])
+                  | map(. as $tool | select($tool != "wecom_mcp" and ((($lark_tools | index($tool)) != null) or (($tool | startswith("feishu_")) | not))))
+                ) + $lark_tools | unique)
+            else
+              .
+            end
+          | .plugins.entries.feishu = (.plugins.entries.feishu // {})
+          | .plugins.entries.feishu.enabled = false
           | .plugins.entries[$pk] = (.plugins.entries[$pk] // {})
           | .plugins.entries[$pk].enabled = true
           | .plugins.entries[$pk].config = ((.plugins.entries[$pk].config // {}) + {
@@ -432,6 +499,9 @@ normalize_runtime_entries() {
           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
               "hermes/default": { "alias": "hermes" }
             })
+          | .agents.defaults.agentRuntime = ((.agents.defaults.agentRuntime // {}) + {
+              "id": "auto"
+            })
           | .models.providers.hermes = {
               "baseUrl": "http://127.0.0.1/hermes-runtime",
               "apiKey": "hermes-runtime",
@@ -450,13 +520,33 @@ normalize_runtime_entries() {
             }
           ' "${OPENCLAW_CONFIG}" > "${tmp}" && mv "${tmp}" "${OPENCLAW_CONFIG}"
     elif command -v python3 >/dev/null 2>&1; then
-        python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME}" "${ACP_TCP_HOST}" "${ACP_TCP_PORT}" <<'PYEOF'
+        python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME}" "${ACP_TCP_HOST}" "${ACP_TCP_PORT}" "${OPENCLAW_LARK_TOOL_ALLOWLIST[*]}" <<'PYEOF'
 import json, sys
 cf, pk, cn, tcp_host, tcp_port = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+lark_tools = sys.argv[6].split()
 with open(cf) as f:
     data = json.load(f)
 plugins = data.setdefault("plugins", {}).setdefault("entries", {})
 plugins.pop("hermes", None)
+plugins.setdefault("feishu", {})["enabled"] = False
+feishu_cfg = data.get("channels", {}).get("feishu", {})
+feishu_ready = (
+    isinstance(feishu_cfg, dict)
+    and feishu_cfg.get("enabled") is True
+    and bool(feishu_cfg.get("appId"))
+    and bool(feishu_cfg.get("appSecret"))
+)
+if feishu_ready:
+    tools = data.setdefault("tools", {})
+    current = tools.setdefault("alsoAllow", [])
+    allow = [
+        item for item in current
+        if item != "wecom_mcp" and (item in lark_tools or not item.startswith("feishu_"))
+    ]
+    for item in lark_tools:
+        if item not in allow:
+            allow.append(item)
+    tools["alsoAllow"] = allow
 entry = plugins.setdefault(pk, {})
 entry["enabled"] = True
 cfg = entry.setdefault("config", {})
@@ -485,6 +575,7 @@ cfg.update({
     },
 })
 data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("models", {})["hermes/default"] = {"alias": "hermes"}
+data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("agentRuntime", {})["id"] = "auto"
 data.setdefault("models", {}).setdefault("providers", {})["hermes"] = {
     "baseUrl": "http://127.0.0.1/hermes-runtime",
     "apiKey": "hermes-runtime",
@@ -502,7 +593,7 @@ data.setdefault("models", {}).setdefault("providers", {})["hermes"] = {
     ],
 }
 allow = data.setdefault("plugins", {}).setdefault("allow", [])
-allow = [item for item in allow if item != "hermes"]
+allow = [item for item in allow if item not in ("hermes", "feishu")]
 if pk not in allow:
     allow.append(pk)
 data["plugins"]["allow"] = allow
@@ -514,180 +605,195 @@ PYEOF
     fi
 }
 
-patch_openclaw_runtime_for_hermes_toolset() {
-    local dist_dir="/usr/lib/node_modules/openclaw/dist"
-    [[ -d "${dist_dir}" ]] || {
-        log_warn "未找到 OpenClaw dist 目录，跳过 Hermes toolset runtime 补丁: ${dist_dir}"
+patch_openclaw_lark_manifest_contracts() {
+    local manifest="${OPENCLAW_EXTENSIONS_DIR}/openclaw-lark/openclaw.plugin.json"
+    [[ -f "${manifest}" ]] || return 0
+
+    log_info "检查 openclaw-lark manifest 工具契约"
+
+    if command -v jq >/dev/null 2>&1; then
+        local tmp lark_tools_json
+        tmp="$(mktemp)"
+        TEMP_DIRS+=("${tmp}")
+        lark_tools_json="$(printf '%s\n' "${OPENCLAW_LARK_TOOL_ALLOWLIST[@]}" | jq -R . | jq -s .)"
+        jq --argjson tools "${lark_tools_json}" '
+          .contracts = (.contracts // {})
+          | .contracts.tools = (((.contracts.tools // []) + $tools) | unique)
+        ' "${manifest}" > "${tmp}" && mv "${tmp}" "${manifest}"
+    else
+        python3 - "${manifest}" "${OPENCLAW_LARK_TOOL_ALLOWLIST[*]}" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+tools = sys.argv[2].split()
+with open(path) as f:
+    data = json.load(f)
+contracts = data.setdefault("contracts", {})
+existing = contracts.setdefault("tools", [])
+for tool in tools:
+    if tool not in existing:
+        existing.append(tool)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+PYEOF
+    fi
+
+    log_info "openclaw-lark manifest contracts.tools 已补齐"
+}
+
+patch_openclaw_lark_ambient_tool_context() {
+    local ticket_js="${OPENCLAW_EXTENSIONS_DIR}/openclaw-lark/src/core/lark-ticket.js"
+    local ticket_dts="${OPENCLAW_EXTENSIONS_DIR}/openclaw-lark/src/core/lark-ticket.d.ts"
+    [[ -f "${ticket_js}" ]] || {
+        log_warn "未找到 openclaw-lark lark-ticket.js，跳过飞书 ambient tool context 补丁"
         return 0
     }
 
-    log_info "补齐 Hermes MCP toolset 上下文透传补丁"
+    log_info "检查 openclaw-lark ambient tool context 兼容补丁"
 
-    python3 - "${dist_dir}" <<'PYEOF'
+    python3 - "${ticket_js}" <<'PYEOF'
 import sys
 from pathlib import Path
 
-dist = Path(sys.argv[1])
+path = Path(sys.argv[1])
+text = path.read_text()
+if "OPENCLAW_TOOL_CONTEXT_STORAGE_KEY" in text:
+    sys.exit(0)
 
-def patch(path: Path, replacements):
-    text = path.read_text()
-    original = text
-    for old, new in replacements:
-        if new in text:
-            continue
-        if old not in text:
-            raise SystemExit(f"patch anchor not found in {path}: {old[:120]!r}")
-        text = text.replace(old, new, 1)
-    if text != original:
-        path.write_text(text)
-
-patch(dist / "mcp-http-DkuYmsG-.js", [
-    (
-'''			"x-openclaw-account-id": "${OPENCLAW_MCP_ACCOUNT_ID}",
-			"x-openclaw-message-channel": "${OPENCLAW_MCP_MESSAGE_CHANNEL}",
-			"x-openclaw-sender-id": "${OPENCLAW_MCP_SENDER_ID}",''',
-'''			"x-openclaw-account-id": "${OPENCLAW_MCP_ACCOUNT_ID}",
-			"x-openclaw-message-channel": "${OPENCLAW_MCP_MESSAGE_CHANNEL}",
-			"x-openclaw-message-to": "${OPENCLAW_MCP_MESSAGE_TO}",
-			"x-openclaw-thread-id": "${OPENCLAW_MCP_THREAD_ID}",
-			"x-openclaw-current-message-id": "${OPENCLAW_MCP_CURRENT_MESSAGE_ID}",
-			"x-openclaw-sender-id": "${OPENCLAW_MCP_SENDER_ID}",'''
-    ),
-    (
-'''		messageProvider: normalizeMessageChannel(getHeader(req, "x-openclaw-message-channel")) ?? void 0,
-		accountId: normalizeOptionalString(getHeader(req, "x-openclaw-account-id")),
-		senderId: normalizeOptionalString(getHeader(req, "x-openclaw-sender-id")),''',
-'''		messageProvider: normalizeMessageChannel(getHeader(req, "x-openclaw-message-channel")) ?? void 0,
-		accountId: normalizeOptionalString(getHeader(req, "x-openclaw-account-id")),
-		agentTo: normalizeOptionalString(getHeader(req, "x-openclaw-message-to")),
-		agentThreadId: normalizeOptionalString(getHeader(req, "x-openclaw-thread-id")),
-		currentMessageId: normalizeOptionalString(getHeader(req, "x-openclaw-current-message-id")),
-		senderId: normalizeOptionalString(getHeader(req, "x-openclaw-sender-id")),'''
-    ),
-    (
-'''			params.accountId ?? "",
-			params.senderId ?? "",''',
-'''			params.accountId ?? "",
-			params.agentTo ?? "",
-			params.agentThreadId ?? "",
-			params.currentMessageId ?? "",
-			params.senderId ?? "",'''
-    ),
-    (
-'''			accountId: params.accountId,
-			senderId: params.senderId,''',
-'''			accountId: params.accountId,
-			agentTo: params.agentTo,
-			agentThreadId: params.agentThreadId,
-			currentMessageId: params.currentMessageId,
-			senderId: params.senderId,'''
-    ),
-    (
-'''					accountId: requestContext.accountId,
-					senderIsOwner: requestContext.senderIsOwner''',
-'''					accountId: requestContext.accountId,
-					agentTo: requestContext.agentTo,
-					agentThreadId: requestContext.agentThreadId,
-					currentMessageId: requestContext.currentMessageId,
-					senderId: requestContext.senderId,
-					senderIsOwner: requestContext.senderIsOwner'''
-    ),
-])
-
-patch(dist / "tools-invoke-http-BXZP_ZuH.js", [
-    (
-'''	const accountId = normalizeOptionalString(getHeader(req, "x-openclaw-account-id"));
-	const agentTo = normalizeOptionalString(getHeader(req, "x-openclaw-message-to"));''',
-'''	const accountId = normalizeOptionalString(getHeader(req, "x-openclaw-account-id"));
-	const senderId = normalizeOptionalString(getHeader(req, "x-openclaw-sender-id"));
-	const agentTo = normalizeOptionalString(getHeader(req, "x-openclaw-message-to"));'''
-    ),
-    (
-'''		accountId,
-		agentTo,''',
-'''		accountId,
-		senderId,
-		agentTo,'''
-    ),
-])
-
-patch(dist / "tool-resolution-8Rm8yrsK.js", [
-    (
-'''			agentAccountId: params.accountId,
-			agentTo: params.agentTo,''',
-'''			agentAccountId: params.accountId,
-			requesterSenderId: params.senderId,
-			agentTo: params.agentTo,'''
-    ),
-    (
-'''			agentThreadId: params.agentThreadId,
-			allowGatewaySubagentBinding:''',
-'''			agentThreadId: params.agentThreadId,
-			currentMessageId: params.currentMessageId,
-			allowGatewaySubagentBinding:'''
-    ),
-])
-
-patch(dist / "openclaw-tools-CUmYpN1l.js", [
-    (
-'''			messageChannel: options?.agentChannel,
-			agentAccountId: options?.agentAccountId,
-			deliveryContext,''',
-'''			messageChannel: options?.agentChannel,
-			agentAccountId: options?.agentAccountId,
-			currentMessageId: options?.currentMessageId != null ? String(options.currentMessageId) : void 0,
-			deliveryContext,'''
-    ),
-])
-
-patch(dist / "loader-DYW2PvbF.js", [
-    (
-'''import { createHash } from "node:crypto";''',
-'''import { createHash } from "node:crypto";
-import { createRequire } from "node:module";'''
-    ),
-    (
-'''		const optional = opts?.optional === true;
-		const factory = typeof tool === "function" ? tool : (_ctx) => tool;
-		if (typeof tool !== "function") names.push(tool.name);''',
-'''		const optional = opts?.optional === true;
-		const wrapLarkToolIfNeeded = (resolved, ctx) => {
-			if (record.id !== "openclaw-lark" || !resolved || typeof resolved !== "object") return resolved;
-			if (typeof resolved.execute !== "function" || !String(resolved.name ?? "").startsWith("feishu_")) return resolved;
-			return {
-				...resolved,
-				async execute(...args) {
-					const senderOpenId = typeof ctx?.requesterSenderId === "string" ? ctx.requesterSenderId.trim() : "";
-					const accountId = typeof ctx?.agentAccountId === "string" && ctx.agentAccountId.trim() ? ctx.agentAccountId.trim() : "default";
-					const chatId = typeof ctx?.deliveryContext?.to === "string" ? ctx.deliveryContext.to.trim() : "";
-					if (!senderOpenId) return resolved.execute.apply(this, args);
-					try {
-						const req = createRequire(path.join(record.rootDir, "index.js"));
-						const { getTicket, withTicket } = req("./src/core/lark-ticket.js");
-						if (getTicket?.()) return resolved.execute.apply(this, args);
-						return await withTicket({
-							messageId: ctx?.currentMessageId != null ? String(ctx.currentMessageId) : `tool-driven-${Date.now()}`,
-							chatId,
-							accountId,
-							startTime: Date.now(),
-							senderOpenId,
-							threadId: ctx?.deliveryContext?.threadId != null ? String(ctx.deliveryContext.threadId) : void 0
-						}, () => resolved.execute.apply(this, args));
-					} catch {
-						return resolved.execute.apply(this, args);
-					}
-				}
-			};
-		};
-		const factory = typeof tool === "function" ? (ctx) => {
-			const resolved = tool(ctx);
-			if (Array.isArray(resolved)) return resolved.map((entry) => wrapLarkToolIfNeeded(entry, ctx));
-			return wrapLarkToolIfNeeded(resolved, ctx);
-		} : (ctx) => wrapLarkToolIfNeeded(tool, ctx);
-		if (typeof tool !== "function") names.push(tool.name);'''
-    ),
-])
+needle = 'const store = new node_async_hooks_1.AsyncLocalStorage();'
+helpers = r'''const OPENCLAW_TOOL_CONTEXT_STORAGE_KEY = "__openclawPluginToolContextStorage";
+let openclawPluginSdk;
+let openclawPluginSdkResolved = false;
+function normalizeOptionalString(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+function readOpenClawPluginToolContextFromSdk() {
+    if (!openclawPluginSdkResolved) {
+        openclawPluginSdkResolved = true;
+        try {
+            openclawPluginSdk = require("openclaw/plugin-sdk");
+        }
+        catch {
+            openclawPluginSdk = undefined;
+        }
+    }
+    try {
+        const getter = openclawPluginSdk?.getOpenClawPluginToolContext;
+        return typeof getter === "function" ? getter() : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function readOpenClawPluginToolContextFromGlobal() {
+    try {
+        const storage = globalThis[OPENCLAW_TOOL_CONTEXT_STORAGE_KEY];
+        return typeof storage?.getStore === "function" ? storage.getStore() : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function inferChatType(chatId, deliveryContext) {
+    if (deliveryContext && typeof deliveryContext === "object") {
+        const chatType = deliveryContext.chatType;
+        if (chatType === "p2p" || chatType === "group") {
+            return chatType;
+        }
+    }
+    return typeof chatId === "string" && chatId.startsWith("oc_") ? "group" : "p2p";
+}
+function ticketFromOpenClawPluginToolContext() {
+    const ctx = readOpenClawPluginToolContextFromSdk() ?? readOpenClawPluginToolContextFromGlobal();
+    if (!ctx || ctx.messageChannel !== "feishu") {
+        return undefined;
+    }
+    const accountId = normalizeOptionalString(ctx.agentAccountId);
+    const chatId = normalizeOptionalString(ctx.currentChannelId) ??
+        normalizeOptionalString(ctx.deliveryContext?.to);
+    const messageId = normalizeOptionalString(String(ctx.currentMessageId ?? ""));
+    const senderOpenId = normalizeOptionalString(ctx.requesterSenderId);
+    if (!accountId || !chatId || !messageId || !senderOpenId) {
+        return undefined;
+    }
+    const threadId = normalizeOptionalString(ctx.currentThreadTs) ??
+        normalizeOptionalString(String(ctx.deliveryContext?.threadId ?? ""));
+    return {
+        messageId,
+        chatId,
+        accountId,
+        startTime: Date.now(),
+        senderOpenId,
+        chatType: inferChatType(chatId, ctx.deliveryContext),
+        ...(threadId ? { threadId } : {}),
+    };
+}'''
+if needle not in text:
+    raise SystemExit(f"patch anchor not found in {path}")
+text = text.replace(needle, f"{needle}\n{helpers}", 1)
+old_get_ticket = '''function getTicket() {
+    return store.getStore();
+}'''
+new_get_ticket = '''function getTicket() {
+    return store.getStore() ?? ticketFromOpenClawPluginToolContext();
+}'''
+if old_get_ticket not in text:
+    raise SystemExit(f"getTicket implementation not found in {path}")
+text = text.replace(old_get_ticket, new_get_ticket, 1)
+old_elapsed = '    const t = store.getStore();'
+if old_elapsed not in text:
+    raise SystemExit(f"ticketElapsed store access not found in {path}")
+text = text.replace(old_elapsed, '    const t = getTicket();', 1)
+path.write_text(text)
 PYEOF
+
+    node -c "${ticket_js}"
+    [[ ! -f "${ticket_dts}" ]] || grep -q "senderOpenId" "${ticket_dts}" || die "openclaw-lark lark-ticket.d.ts 缺少 senderOpenId 字段"
+    log_info "openclaw-lark ambient tool context 兼容补丁已就绪"
+}
+
+patch_agent_identity_before_tool_call_context() {
+    local identity_dist="${OPENCLAW_EXTENSIONS_DIR}/agent-identity/dist/index.mjs"
+    [[ -f "${identity_dist}" ]] || {
+        log_warn "未找到 agent-identity dist/index.mjs，跳过 before_tool_call 上下文补丁"
+        return 0
+    }
+
+    log_info "检查 agent-identity before_tool_call sender context 兼容补丁"
+
+    python3 - "${identity_dist}" <<'PYEOF'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(errors="surrogateescape")
+marker = "hermes-context-patch"
+if marker in text:
+    sys.exit(0)
+
+old = "let{toolName:m,params:h}=o,g=s.sessionKey;if(es(h,g,m,i),A(i,`before_tool_call tool=${m} session=${g??`?`}`),!g)return;let _=Oi(g,o.runId),v=lr(g);if(_r(v)){let e=Si(v);e&&(h._enhancedContext={senderId:e.senderId,senderName:e.senderName,from:e.from,channelId:e.channelId,messageId:e.messageId,sourceSessionKey:g,source:`group-latest`,capturedAt:e.capturedAt})}"
+new = "let{toolName:m,params:h}=o,g=s.sessionKey;if(es(h,g,m,i),A(i,`before_tool_call tool=${m} session=${g??`?`}`),!g)return;let E=typeof s.requesterSenderId==`string`&&s.requesterSenderId.trim()?s.requesterSenderId.trim():typeof s.senderId==`string`&&s.senderId.trim()?s.senderId.trim():void 0,w=typeof s.messageChannel==`string`&&s.messageChannel.trim()?s.messageChannel.trim():typeof s.channelId==`string`&&s.channelId.trim()?s.channelId.trim():void 0,T=s.currentMessageId==null?void 0:String(s.currentMessageId).trim()||void 0,_=E?Ti(g,E,w):Oi(g,o.runId),v=lr(g);if(_r(v)){let e=Si(v);!e&&E&&(e={senderId:E,channelId:w,messageId:T,capturedAt:Date.now(),source:`hermes-context-patch`});e&&(h._enhancedContext={senderId:e.senderId,senderName:e.senderName,from:e.from,channelId:e.channelId,messageId:e.messageId,sourceSessionKey:g,source:e.source??`group-latest`,capturedAt:e.capturedAt})}"
+count = text.count(old)
+if count != 1:
+    raise SystemExit(f"agent-identity before_tool_call patch anchor count={count}, expected 1")
+path.write_text(text.replace(old, new, 1), errors="surrogateescape")
+PYEOF
+
+    node -c "${identity_dist}"
+    log_info "agent-identity before_tool_call sender context 兼容补丁已就绪"
+}
+
+patch_openclaw_runtime_for_hermes_toolset() {
+    if ! command -v openclaw >/dev/null 2>&1; then
+        log_warn "未找到 openclaw CLI，跳过 Hermes MCP bridge 能力校验"
+        return 0
+    fi
+
+    if node -e 'import("/usr/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js").then((m)=>{ if (typeof m.prepareAgentHarnessMcpBridge !== "function") process.exit(1); }).catch(()=>process.exit(1));' >/dev/null 2>&1; then
+        log_info "OpenClaw MCP bridge SDK helper 已就绪"
+        return 0
+    fi
+
+    die "当前 OpenClaw 未暴露 prepareAgentHarnessMcpBridge；请先升级到包含 Hermes MCP bridge SDK 的 OpenClaw core，再执行 install-v4"
 }
 
 invalidate_cached_plugin_archive() {
@@ -698,6 +804,19 @@ invalidate_cached_plugin_archive() {
     else
         log_info "未发现旧插件缓存: ${cached_plugin_tar}"
     fi
+}
+
+prepare_acp_tcp_server_patch() {
+    if [[ -f "${LOCAL_ACP_TCP_SERVER_PATCH}" ]]; then
+        mkdir -p "${DATA_DIR}"
+        cp -f "${LOCAL_ACP_TCP_SERVER_PATCH}" "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        chmod 0644 "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        log_info "已准备 OpenClaw patched ACP TCP server: ${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        return 0
+    fi
+
+    log_warn "未找到本地 patched ACP TCP server 源文件: ${LOCAL_ACP_TCP_SERVER_PATCH:-<empty>}"
+    return 0
 }
 
 main() {
@@ -722,6 +841,7 @@ main() {
     log_info "Hermes ACP 监听: ${ACP_TCP_HOST}:${ACP_TCP_PORT}"
 
     invalidate_cached_plugin_archive
+    prepare_acp_tcp_server_patch
 
     MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION}" \
     DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR}" \
@@ -732,9 +852,13 @@ main() {
     DATA_DIR="${DATA_DIR}" \
     ACP_PORT="${ACP_TCP_PORT}" \
     ACP_TCP_HOST="${ACP_TCP_HOST}" \
+    ACP_TCP_SERVER_PATCH_HOST_PATH="${ACP_TCP_SERVER_PATCH_HOST_PATH}" \
     bash "${patched_install_script}" "$@"
 
     normalize_runtime_entries
+    patch_openclaw_lark_manifest_contracts
+    patch_openclaw_lark_ambient_tool_context
+    patch_agent_identity_before_tool_call_context
     patch_openclaw_runtime_for_hermes_toolset
     log_info "install-v4 执行完成"
 }

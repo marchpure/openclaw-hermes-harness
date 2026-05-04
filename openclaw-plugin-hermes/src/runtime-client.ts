@@ -139,49 +139,59 @@ function normalizeSkillName(name: string): string {
   return name.trim().toLowerCase();
 }
 
+function isFeishuOrLarkSkillName(name: string): boolean {
+  const normalized = normalizeSkillName(name);
+  return normalized === "feishu" ||
+    normalized === "lark" ||
+    normalized.startsWith("feishu-") ||
+    normalized.startsWith("feishu_") ||
+    normalized.startsWith("lark-") ||
+    normalized.startsWith("lark_");
+}
+
 const HOST_BACKED_MCP_TOOL_HINTS: Record<string, { tool: string; hint: string }> = {
   browser: {
-    tool: "browser",
-    hint: "Use the OpenClaw MCP `browser` tool for status/start/open/snapshot/screenshot/actions.",
+    tool: "mcp_openclaw_browser",
+    hint: "Use the OpenClaw MCP `mcp_openclaw_browser` tool for status/start/open/snapshot/screenshot/actions.",
   },
   "browser-use": {
-    tool: "browser",
-    hint: "Use the OpenClaw MCP `browser` tool; read the projected browser-use SKILL.md when it is available for operating rules.",
+    tool: "mcp_openclaw_browser",
+    hint: "Use the OpenClaw MCP `mcp_openclaw_browser` tool; read the projected browser-use SKILL.md when it is available for operating rules.",
   },
   feishu: {
-    tool: "feishu_*",
-    hint: "Use the OpenClaw MCP `feishu_*` tools, for example `feishu_oauth_batch_auth`, `feishu_fetch_doc`, `feishu_create_doc`, and `feishu_update_doc`.",
+    tool: "mcp_openclaw_feishu_*",
+    hint: "Use the concrete OpenClaw MCP Feishu tools exposed in tools/list. Common names include `mcp_openclaw_feishu_doc` with action `read`, or openclaw-lark tools such as `mcp_openclaw_feishu_fetch_doc`, `mcp_openclaw_feishu_create_doc`, and `mcp_openclaw_feishu_update_doc` when those are present.",
   },
   "lark-doc": {
-    tool: "feishu_*",
-    hint: "Use the OpenClaw MCP Feishu document tools such as `feishu_fetch_doc`, `feishu_create_doc`, and `feishu_update_doc`.",
+    tool: "mcp_openclaw_feishu_*",
+    hint: "Use the concrete OpenClaw MCP Feishu document tool exposed in tools/list. Prefer `mcp_openclaw_feishu_doc` with action `read` for stock OpenClaw, or `mcp_openclaw_feishu_fetch_doc` when the openclaw-lark bridge exposes it.",
   },
   "lark-calendar": {
-    tool: "feishu_*",
+    tool: "mcp_openclaw_feishu_*",
     hint: "Use the OpenClaw MCP Feishu calendar tools exposed in the current tool list.",
   },
   "lark-im": {
-    tool: "message / feishu_*",
-    hint: "Use the OpenClaw MCP `message` tool for channel replies/sends and Feishu IM tools for Feishu-specific operations.",
+    tool: "mcp_openclaw_message / mcp_openclaw_feishu_*",
+    hint: "Use the OpenClaw MCP `mcp_openclaw_message` tool for channel replies/sends and Feishu IM tools for Feishu-specific operations.",
   },
   "lark-sheets": {
-    tool: "feishu_*",
+    tool: "mcp_openclaw_feishu_*",
     hint: "Use the OpenClaw MCP Feishu spreadsheet tools exposed in the current tool list.",
   },
   "lark-base": {
-    tool: "feishu_*",
+    tool: "mcp_openclaw_feishu_*",
     hint: "Use the OpenClaw MCP Feishu Base tools exposed in the current tool list.",
   },
   "lark-drive": {
-    tool: "feishu_*",
+    tool: "mcp_openclaw_feishu_*",
     hint: "Use the OpenClaw MCP Feishu Drive tools exposed in the current tool list.",
   },
   "lark-task": {
-    tool: "feishu_*",
+    tool: "mcp_openclaw_feishu_*",
     hint: "Use the OpenClaw MCP Feishu task tools exposed in the current tool list.",
   },
   "lark-mail": {
-    tool: "feishu_*",
+    tool: "mcp_openclaw_feishu_*",
     hint: "Use the OpenClaw MCP Feishu mail tools exposed in the current tool list.",
   },
 };
@@ -190,7 +200,7 @@ function resolveHostBackedMcpHint(name: string): { mcpTool: string; mcpToolHint:
   const normalized = normalizeSkillName(name);
   const entry =
     HOST_BACKED_MCP_TOOL_HINTS[normalized] ??
-    (normalized.startsWith("lark-") ? HOST_BACKED_MCP_TOOL_HINTS["lark-doc"] : undefined);
+    (isFeishuOrLarkSkillName(normalized) ? HOST_BACKED_MCP_TOOL_HINTS["lark-doc"] : undefined);
   return {
     mcpTool: entry?.tool ?? "OpenClaw MCP tools",
     mcpToolHint:
@@ -256,7 +266,7 @@ function classifySkill(params: {
     params.config.skillProjection.containerEnvSkillNames.map((entry) => normalizeSkillName(entry)),
   );
   const normalized = normalizeSkillName(params.name);
-  if (hostBackedNames.has(normalized) || normalized.startsWith("lark-")) {
+  if (hostBackedNames.has(normalized) || isFeishuOrLarkSkillName(normalized)) {
     const mcpHint = resolveHostBackedMcpHint(params.name);
     return {
       classification: "host-backed",

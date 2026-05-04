@@ -58,6 +58,16 @@ declare module "openclaw/plugin-sdk/agent-harness" {
     runId?: string;
     sessionKey?: string;
     agentId?: string;
+    messageChannel?: string;
+    messageProvider?: string;
+    agentAccountId?: string;
+    messageTo?: string;
+    messageThreadId?: string | number;
+    currentChannelId?: string;
+    currentThreadTs?: string;
+    currentMessageId?: string | number;
+    senderId?: string | null;
+    senderIsOwner?: boolean;
     abortSignal?: AbortSignal;
     images?: Array<{ data: string; mimeType: string }>;
     extraSystemPrompt?: string;
@@ -69,6 +79,7 @@ declare module "openclaw/plugin-sdk/agent-harness" {
       skillFilter?: string[];
       version?: number;
     };
+    config?: unknown;
     model?: { api?: string };
     provider?: string;
     bootstrapPromptWarningSignaturesSeen?: string[];
@@ -131,6 +142,37 @@ declare module "openclaw/plugin-sdk/agent-harness" {
     compact?: () => Promise<AgentHarnessCompactResult>;
     reset?: (params: { sessionFile?: string }) => Promise<void>;
   };
+}
+
+declare module "openclaw/plugin-sdk/agent-harness-runtime" {
+  export type AgentHarnessMcpBridge = {
+    mcpServers?: Record<string, unknown>;
+    env?: Record<string, string>;
+    mcpConfigHash?: string;
+    mcpResumeHash?: string;
+    credentialScopeHash?: string;
+  };
+  export function prepareAgentHarnessMcpBridge(
+    params: {
+      enabled?: boolean;
+      config?: unknown;
+      workspaceDir?: string;
+      configuredServers?: Record<string, unknown>;
+      configuredEnv?: Record<string, string>;
+      sessionKey?: string;
+      agentId?: string;
+      accountId?: string;
+      messageChannel?: string;
+      messageProvider?: string;
+      messageTo?: string;
+      messageThreadId?: string | number;
+      currentChannelId?: string;
+      currentThreadTs?: string;
+      currentMessageId?: string | number;
+      requesterSenderId?: string | null;
+      senderIsOwner?: boolean;
+    },
+  ): Promise<AgentHarnessMcpBridge>;
 }
 
 declare module "openclaw/plugin-sdk/nostr" {
