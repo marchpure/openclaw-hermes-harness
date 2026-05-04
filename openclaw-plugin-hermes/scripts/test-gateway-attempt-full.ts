@@ -124,7 +124,7 @@ async function main(): Promise<void> {
   const openclawStateDir = await mkdtemp(join(tmpdir(), "hermes-gateway-attempt-state-"));
   process.env.OPENCLAW_STATE_DIR = openclawStateDir;
 
-  const [{ runHermesHarnessAttempt }, { setHermesHarnessAgentEventEmitterForTest }, { resolveStableSessionAnchor }] =
+  const [{ runHermesHarnessAttempt, __testing }, { setHermesHarnessAgentEventEmitterForTest }, { resolveStableSessionAnchor }] =
     await Promise.all([
       import("../src/harness-runtime.js"),
       import("../src/agent-event-bridge.js"),
@@ -189,7 +189,7 @@ async function main(): Promise<void> {
     workspaceDir: workspace,
     agentDir: join(workspace, ".openclaw", "agents", "main"),
     config: { gateway: { port: 18789 } },
-    prompt: "请确认 gateway attempt 中的字段都被 Hermes harness 保留。",
+    prompt: `请确认 gateway attempt 中的字段都被 Hermes harness 保留。参考真实路径 ${workspace}/fixtures/input.txt，但不要同步旁路路径 ${workspace}2/leak.txt。`,
     images: [],
     imageOrder: [],
     clientTools: [{ type: "function", function: { name: "hosted_search" } }],
@@ -293,6 +293,15 @@ async function main(): Promise<void> {
   assert(
     mockState.promptCalls[0]?.prompt.includes(attemptParams.prompt),
     "bootstrap prompt should contain the original gateway prompt",
+  );
+  const extractedWorkspacePaths = __testing.extractWorkspacePaths(attemptParams.prompt, workspace);
+  assert(
+    extractedWorkspacePaths.includes(`${workspace}/fixtures/input.txt`),
+    "workspace path extraction should include exact in-workspace paths mentioned in the prompt",
+  );
+  assert(
+    !extractedWorkspacePaths.some((path) => path.includes(`${workspace}2/leak.txt`)),
+    "workspace path extraction must not treat workspace-prefix siblings as in-workspace paths",
   );
   assert(
     mockState.promptCalls[0]?.prompt.includes("attempt-audit"),

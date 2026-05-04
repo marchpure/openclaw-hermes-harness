@@ -80,7 +80,7 @@ export class HermesAcpClient extends EventEmitter {
 
     // Initialize immediately after the socket is live so callers fail fast if
     // the local bridge is reachable but not speaking ACP correctly.
-    const initResult = await this.sendRequest("initialize", {
+    const initResult = await this.sendRequestResult("initialize", {
       protocol_version: 1,
       client_info: { name: "openclaw-plugin-hermes", version: "1.0.0" },
       client_capabilities: {},
@@ -143,7 +143,7 @@ export class HermesAcpClient extends EventEmitter {
    * ACP method: "session/new"
    */
   async newSession(options: HermesAcpSessionOptions): Promise<string> {
-    const result = (await this.sendRequest("session/new", buildSessionParams(options))) as {
+    const result = (await this.sendRequestResult("session/new", buildSessionParams(options))) as {
       session_id?: string;
       sessionId?: string;
     };
@@ -157,7 +157,7 @@ export class HermesAcpClient extends EventEmitter {
    * ACP method: "session/load"
    */
   async loadSession(sessionId: string, options: HermesAcpSessionOptions): Promise<string> {
-    const result = (await this.sendRequest("session/load", {
+    const result = (await this.sendRequestResult("session/load", {
       session_id: sessionId,
       ...buildSessionParams(options),
     })) as { session_id?: string; sessionId?: string } | null;
@@ -174,7 +174,7 @@ export class HermesAcpClient extends EventEmitter {
    * ACP method: "session/resume"
    */
   async resumeSession(sessionId: string, options: HermesAcpSessionOptions): Promise<string> {
-    const result = (await this.sendRequest("session/resume", {
+    const result = (await this.sendRequestResult("session/resume", {
       session_id: sessionId,
       ...buildSessionParams(options),
     })) as { session_id?: string; sessionId?: string };
@@ -212,6 +212,8 @@ export class HermesAcpClient extends EventEmitter {
       let promptAcked = false;
       let promptResponseText = "";
       let idleFinalizeTimer: ReturnType<typeof setTimeout> | undefined;
+      let abortHandler: (() => void) | undefined;
+      let promptRequestId: number | undefined;
       const clearIdleFinalizeTimer = (): void => {
         if (idleFinalizeTimer) {
           clearTimeout(idleFinalizeTimer);
@@ -223,6 +225,14 @@ export class HermesAcpClient extends EventEmitter {
         settled = true;
         clearTimeout(timeoutTimer);
         clearIdleFinalizeTimer();
+        if (abortHandler) {
+          options?.signal?.removeEventListener("abort", abortHandler);
+          abortHandler = undefined;
+        }
+        if (promptRequestId !== undefined) {
+          this.cancelPendingRequest(promptRequestId, new Error("ACP prompt settled before request response"));
+          promptRequestId = undefined;
+        }
         this.off("session-event-raw", eventHandler);
         fn();
       };
@@ -268,18 +278,22 @@ export class HermesAcpClient extends EventEmitter {
 
       // Handle abort signal
       if (options?.signal) {
-        options.signal.addEventListener("abort", () => {
+        abortHandler = () => {
           this.cancel(sid).catch(() => {});
           settle(() => reject(new Error("Prompt aborted")));
-        }, { once: true });
+        };
+        options.signal.addEventListener("abort", abortHandler, { once: true });
       }
 
       // Send the prompt request
-      this.sendRequest("session/prompt", {
+      const promptRequest = this.sendRequest("session/prompt", {
         session_id: sid,
         prompt: [{ type: "text", text }],
-      }).then((result) => {
+      });
+      promptRequestId = promptRequest.id;
+      promptRequest.promise.then((result) => {
         const promptResult = result as Record<string, unknown>;
+        promptRequestId = undefined;
         promptAcked = true;
         if (promptResult.usage) {
           const u = promptResult.usage as Record<string, number>;
@@ -312,6 +326,7 @@ export class HermesAcpClient extends EventEmitter {
         // actual turn via session updates afterwards. In that case keep the
         // connection open until a terminal event arrives or timeout fires.
       }).catch((err) => {
+        promptRequestId = undefined;
         if (promptAcked && !settled && (finalText || promptResponseText)) {
           settle(() => resolve({ text: finalText || promptResponseText, events, usage }));
           return;
@@ -329,7 +344,7 @@ export class HermesAcpClient extends EventEmitter {
     const sid = sessionId ?? this.sessionId;
     if (!sid) return;
     try {
-      await this.sendRequest("session/cancel", { session_id: sid });
+      await this.sendRequestResult("session/cancel", { session_id: sid });
     } catch {
       // Best-effort cancel
     }
@@ -341,7 +356,7 @@ export class HermesAcpClient extends EventEmitter {
   async close(): Promise<void> {
     if (this.sessionId) {
       try {
-        await this.sendRequest("session/close", { session_id: this.sessionId });
+        await this.sendRequestResult("session/close", { session_id: this.sessionId });
       } catch {
         // Best-effort
       }
@@ -384,7 +399,7 @@ export class HermesAcpClient extends EventEmitter {
     this.socket.write(data);
   }
 
-  private async sendRequest(method: string, params?: Record<string, unknown>): Promise<unknown> {
+  private sendRequest(method: string, params?: Record<string, unknown>): { id: number; promise: Promise<unknown> } {
     const id = ++this.requestId;
     const request: AcpJsonRpcRequest = {
       jsonrpc: "2.0",
@@ -393,7 +408,7 @@ export class HermesAcpClient extends EventEmitter {
       id,
     };
 
-    return new Promise((resolve, reject) => {
+    const promise = new Promise<unknown>((resolve, reject) => {
       const timeoutMs = method === "session/prompt"
         ? (this.config.timeout * 1000 + 10000)
         : 30000;
@@ -413,6 +428,19 @@ export class HermesAcpClient extends EventEmitter {
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
+    return { id, promise };
+  }
+
+  private async sendRequestResult(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    return this.sendRequest(method, params).promise;
+  }
+
+  private cancelPendingRequest(id: number, error: Error): void {
+    const pending = this.pendingRequests.get(id);
+    if (!pending) return;
+    this.pendingRequests.delete(id);
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.reject(error);
   }
 
   // ─── Internal: Message Parsing (shared by both transports) ────────────

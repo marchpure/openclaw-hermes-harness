@@ -149,7 +149,8 @@ function escapeRegExp(value: string): string {
 function extractWorkspacePaths(prompt: string, workspaceDir: string): string[] {
   const normalizedWorkspace = workspaceDir.replace(/\/+$/, "");
   if (!normalizedWorkspace) return [];
-  const pathPattern = new RegExp(`${escapeRegExp(normalizedWorkspace)}(?:/[^\\s'"]*)?`, "g");
+  const pathTerminator = "\\s'\"`<>，。；：、！？（）【】《》";
+  const pathPattern = new RegExp(`${escapeRegExp(normalizedWorkspace)}(?:/[^${pathTerminator}]*)?(?=$|[${pathTerminator}])`, "g");
   const matches = prompt.match(pathPattern) ?? [];
   return [
     ...new Set(
@@ -157,6 +158,10 @@ function extractWorkspacePaths(prompt: string, workspaceDir: string): string[] {
     ),
   ];
 }
+
+export const __testing = {
+  extractWorkspacePaths,
+};
 
 function resolveFeishuSenderIdFromPrompt(prompt: string): string | undefined {
   const systemLineMatch = /^System:\s*\[[^\n]*\]\s*Feishu\[[^\]]+\]\s+(?:DM|message in group)[^\n|]*(?:\|\s*)?(ou_[A-Za-z0-9_-]+)/m.exec(

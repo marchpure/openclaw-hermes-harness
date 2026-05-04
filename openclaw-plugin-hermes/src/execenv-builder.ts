@@ -430,6 +430,20 @@ function uniqueSortedPaths(paths: string[]): string[] {
   return [...new Set(paths)].sort();
 }
 
+function isPathInsideWorkspace(value: string, workspaceDir: string): boolean {
+  const normalizedWorkspace = workspaceDir.replace(/\/+$/, "");
+  if (!normalizedWorkspace || !value) return false;
+  return value === normalizedWorkspace || value.startsWith(`${normalizedWorkspace}/`);
+}
+
+function resolveReferencedWorkspaceDirs(workspaceDir: string, referencedPaths: string[]): string[] {
+  return uniqueSortedPaths(
+    referencedPaths
+      .filter((value) => isPathInsideWorkspace(value, workspaceDir))
+      .map((value) => (value === workspaceDir.replace(/\/+$/, "") ? value : dirname(value))),
+  );
+}
+
 function shouldPullRuntimeExecEnvFromContainer(
   config: HermesPluginConfig,
   runtimeExecEnvPath: string,
@@ -740,11 +754,7 @@ export async function mirrorWorkspaceToContainer(
   if (config.transport !== "tcp") return;
   if (!workspaceDir.startsWith("/")) return;
 
-  const dirs = uniqueSortedPaths(
-    referencedPaths
-      .filter((value) => value.startsWith(workspaceDir))
-      .map((value) => dirname(value)),
-  );
+  const dirs = resolveReferencedWorkspaceDirs(workspaceDir, referencedPaths);
 
   for (const dir of dirs) {
     // Sync only the prompt-referenced workspace slices so Hermes can access
@@ -764,11 +774,7 @@ export async function mirrorWorkspaceFromContainer(
   if (config.transport !== "tcp") return;
   if (!workspaceDir.startsWith("/")) return;
 
-  const dirs = uniqueSortedPaths(
-    referencedPaths
-      .filter((value) => value.startsWith(workspaceDir))
-      .map((value) => dirname(value)),
-  );
+  const dirs = resolveReferencedWorkspaceDirs(workspaceDir, referencedPaths);
 
   for (const dir of dirs) {
     // Pull back only the directories touched by the prompt so host-side
