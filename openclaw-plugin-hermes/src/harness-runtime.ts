@@ -136,6 +136,10 @@ function clampAcpPrompt(prompt: string): string {
   return `${prompt.slice(0, headChars)}${marker}${prompt.slice(-tailChars)}`;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Find host workspace paths explicitly mentioned in the prompt.
  *
@@ -143,8 +147,15 @@ function clampAcpPrompt(prompt: string): string {
  * keeps file side effects observable without copying the entire workspace.
  */
 function extractWorkspacePaths(prompt: string, workspaceDir: string): string[] {
-  const matches = prompt.match(new RegExp(`${workspaceDir.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}[^\\s'"]*`, "g")) ?? [];
-  return [...new Set(matches)];
+  const normalizedWorkspace = workspaceDir.replace(/\/+$/, "");
+  if (!normalizedWorkspace) return [];
+  const pathPattern = new RegExp(`${escapeRegExp(normalizedWorkspace)}(?:/[^\\s'"]*)?`, "g");
+  const matches = prompt.match(pathPattern) ?? [];
+  return [
+    ...new Set(
+      matches.filter((value) => value === normalizedWorkspace || value.startsWith(`${normalizedWorkspace}/`)),
+    ),
+  ];
 }
 
 function resolveFeishuSenderIdFromPrompt(prompt: string): string | undefined {

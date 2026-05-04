@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mirrorWorkspaceFromContainer } from "../src/execenv-builder.js";
@@ -85,15 +85,25 @@ async function main() {
     "utf8",
   );
   await writeFile(join(config.hermesDataDir!, "execenv", taskId, "SOUL.md"), "runtime soul copy should not overwrite host\n", "utf8");
+  await writeFile(join(config.hermesDataDir!, "execenv", taskId, ".runtime-secret"), "hidden runtime file should not copy\n", "utf8");
+  await mkdir(join(config.hermesDataDir!, "execenv", taskId, "node_modules"), { recursive: true });
+  await writeFile(join(config.hermesDataDir!, "execenv", taskId, "node_modules", "cache.txt"), "cache should not copy\n", "utf8");
   await mkdir(join(hostExecEnvSkillsDir, "..", "hermes-real-regression-fixtures"), { recursive: true });
   await writeFile(
     join(hostExecEnvSkillsDir, "..", "hermes-real-regression-fixtures", "relative-write.txt"),
     "relative runtime writeback\n",
     "utf8",
   );
+  await mkdir(join(hostExecEnvSkillsDir, "..", "unsafe-runtime-symlink"), { recursive: true });
+  await symlink("/etc/passwd", join(hostExecEnvSkillsDir, "..", "unsafe-runtime-symlink", "passwd-link"));
 
   await mkdir(join(hostExecEnvSkillsDir, "invalid-dir"), { recursive: true });
   await writeFile(join(hostExecEnvSkillsDir, "invalid-dir", "README.md"), "missing skill md", "utf8");
+  await mkdir(join(hostExecEnvSkillsDir, ".hidden-skill"), { recursive: true });
+  await writeFile(join(hostExecEnvSkillsDir, ".hidden-skill", "SKILL.md"), "# Hidden Skill\n\nmust not copy\n", "utf8");
+  await mkdir(join(hostExecEnvSkillsDir, "unsafe-symlink-skill"), { recursive: true });
+  await writeFile(join(hostExecEnvSkillsDir, "unsafe-symlink-skill", "SKILL.md"), "# Unsafe Symlink Skill\n\nmust not copy\n", "utf8");
+  await symlink("/etc/passwd", join(hostExecEnvSkillsDir, "unsafe-symlink-skill", "passwd-link"));
 
   await mirrorWorkspaceFromContainer(
     config,
@@ -129,6 +139,27 @@ async function main() {
     ok("does not copy runtime projection metadata into workspace");
   }
 
+  try {
+    await stat(join(workspace, ".runtime-secret"));
+    fail("hidden runtime files should not be copied into workspace");
+  } catch {
+    ok("does not copy hidden runtime root files into workspace");
+  }
+
+  try {
+    await stat(join(workspace, "node_modules"));
+    fail("runtime node_modules should not be copied into workspace");
+  } catch {
+    ok("does not copy runtime dependency caches into workspace");
+  }
+
+  try {
+    await stat(join(workspace, "unsafe-runtime-symlink"));
+    fail("runtime file writeback containing symlinks should not be copied into workspace");
+  } catch {
+    ok("does not copy runtime root entries containing symlinks into workspace");
+  }
+
   const existingSkill = await mustRead(existingSkillPath);
   if (!existingSkill.includes("workspace version")) {
     fail("non-autoskill existing workspace skill should not be refreshed from runtime execenv");
@@ -156,6 +187,20 @@ async function main() {
     fail("unrelated runtime skill should not be mirrored into workspace");
   } catch {
     ok("does not mirror unrelated runtime skills");
+  }
+
+  try {
+    await stat(join(workspace, "skills", ".hidden-skill"));
+    fail("hidden runtime skill should not be mirrored into workspace");
+  } catch {
+    ok("does not mirror hidden runtime skills");
+  }
+
+  try {
+    await stat(join(workspace, "skills", "unsafe-symlink-skill"));
+    fail("runtime skill containing symlinks should not be mirrored into workspace");
+  } catch {
+    ok("does not mirror runtime skills containing symlinks");
   }
 
   await mirrorWorkspaceFromContainer(config, workspace, [], runtimeExecEnvPath, []);

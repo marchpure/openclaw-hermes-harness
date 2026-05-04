@@ -84,6 +84,17 @@ def _to_positive_float(value: Any, default: float) -> float:
     return number
 
 
+def _read_tcp_port() -> int:
+    raw = os.environ.get("ACP_TCP_PORT", "3100")
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        raise SystemExit(f"ACP_TCP_PORT must be an integer between 1 and 65535, got {raw!r}")
+    if port < 1 or port > 65535:
+        raise SystemExit(f"ACP_TCP_PORT must be an integer between 1 and 65535, got {raw!r}")
+    return port
+
+
 def _read_openclaw_mcp_meta(server: Any) -> dict[str, Any]:
     raw_meta = getattr(server, "field_meta", None)
     if raw_meta is None and hasattr(server, "model_dump"):
@@ -469,7 +480,7 @@ def main() -> None:
     _load_env()
 
     host = os.environ.get("ACP_TCP_HOST", "0.0.0.0")
-    port = int(os.environ.get("ACP_TCP_PORT", "3100"))
+    port = _read_tcp_port()
 
     logger.info("Starting ACP TCP bridge on %s:%d", host, port)
     asyncio.run(run_server(host, port))

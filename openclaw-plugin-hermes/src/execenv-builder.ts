@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -30,6 +30,65 @@ type RuntimeSkillSyncCandidate = {
   sourceDir: string;
   allowNew: boolean;
 };
+
+const RUNTIME_SKILL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const ROOT_FILE_WRITEBACK_DENYLIST = new Set([
+  "__pycache__",
+  "node_modules",
+]);
+
+function normalizeRuntimeSkillName(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "." || trimmed === ".." || trimmed.startsWith(".")) {
+    return undefined;
+  }
+  if (trimmed.includes("/") || trimmed.includes("\\") || !RUNTIME_SKILL_NAME_PATTERN.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function resolveRuntimeSkillDirName(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const pathLike = trimmed.endsWith("/SKILL.md") || trimmed.endsWith("\\SKILL.md")
+    ? dirname(trimmed)
+    : trimmed;
+  return normalizeRuntimeSkillName(basename(pathLike));
+}
+
+function resolveProjectedSkillDirName(skill: ProjectedSkill): string {
+  const runtimeName = skill.runtimePath ? resolveRuntimeSkillDirName(skill.runtimePath) : undefined;
+  const skillName = runtimeName ?? normalizeRuntimeSkillName(skill.name);
+  if (!skillName) {
+    throw new Error(`unsafe projected skill runtime name: ${skill.runtimePath ?? skill.name}`);
+  }
+  return skillName;
+}
+
+function isSafeRuntimeRootEntryName(name: string): boolean {
+  if (!name || name !== name.trim()) return false;
+  if (name === "." || name === ".." || name.startsWith(".")) return false;
+  if (name.includes("/") || name.includes("\\") || name.includes("\0")) return false;
+  return !ROOT_FILE_WRITEBACK_DENYLIST.has(name.toLowerCase());
+}
+
+async function containsSymlink(path: string): Promise<boolean> {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) return true;
+    if (!info.isDirectory()) return false;
+    const entries = await readdir(path);
+    for (const entry of entries) {
+      if (await containsSymlink(join(path, entry))) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
 
 async function readAutoskillMetadata(skillFile: string): Promise<{
   managed: boolean;
@@ -89,10 +148,20 @@ async function copyProjectedSkill(
     return skill;
   }
 
-  const skillDirName = skill.runtimePath ? basename(skill.runtimePath) : skill.name;
+  const skillDirName = resolveProjectedSkillDirName(skill);
   const skillDir = join(hostExecEnvPath, "skills", skillDirName);
   const sourceSkillPath = skill.sourcePath;
   const sourceSkillDir = dirname(sourceSkillPath);
+  if (await containsSymlink(sourceSkillDir)) {
+    return {
+      ...skill,
+      placement: "unsupported",
+      diagnostics: [
+        ...(skill.diagnostics ?? []),
+        `${skill.name}: skill directory contains symlinks and was not projected`,
+      ],
+    };
+  }
   await mkdir(join(hostExecEnvPath, "skills"), { recursive: true });
 
   // Project the full skill directory so runtime scripts/assets referenced by
@@ -100,7 +169,6 @@ async function copyProjectedSkill(
   await cp(sourceSkillDir, skillDir, {
     recursive: true,
     force: true,
-    dereference: true,
   });
 
   return {
@@ -413,7 +481,11 @@ async function syncExecEnvSkillsToWorkspace(
   const runtimeSkillsDir = join(runtimeExecEnvPath, "skills");
   const hostExecEnvSkillsDir = join(resolveExecEnvHostPath(config, runtimeExecEnvPath.split("/").pop() ?? ""), "skills");
   const tempSyncDir = join(tmpdir(), `hermes-skill-sync-${hashText(runtimeExecEnvPath).slice(0, 12)}`);
-  const allowedSkills = new Set(createdSkillNames);
+  const allowedSkills = new Set(
+    createdSkillNames
+      .map((name) => normalizeRuntimeSkillName(name))
+      .filter((name): name is string => Boolean(name)),
+  );
 
   await mkdir(workspaceSkillsDir, { recursive: true });
 
@@ -438,11 +510,16 @@ async function syncExecEnvSkillsToWorkspace(
     const projectionPath = join(sourceDir, "..", "projection.json");
     try {
       const projection = JSON.parse(await readFile(projectionPath, "utf8")) as {
-        skills?: Array<{ name?: unknown }>;
+        skills?: Array<{ name?: unknown; runtimePath?: unknown }>;
       };
       for (const skill of projection.skills ?? []) {
-        if (typeof skill.name === "string" && skill.name.trim()) {
-          projectedSkillNames.add(skill.name.trim());
+        if (typeof skill.name === "string") {
+          const skillName = normalizeRuntimeSkillName(skill.name);
+          if (skillName) projectedSkillNames.add(skillName);
+        }
+        if (typeof skill.runtimePath === "string") {
+          const runtimeName = resolveRuntimeSkillDirName(skill.runtimePath);
+          if (runtimeName) projectedSkillNames.add(runtimeName);
         }
       }
     } catch {
@@ -453,12 +530,14 @@ async function syncExecEnvSkillsToWorkspace(
     const candidates: RuntimeSkillSyncCandidate[] = [];
     for (const entry of skillEntries) {
       if (!entry.isDirectory()) continue;
-      if (createdSkillNames.length > 0 && !allowedSkills.has(entry.name)) continue;
-      if (!allowedSkills.has(entry.name) && projectedSkillNames.has(entry.name)) continue;
+      const skillName = normalizeRuntimeSkillName(entry.name);
+      if (!skillName) continue;
+      if (createdSkillNames.length > 0 && !allowedSkills.has(skillName)) continue;
+      if (!allowedSkills.has(skillName) && projectedSkillNames.has(skillName)) continue;
       candidates.push({
-        name: entry.name,
+        name: skillName,
         sourceDir: join(sourceDir, entry.name),
-        allowNew: allowedSkills.has(entry.name) || !projectedSkillNames.has(entry.name),
+        allowNew: allowedSkills.has(skillName) || !projectedSkillNames.has(skillName),
       });
     }
 
@@ -482,10 +561,10 @@ async function syncExecEnvSkillsToWorkspace(
       } else if (!candidate.allowNew) {
         continue;
       }
+      if (await containsSymlink(sourceSkillDir)) continue;
       await cp(sourceSkillDir, targetSkillDir, {
         recursive: true,
         force: true,
-        dereference: true,
       });
       await ensureAutoskillMetadata(targetSkillDir);
     }
@@ -541,11 +620,14 @@ async function syncExecEnvFilesToWorkspace(
     const copiedEntries: string[] = [];
     for (const entry of entries) {
       if (excludedRootEntries.has(entry.name)) continue;
+      if (!isSafeRuntimeRootEntryName(entry.name)) continue;
+      if (entry.isSymbolicLink()) continue;
+      const sourcePath = join(sourceDir, entry.name);
+      if (await containsSymlink(sourcePath)) continue;
       await mkdir(workspaceDir, { recursive: true });
-      await cp(join(sourceDir, entry.name), join(workspaceDir, entry.name), {
+      await cp(sourcePath, join(workspaceDir, entry.name), {
         recursive: true,
         force: true,
-        dereference: true,
       });
       copiedEntries.push(entry.name);
     }
@@ -574,7 +656,11 @@ async function syncGlobalHermesSkillsToWorkspace(
     ? join(config.hermesDataDir.trim(), "skills")
     : undefined;
   const tempSyncDir = join(tmpdir(), `hermes-global-skill-sync-${hashText(workspaceDir).slice(0, 12)}`);
-  const allowedSkills = new Set(createdSkillNames);
+  const allowedSkills = new Set(
+    createdSkillNames
+      .map((name) => normalizeRuntimeSkillName(name))
+      .filter((name): name is string => Boolean(name)),
+  );
 
   await mkdir(workspaceSkillsDir, { recursive: true });
 
@@ -593,6 +679,8 @@ async function syncGlobalHermesSkillsToWorkspace(
     }
 
     const copyIfAllowed = async (sourceSkillDir: string, skillName: string): Promise<void> => {
+      const safeSkillName = normalizeRuntimeSkillName(skillName);
+      if (!safeSkillName) return;
       const sourceSkillFile = join(sourceSkillDir, "SKILL.md");
       try {
         const skillFileStat = await stat(sourceSkillFile);
@@ -600,10 +688,10 @@ async function syncGlobalHermesSkillsToWorkspace(
       } catch {
         return;
       }
-      const targetSkillDir = join(workspaceSkillsDir, skillName);
+      const targetSkillDir = join(workspaceSkillsDir, safeSkillName);
       const targetSkillFile = join(targetSkillDir, "SKILL.md");
       const targetExists = await stat(targetSkillFile).then((info) => info.isFile()).catch(() => false);
-      if (createdSkillNames.length > 0 && !allowedSkills.has(skillName)) return;
+      if (createdSkillNames.length > 0 && !allowedSkills.has(safeSkillName)) return;
       if (createdSkillNames.length === 0 && !targetExists) return;
       if (targetExists) {
         const meta = await readAutoskillMetadata(targetSkillFile);
@@ -611,10 +699,10 @@ async function syncGlobalHermesSkillsToWorkspace(
           return;
         }
       }
+      if (await containsSymlink(sourceSkillDir)) return;
       await cp(sourceSkillDir, targetSkillDir, {
         recursive: true,
         force: true,
-        dereference: true,
       });
       await ensureAutoskillMetadata(targetSkillDir);
     };
@@ -622,6 +710,7 @@ async function syncGlobalHermesSkillsToWorkspace(
     const rootEntries = await readdir(sourceDir, { withFileTypes: true });
     for (const rootEntry of rootEntries) {
       if (!rootEntry.isDirectory()) continue;
+      if (!isSafeRuntimeRootEntryName(rootEntry.name)) continue;
       const rootChildDir = join(sourceDir, rootEntry.name);
 
       // Hermes may write autoskills either directly under /opt/data/skills/<name>
@@ -631,6 +720,7 @@ async function syncGlobalHermesSkillsToWorkspace(
       const nestedSkillEntries = await readdir(rootChildDir, { withFileTypes: true }).catch(() => []);
       for (const nestedSkillEntry of nestedSkillEntries) {
         if (!nestedSkillEntry.isDirectory()) continue;
+        if (!isSafeRuntimeRootEntryName(nestedSkillEntry.name)) continue;
         await copyIfAllowed(join(rootChildDir, nestedSkillEntry.name), nestedSkillEntry.name);
       }
     }

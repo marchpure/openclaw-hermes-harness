@@ -102,6 +102,14 @@ log_warn()  { log_line "WARN" "${YELLOW}" "$*"; }
 log_error() { log_line "ERROR" "${RED}" "$*"; }
 die()       { log_error "$@"; exit 1; }
 
+normalize_port() {
+    local name="$1" value="$2"
+    [[ "${value}" =~ ^[0-9]+$ ]] || die "${name} 必须是 1-65535 之间的整数，当前值: ${value}"
+    local normalized=$((10#${value}))
+    (( normalized >= 1 && normalized <= 65535 )) || die "${name} 必须是 1-65535 之间的整数，当前值: ${value}"
+    printf '%s\n' "${normalized}"
+}
+
 TEMP_DIRS=()
 cleanup_temp() {
     local path=""
@@ -119,6 +127,8 @@ download_file() {
 check_prereqs() {
     command -v curl >/dev/null 2>&1 || die "缺少 curl，无法下载基础脚本或插件包"
     command -v python3 >/dev/null 2>&1 || die "缺少 python3，无法生成 v4 patched installer"
+    ACP_TCP_PORT="$(normalize_port "ACP_TCP_PORT" "${ACP_TCP_PORT}")"
+    ACP_PORT="${ACP_TCP_PORT}"
     if [[ -n "${LOCAL_PLUGIN_DIR}" && -d "${LOCAL_PLUGIN_DIR}" ]]; then
         command -v tar >/dev/null 2>&1 || die "缺少 tar，无法打包本地插件"
         command -v npm >/dev/null 2>&1 || die "缺少 npm，无法打包本地插件"
@@ -221,26 +231,37 @@ image_ref = os.environ["HERMES_IMAGE_REF"]
 tcp_host = os.environ["ACP_TCP_HOST"]
 tcp_port = os.environ["ACP_TCP_PORT"]
 
-text = text.replace(
+def replace_once(label, old, new):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"{label}: patch anchor count={count}, expected 1")
+    return text.replace(old, new, 1)
+
+text = replace_once(
+    "image source config",
     'TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-image/hermes-agent-image.tar.gz}"',
     f'TOS_IMAGE_URL="${{TOS_IMAGE_URL:-}}"\nHERMES_IMAGE_REF="${{HERMES_IMAGE_REF:-{image_ref}}}"',
 )
-text = text.replace(
+text = replace_once(
+    "image name default",
     'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"',
     'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-${HERMES_IMAGE_REF}}"',
 )
-text = text.replace(
+text = replace_once(
+    "model candidate",
     'local oc_model_candidate="${OC_PRIMARY_MODEL:-${OC_DEFAULT_MODEL}}"',
     'local oc_model_candidate="${OC_DEFAULT_MODEL}"',
 )
-text = text.replace(
+text = replace_once(
+    "api provider selection",
     'choose_value "${CLI_API_PROVIDER}" "${HERMES_API_PROVIDER:-}" "${OC_PROVIDER:-}" "ark" API_PROVIDER provider_source',
     'choose_value "${CLI_API_PROVIDER}" "${HERMES_API_PROVIDER:-}" "${OC_PROVIDER:+custom}" "custom" API_PROVIDER provider_source',
 )
-text = text.replace('ACP_PORT="${ACP_PORT:-3100}"', f'ACP_PORT="${{ACP_PORT:-{tcp_port}}}"')
-text = text.replace('echo "ACP_TCP_PORT=3100"', 'echo "ACP_TCP_PORT=${ACP_PORT}"')
-text = text.replace('echo "ACP_TCP_HOST=0.0.0.0"', f'echo "ACP_TCP_HOST=${{ACP_TCP_HOST:-{tcp_host}}}"')
-text = text.replace(
+text = replace_once("acp port default", 'ACP_PORT="${ACP_PORT:-3100}"', f'ACP_PORT="${{ACP_PORT:-{tcp_port}}}"')
+text = replace_once("env acp tcp port", 'echo "ACP_TCP_PORT=3100"', 'echo "ACP_TCP_PORT=${ACP_PORT}"')
+text = replace_once("env acp tcp host", 'echo "ACP_TCP_HOST=0.0.0.0"', f'echo "ACP_TCP_HOST=${{ACP_TCP_HOST:-{tcp_host}}}"')
+text = replace_once(
+    "config yaml provider patch",
     '''    if [[ -n "${API_BASE_URL}" ]]; then
         sed -i "s|^\\(\\s*base_url:\\s*\\).*|\\1\\"${API_BASE_URL}\\"|" "${config_yaml}"
     fi
@@ -253,7 +274,8 @@ text = text.replace(
     fi
     log_info "config.yaml 已更新 (provider=${API_PROVIDER}, model=${DEFAULT_MODEL_VAL}, base_url=${API_BASE_URL:-默认})"''',
 )
-text = text.replace(
+text = replace_once(
+    "provider base url env mapping",
     '''provider_to_base_url_env() {
     case "$1" in
         openai)         echo "OPENAI_BASE_URL" ;;
@@ -273,7 +295,8 @@ text = text.replace(
     esac
 }''',
 )
-text = text.replace(
+text = replace_once(
+    "docker image pull phase",
     '''phase2_pull_image() {
     log_step "拉取 Hermes 镜像"
 
@@ -323,7 +346,8 @@ text = text.replace(
     log_info "已标记本地镜像: ${HERMES_IMAGE_NAME}:latest -> ${HERMES_IMAGE_REF}"
 }''',
 )
-text = text.replace(
+text = replace_once(
+    "docker run command",
     '''    docker run -d \\
         --name "${CONTAINER_NAME}" \\
         --init \\
@@ -372,7 +396,8 @@ text = text.replace(
         --log-opt max-file=5 \\
         "${image_ref}" >/dev/null''',
 )
-text = text.replace(
+text = replace_once(
+    "jq plugin config block",
     '''               "autoStrategy": true,
                "enableLayeredProtocol": false,
                "timeout": 600
@@ -399,7 +424,8 @@ text = text.replace(
                }
            }''',
 )
-text = text.replace(
+text = replace_once(
+    "python plugin config block",
     '''    'autoStrategy': True,
     'enableLayeredProtocol': False,
     'timeout': 600
@@ -787,8 +813,37 @@ patch_openclaw_runtime_for_hermes_toolset() {
         log_warn "未找到 openclaw CLI，跳过 Hermes MCP bridge 能力校验"
         return 0
     fi
+    command -v node >/dev/null 2>&1 || die "缺少 node，无法校验 OpenClaw MCP bridge SDK helper"
 
-    if node -e 'import("/usr/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js").then((m)=>{ if (typeof m.prepareAgentHarnessMcpBridge !== "function") process.exit(1); }).catch(()=>process.exit(1));' >/dev/null 2>&1; then
+    if node <<'NODE' >/dev/null 2>&1
+const path = require("node:path");
+const { pathToFileURL } = require("node:url");
+
+(async () => {
+  const candidates = [];
+  try {
+    candidates.push(require.resolve("openclaw/plugin-sdk/agent-harness-runtime"));
+  } catch {}
+  try {
+    const sdkEntry = require.resolve("openclaw/plugin-sdk/agent-harness");
+    const packageRoot = path.dirname(path.dirname(sdkEntry));
+    candidates.push(path.join(packageRoot, "plugin-sdk", "agent-harness-runtime.js"));
+  } catch {}
+  candidates.push("/usr/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js");
+  candidates.push("/usr/local/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js");
+
+  for (const candidate of candidates) {
+    try {
+      const mod = await import(pathToFileURL(candidate).href);
+      if (typeof mod.prepareAgentHarnessMcpBridge === "function") {
+        process.exit(0);
+      }
+    } catch {}
+  }
+  process.exit(1);
+})();
+NODE
+    then
         log_info "OpenClaw MCP bridge SDK helper 已就绪"
         return 0
     fi
