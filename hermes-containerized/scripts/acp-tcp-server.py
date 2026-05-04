@@ -467,8 +467,12 @@ async def run_server(host: str, port: int) -> None:
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
 
+    def request_stop() -> None:
+        if not stop.done():
+            stop.set_result(None)
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: stop.set_result(None))
+        loop.add_signal_handler(sig, request_stop)
 
     async with server:
         await stop
