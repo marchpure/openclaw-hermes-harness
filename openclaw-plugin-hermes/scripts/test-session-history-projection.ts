@@ -64,7 +64,7 @@ function installMockAcpClient(state: MockState): void {
 
 async function main(): Promise<void> {
   const workspace = await createWorkspace();
-  const sessionFile = join(workspace, "session.jsonl");
+  const sessionFile = join(workspace, "session-history-test.jsonl");
   await writeFile(
     sessionFile,
     [

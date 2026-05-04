@@ -15,10 +15,13 @@ const runtimeId = process.env.REGRESSION_RUNTIME_ID ?? "hermes";
 const expectProvider = process.env.REGRESSION_EXPECT_PROVIDER ?? "hermes";
 const expectModel = process.env.REGRESSION_EXPECT_MODEL ?? "default";
 const modelOverride = process.env.REGRESSION_MODEL_OVERRIDE ?? "";
+const effectiveModelOverride =
+  modelOverride || (runtimeId === "hermes" ? "hermes/default" : "");
 const maxMs = Number(process.env.REGRESSION_MAX_MS ?? 90_000);
 const killAfterJsonMs = Number(process.env.REGRESSION_KILL_AFTER_JSON_MS ?? 3_000);
 const retries = Number(process.env.REGRESSION_RETRIES ?? 1);
 const retryDelayMs = Number(process.env.REGRESSION_RETRY_DELAY_MS ?? 5_000);
+const repeat = Math.max(1, Number(process.env.REGRESSION_REPEAT ?? 1));
 const selectedCaseIds = new Set(
   (process.env.REGRESSION_CASES ?? "")
     .split(",")
@@ -37,15 +40,82 @@ const autoSkillDir = join(workspace, "skills", autoSkillName);
 const improveSkillDir = join(workspace, "skills", improveSkillName);
 const autoSkillFile = join(autoSkillDir, "SKILL.md");
 const improveSkillFile = join(improveSkillDir, "SKILL.md");
+const contextUserMarker = `${runtimeId.toUpperCase()}_USER_CONTEXT_${runTag}`;
+const contextAgentsMarker = `${runtimeId.toUpperCase()}_AGENTS_CONTEXT_${runTag}`;
+const projectedSkillName = `${runtimeId}-real-projected-skill-${runTag}`;
+const projectedSkillDir = join(workspace, "skills", projectedSkillName);
+const projectedSkillFile = join(projectedSkillDir, "SKILL.md");
+const projectedSkillMarker = `${runtimeId.toUpperCase()}_PROJECTED_SKILL_${runTag}`;
+const sameSessionMarker = `${runtimeId.toUpperCase()}_SAME_SESSION_${runTag}`;
+const isolatedSessionMarker = `${runtimeId.toUpperCase()}_ISOLATED_SESSION_${runTag}`;
+const sameSessionId = `${runtimeId}-real-same-session-${runTag}`;
+const isolatedSessionIdA = `${runtimeId}-real-isolated-a-${runTag}`;
+const isolatedSessionIdB = `${runtimeId}-real-isolated-b-${runTag}`;
+
+function ensureDir(path) {
+  mkdirSync(path, { recursive: true });
+}
+
+function writeWorkspaceContextFixtures() {
+  ensureDir(workspace);
+  ensureDir(projectedSkillDir);
+  writeFileSync(
+    join(workspace, "USER.md"),
+    [
+      `# Hermes regression user profile`,
+      ``,
+      `Mandatory validation marker: ${contextUserMarker}`,
+      `If asked whether USER.md is visible, answer with this exact marker.`,
+      ``,
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    join(workspace, "AGENTS.md"),
+    [
+      `# Hermes regression workspace instructions`,
+      ``,
+      `Mandatory validation marker: ${contextAgentsMarker}`,
+      `If asked whether AGENTS.md is visible, answer with this exact marker.`,
+      ``,
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    projectedSkillFile,
+    [
+      `---`,
+      `name: ${projectedSkillName}`,
+      `description: real projected workspace skill regression`,
+      `---`,
+      `# ${projectedSkillName}`,
+      ``,
+      `When this skill is used, reply with ${projectedSkillMarker}.`,
+      `This skill exists only as a workspace SKILL.md fixture and must be projected into Hermes.`,
+      ``,
+    ].join("\n"),
+    "utf8",
+  );
+}
+
+writeWorkspaceContextFixtures();
 
 const cases = [
   {
+    id: "model-route",
+    group: "routing",
+    prompt: `这是 /model hermes 后的模型路由等价验证。请只回复 ${runtimeId.toUpperCase()}_MODEL_ROUTE_OK。`,
+    check: (_parsed, visible) => visible.trim() === `${runtimeId.toUpperCase()}_MODEL_ROUTE_OK`,
+  },
+  {
     id: "basic",
+    group: "chat",
     prompt: `请只回复 ${runtimeId.toUpperCase()}_BASIC_OK`,
     check: (_parsed, visible) => visible.trim() === `${runtimeId.toUpperCase()}_BASIC_OK`,
   },
   {
     id: "session-status-mcp",
+    group: "mcp",
     prompt: `请调用当前可用的 OpenClaw session_status/session MCP 工具查看当前会话状态，然后只回复 ${runtimeId.toUpperCase()}_SESSION_STATUS_OK。`,
     check: (parsed, visible) =>
       visible.includes(`${runtimeId.toUpperCase()}_SESSION_STATUS_OK`) &&
@@ -53,6 +123,7 @@ const cases = [
   },
   {
     id: "workspace-write",
+    group: "workspace",
     before: () => rmSync(join(fixtureDir, `${runtimeId}-write.txt`), { force: true }),
     prompt: `请使用文件工具创建这个绝对路径文件：${join(fixtureDir, `${runtimeId}-write.txt`)}，内容必须正好是 ${runtimeId.toUpperCase()}_WRITE_OK，然后只回复 ${runtimeId.toUpperCase()}_WRITE_DONE。`,
     check: (_parsed, visible) => {
@@ -63,12 +134,14 @@ const cases = [
   },
   {
     id: "workspace-read-after-write",
+    group: "workspace",
     before: () => writeFileSync(join(fixtureDir, `${runtimeId}-read-source.txt`), `${runtimeId.toUpperCase()}_READ_SOURCE_OK\n`),
     prompt: `请读取这个绝对路径文件的内容：${join(fixtureDir, `${runtimeId}-read-source.txt`)}，然后只回复文件中的完整标记。`,
     check: (_parsed, visible) => visible.trim() === `${runtimeId.toUpperCase()}_READ_SOURCE_OK`,
   },
   {
     id: "workspace-list",
+    group: "workspace",
     before: () => {
       writeFileSync(join(fixtureDir, `${runtimeId}-list-a.txt`), "A\n");
       writeFileSync(join(fixtureDir, `${runtimeId}-list-b.txt`), "B\n");
@@ -78,6 +151,7 @@ const cases = [
   },
   {
     id: "compute-use",
+    group: "toolset",
     before: () => rmSync(join(fixtureDir, `${runtimeId}-compute.json`), { force: true }),
     prompt: `请必须调用 terminal/exec/process 这类真实 compute 工具执行命令来计算 1234567 * 89 + 42，不要心算。然后把 JSON 写入这个绝对路径文件：${join(fixtureDir, `${runtimeId}-compute.json`)}。JSON 必须包含 {"runtime":"${runtimeId}","value":109876505}。写完后只回复 ${runtimeId.toUpperCase()}_COMPUTE_OK。`,
     check: (parsed, visible) => {
@@ -93,14 +167,68 @@ const cases = [
     },
   },
   {
+    id: "context-user-agents",
+    group: "context",
+    before: () => writeWorkspaceContextFixtures(),
+    prompt: `请验证当前 Hermes/OpenClaw 上下文是否能看到 workspace 的 USER.md 和 AGENTS.md。只回复两行：第一行是 USER.md 中的 mandatory marker，第二行是 AGENTS.md 中的 mandatory marker。`,
+    check: (_parsed, visible) => {
+      const normalized = visible.trim();
+      return normalized.includes(contextUserMarker) && normalized.includes(contextAgentsMarker);
+    },
+  },
+  {
+    id: "workspace-skill-execute",
+    group: "skills",
+    before: () => writeWorkspaceContextFixtures(),
+    prompt: `请使用当前 workspace skill：${projectedSkillName}。必须先读取或遵循该 skill 的 SKILL.md 指令，然后只回复该 skill 要求的 marker。`,
+    check: (_parsed, visible) => visible.trim() === projectedSkillMarker,
+  },
+  {
+    id: "same-session-step1",
+    group: "session",
+    sessionId: ({ iteration }) => `${sameSessionId}-i${iteration}`,
+    prompt: `请在本会话中记住这个 marker：${sameSessionMarker}。不要写文件。只回复 ${runtimeId.toUpperCase()}_SAME_SESSION_STEP1_OK。`,
+    check: (_parsed, visible) => visible.trim() === `${runtimeId.toUpperCase()}_SAME_SESSION_STEP1_OK`,
+  },
+  {
+    id: "same-session-step2",
+    group: "session",
+    sessionId: ({ iteration }) => `${sameSessionId}-i${iteration}`,
+    prompt: `请基于同一个 session 的对话历史，回忆上一步要求你记住的 marker。只回复该 marker，不要解释。`,
+    check: (_parsed, visible) => visible.trim() === sameSessionMarker,
+  },
+  {
+    id: "session-isolation-a",
+    group: "session",
+    sessionId: ({ iteration }) => `${isolatedSessionIdA}-i${iteration}`,
+    prompt: `请在这个 session A 中记住私有 marker：${isolatedSessionMarker}。不要写文件。只回复 ${runtimeId.toUpperCase()}_ISOLATION_A_OK。`,
+    check: (_parsed, visible) => visible.trim() === `${runtimeId.toUpperCase()}_ISOLATION_A_OK`,
+  },
+  {
+    id: "session-isolation-b",
+    group: "session",
+    sessionId: ({ iteration }) => `${isolatedSessionIdB}-i${iteration}`,
+    prompt: `这是全新的 session B。请不要读取文件，也不要猜测其他 session 的内容。请回答你是否知道 session A 的私有 marker：如果不知道，只回复 ${runtimeId.toUpperCase()}_ISOLATION_B_OK；如果知道，请回复 ${runtimeId.toUpperCase()}_ISOLATION_LEAK。`,
+    check: (_parsed, visible) =>
+      visible.trim() === `${runtimeId.toUpperCase()}_ISOLATION_B_OK` &&
+      !visible.includes(isolatedSessionMarker) &&
+      !visible.includes(`${runtimeId.toUpperCase()}_ISOLATION_LEAK`),
+  },
+  {
     id: "agents-list-mcp",
-    prompt: `请调用当前可用的 OpenClaw agents_list/agents MCP 工具查看 agent 列表，确认能看到 ai-1111 或 main 后，只回复 ${runtimeId.toUpperCase()}_AGENTS_OK。`,
+    group: "mcp",
+    prompt: `请调用当前可用的 OpenClaw agents_list/agents MCP 工具查看 agent 列表。确认工具调用成功且返回中能看到 ${agentId}、main 或任意可用 agent id 后，只回复 ${runtimeId.toUpperCase()}_AGENTS_OK。如果工具调用成功但列表策略不包含 ${agentId} 或 main，请以 ${runtimeId.toUpperCase()}_AGENTS_DIAG 结尾并简要说明返回的 agent id。`,
     check: (parsed, visible) =>
       visible.includes(`${runtimeId.toUpperCase()}_AGENTS_OK`) &&
+      (parsed.meta?.toolSummary?.tools ?? []).some((name) => /agents/i.test(String(name))),
+    diagnostic: (parsed, visible) =>
+      (visible.includes(`${runtimeId.toUpperCase()}_AGENTS_DIAG`) ||
+        /Identity Plugin|Session Gate|未认证|login|TIP/i.test(visible)) &&
       (parsed.meta?.toolSummary?.tools ?? []).some((name) => /agents/i.test(String(name))),
   },
   {
     id: "sessions-list-mcp",
+    group: "mcp",
     prompt: `请调用当前可用的 OpenClaw sessions_list/sessions MCP 工具查看当前 agent session 列表，然后只回复 ${runtimeId.toUpperCase()}_SESSIONS_OK。`,
     check: (parsed, visible) =>
       visible.includes(`${runtimeId.toUpperCase()}_SESSIONS_OK`) &&
@@ -108,6 +236,7 @@ const cases = [
   },
   {
     id: "web-fetch-mcp",
+    group: "toolset",
     prompt: `请调用当前可用的 web_fetch 或 browser MCP 工具访问 https://example.com 并确认页面可达，然后只回复 ${runtimeId.toUpperCase()}_WEB_OK。`,
     check: (parsed, visible) =>
       visible.includes(`${runtimeId.toUpperCase()}_WEB_OK`) &&
@@ -115,18 +244,31 @@ const cases = [
   },
   {
     id: "browser-status-mcp",
+    group: "toolset",
     prompt: `请调用当前可用的 browser MCP 工具查看浏览器状态或启动状态，然后只回复 ${runtimeId.toUpperCase()}_BROWSER_STATUS_OK。`,
     check: (parsed, visible) =>
       visible.includes(`${runtimeId.toUpperCase()}_BROWSER_STATUS_OK`) &&
       (parsed.meta?.toolSummary?.tools ?? []).some((name) => /browser/i.test(String(name))),
   },
   {
+    id: "mcp-toolset-breadth",
+    group: "mcp",
+    prompt: `请连续调用至少两个不同的 OpenClaw MCP 工具，优先选择 session/agents 与 browser 或 web_fetch。确认 MCP bridge 能调通多个工具后，只回复 ${runtimeId.toUpperCase()}_MCP_BREADTH_OK。`,
+    check: (parsed, visible) => {
+      const tools = (parsed.meta?.toolSummary?.tools ?? []).map(String);
+      const mcpTools = new Set(tools.filter((name) => /^mcp_openclaw_/i.test(name)).map((name) => name.split(/\s+/)[0]));
+      return visible.includes(`${runtimeId.toUpperCase()}_MCP_BREADTH_OK`) && mcpTools.size >= 2;
+    },
+  },
+  {
     id: "p0-skill-visibility",
+    group: "skills",
     prompt: `请检查当前可见的 OpenClaw P0 skills/capabilities，确认 browser 或 browser-use、computer-use、byted-web-search 或 web_search、byted-seedream-image-generate、byted-seedance-video-generate、arkdrive-netdisk 至少有 5 项可见。不要执行图片或视频生成。确认后只回复 ${runtimeId.toUpperCase()}_P0_SKILLS_OK。`,
     check: (_parsed, visible) => visible.includes(`${runtimeId.toUpperCase()}_P0_SKILLS_OK`),
   },
   {
     id: "feishu-tool-visibility-mcp",
+    group: "feishu",
     prompt: `这是一个严格工具调用测试。请必须调用 OpenClaw MCP 的 mcp_openclaw_list_resources 或等价资源/工具列表工具，确认工具列表中存在飞书工具，例如 mcp_openclaw_feishu_doc 或 mcp_openclaw_feishu_fetch_doc。不能只根据提示文字判断；如果没有实际调用列表工具，本用例会失败。确认后只回复 ${runtimeId.toUpperCase()}_FEISHU_TOOL_VISIBLE_OK；如果不存在，请列出你实际看到的 OpenClaw MCP 工具名并以 ${runtimeId.toUpperCase()}_FEISHU_TOOL_VISIBLE_DIAG 结尾。`,
     check: (parsed, visible) =>
       visible.includes(`${runtimeId.toUpperCase()}_FEISHU_TOOL_VISIBLE_OK`) &&
@@ -137,6 +279,7 @@ const cases = [
   },
   {
     id: "feishu-fetch-doc-mcp",
+    group: "feishu",
     prompt: `请必须调用当前 tools/list 中实际存在的 OpenClaw 飞书 MCP 工具读取这个文档：https://bytedance.larkoffice.com/docx/Oe9Udos8dovO53x3Zqlcgtlynoc。工具名通常带 mcp_openclaw_ 前缀；优先使用 stock OpenClaw 的 mcp_openclaw_feishu_doc 并传 action=read、doc_token=Oe9Udos8dovO53x3Zqlcgtlynoc；如果只看到 openclaw-lark 的 mcp_openclaw_feishu_fetch_doc，也可以调用它并传 doc_id 为原始 URL。不要读取容器内 feishu-fetch-doc/SKILL.md，不要运行 opencli，也不要用浏览器替代。读取成功后只回复 ${runtimeId.toUpperCase()}_FEISHU_OK；如果飞书工具被调用但返回需要授权或权限不足，请说明具体错误并以 ${runtimeId.toUpperCase()}_FEISHU_AUTH_REQUIRED 结尾；如果没有任何飞书工具可用，请说明具体原因并以 ${runtimeId.toUpperCase()}_FEISHU_DIAG 结尾。`,
     check: (parsed, visible) =>
       visible.includes(`${runtimeId.toUpperCase()}_FEISHU_OK`) &&
@@ -148,6 +291,7 @@ const cases = [
   },
   {
     id: "autoskill-create",
+    group: "autoskill",
     before: () => rmSync(autoSkillDir, { recursive: true, force: true }),
     prompt: `请使用 Hermes runtime 的 autoskill/skill_manage 能力创建一个新的 autoskill，名称必须是 ${autoSkillName}。SKILL.md 必须包含 frontmatter name: ${autoSkillName}，description 中包含 real autoskill regression，并且正文包含 ${runtimeId.toUpperCase()}_AUTOSKILL_CONTENT。完成后只回复 ${runtimeId.toUpperCase()}_AUTOSKILL_OK。`,
     check: (parsed, visible) => {
@@ -162,6 +306,7 @@ const cases = [
   },
   {
     id: "skillimprove-update",
+    group: "autoskill",
     before: () => {
       rmSync(improveSkillDir, { recursive: true, force: true });
       mkdirSync(improveSkillDir, { recursive: true });
@@ -249,14 +394,24 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function runCaseAttempt(testCase, attempt) {
-  if (attempt === 1) {
-    testCase.before?.();
+function resolveCaseSessionId(testCase, attempt, iteration) {
+  if (typeof testCase.sessionId === "function") {
+    return testCase.sessionId({ attempt, iteration });
   }
-  const sessionId = `${runtimeId}-real-${testCase.id}-a${attempt}-${Date.now()}`;
+  if (typeof testCase.sessionId === "string" && testCase.sessionId.trim()) {
+    return testCase.sessionId;
+  }
+  return `${runtimeId}-real-${testCase.id}-i${iteration}-a${attempt}-${Date.now()}`;
+}
+
+async function runCaseAttempt(testCase, attempt, iteration) {
+  if (attempt === 1) {
+    testCase.before?.({ attempt, iteration });
+  }
+  const sessionId = resolveCaseSessionId(testCase, attempt, iteration);
   const routeTarget = `${routeBase}${String(results.length + 1).padStart(4, "0")}${String(attempt).padStart(2, "0")}`;
-  const stderrPath = join(outDir, `${testCase.id}.attempt-${attempt}.stderr.txt`);
-  const stdoutPath = join(outDir, `${testCase.id}.attempt-${attempt}.stdout.txt`);
+  const stderrPath = join(outDir, `${testCase.id}.iteration-${iteration}.attempt-${attempt}.stderr.txt`);
+  const stdoutPath = join(outDir, `${testCase.id}.iteration-${iteration}.attempt-${attempt}.stdout.txt`);
   let stderr = "";
   let stdout = "";
   let parsed = null;
@@ -273,7 +428,7 @@ async function runCaseAttempt(testCase, attempt) {
       routeTarget,
       "--session-id",
       sessionId,
-      ...(modelOverride ? ["--model", modelOverride] : []),
+      ...(effectiveModelOverride ? ["--model", effectiveModelOverride] : []),
       "--message",
       testCase.prompt,
       "--json",
@@ -350,6 +505,8 @@ async function runCaseAttempt(testCase, attempt) {
     runtimeId,
     agentId,
     caseId: testCase.id,
+    group: testCase.group ?? "default",
+    iteration,
     attempt,
     sessionId,
     routeTarget,
@@ -372,10 +529,10 @@ async function runCaseAttempt(testCase, attempt) {
   return record;
 }
 
-async function runCase(testCase) {
+async function runCase(testCase, iteration) {
   const attempts = [];
   for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
-    const record = await runCaseAttempt(testCase, attempt);
+    const record = await runCaseAttempt(testCase, attempt, iteration);
     attempts.push(record);
     if (record.ok || attempt > retries || !shouldRetry(record)) {
       return {
@@ -399,16 +556,56 @@ async function runCase(testCase) {
 }
 
 const results = [];
-for (const testCase of cases) {
-  if (selectedCaseIds.size > 0 && !selectedCaseIds.has(testCase.id)) {
-    continue;
+for (let iteration = 1; iteration <= repeat; iteration += 1) {
+  for (const testCase of cases) {
+    if (selectedCaseIds.size > 0 && !selectedCaseIds.has(testCase.id)) {
+      continue;
+    }
+    console.error(`[regression] start iteration=${iteration}/${repeat} ${testCase.id}`);
+    const record = await runCase(testCase, iteration);
+    results.push(record);
+    writeFileSync(join(outDir, "results.json"), JSON.stringify(results, null, 2));
+    console.error(`[regression] done iteration=${iteration}/${repeat} ${testCase.id} ok=${record.ok} durationMs=${record.durationMs} signal=${record.process.signal ?? "none"}`);
   }
-  console.error(`[regression] start ${testCase.id}`);
-  const record = await runCase(testCase);
-  results.push(record);
-  writeFileSync(join(outDir, "results.json"), JSON.stringify(results, null, 2));
-  console.error(`[regression] done ${testCase.id} ok=${record.ok} durationMs=${record.durationMs} signal=${record.process.signal ?? "none"}`);
 }
+
+function percentile(values, p) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.ceil((p / 100) * sorted.length) - 1);
+  return sorted[Math.max(0, index)];
+}
+
+function buildStats(rows) {
+  const durations = rows.map((row) => row.durationMs).filter((value) => Number.isFinite(value));
+  return {
+    total: rows.length,
+    passed: rows.filter((row) => row.ok).length,
+    diagnostics: rows.filter((row) => row.diagnostic).length,
+    successRate: rows.length ? rows.filter((row) => row.ok).length / rows.length : 0,
+    avgDurationMs: durations.length ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length) : 0,
+    p50DurationMs: percentile(durations, 50),
+    p95DurationMs: percentile(durations, 95),
+    minDurationMs: durations.length ? Math.min(...durations) : 0,
+    maxDurationMs: durations.length ? Math.max(...durations) : 0,
+  };
+}
+
+function groupBy(rows, keyFn) {
+  const grouped = {};
+  for (const row of rows) {
+    const key = keyFn(row);
+    (grouped[key] ??= []).push(row);
+  }
+  return grouped;
+}
+
+const byCase = Object.fromEntries(
+  Object.entries(groupBy(results, (row) => row.caseId)).map(([key, rows]) => [key, buildStats(rows)]),
+);
+const byGroup = Object.fromEntries(
+  Object.entries(groupBy(results, (row) => row.group ?? "default")).map(([key, rows]) => [key, buildStats(rows)]),
+);
 
 const summary = {
   runId,
@@ -417,8 +614,9 @@ const summary = {
   agentId,
   expectProvider,
   expectModel,
-  modelOverride: modelOverride || null,
+  modelOverride: effectiveModelOverride || null,
   retries,
+  repeat,
   total: results.length,
   passed: results.filter((result) => result.ok).length,
   diagnostics: results.filter((result) => result.diagnostic).length,
@@ -429,6 +627,8 @@ const summary = {
     return acc;
   }, {}),
   avgDurationMs: Math.round(results.reduce((sum, result) => sum + result.durationMs, 0) / Math.max(results.length, 1)),
+  byCase,
+  byGroup,
   results,
 };
 writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2));

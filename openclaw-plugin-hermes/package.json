@@ -30,7 +30,7 @@
     "test:runtime:projection": "npx tsx scripts/test-projection.ts",
     "test:runtime:regression": "npx tsx scripts/test-runtime-regression.ts",
     "test:runtime:gateway": "npx tsx scripts/test-gateway-attempt-full.ts",
-    "test:runtime:full": "npx tsx scripts/test-runtime-full.ts"
+    "test:runtime:full": "npx tsx scripts/test-hybrid-runtime.ts"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
