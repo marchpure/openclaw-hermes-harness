@@ -127,6 +127,7 @@ async function withMockAcpServer<T>(
   fn: (port: number, requests: Array<Record<string, unknown>>) => Promise<T>,
   options?: {
     closeOnInitialize?: boolean;
+    closeAfterInitializeResponse?: boolean;
     omitPromptResponse?: boolean;
   },
 ): Promise<T> {
@@ -157,6 +158,12 @@ async function withMockAcpServer<T>(
               : method === "session/resume"
                 ? { session_id: "mock-session" }
                 : {};
+        if (method === "initialize" && options?.closeAfterInitializeResponse) {
+          socket.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`, () => {
+            socket.end();
+          });
+          continue;
+        }
         if (method === "session/prompt" && options?.omitPromptResponse) {
           socket.write(`${JSON.stringify({
             jsonrpc: "2.0",
@@ -346,13 +353,57 @@ async function testAcpInitializeDisconnect(): Promise<Record<string, unknown>> {
   }, { closeOnInitialize: true });
 }
 
+async function testAcpInitializeResponseThenDisconnect(): Promise<Record<string, unknown>> {
+  return await withMockAcpServer(async (port, requests) => {
+    const config: HermesPluginConfig = {
+      ...DEFAULT_CONFIG,
+      tcpPort: port,
+      timeout: 10,
+    };
+    const client = new HermesAcpClient(config);
+
+    let rejectedMessage = "";
+    try {
+      await client.start();
+    } catch (err) {
+      rejectedMessage = err instanceof Error ? err.message : String(err);
+    }
+    await client.close();
+
+    assert(
+      rejectedMessage === "TCP connection closed during ACP initialize",
+      "initialize response followed by disconnect should not mark client connected",
+    );
+    assert(client.isConnected === false, "client should remain disconnected after post-initialize close");
+    assert(
+      requests.some((request) => request.method === "initialize"),
+      "mock server should receive initialize before closing",
+    );
+
+    return {
+      rejectedMessage,
+      requestMethods: requests.map((request) => request.method),
+      connected: client.isConnected,
+    };
+  }, { closeAfterInitializeResponse: true });
+}
+
 async function main() {
   const projection = await testSnapshotProjection();
   const acp = await testAcpSessionOptions();
   const idleFinalize = await testAcpPromptIdleFinalize();
   const preAborted = await testAcpPromptPreAbortedSignal();
   const initializeDisconnect = await testAcpInitializeDisconnect();
-  console.log(JSON.stringify({ ok: true, projection, acp, idleFinalize, preAborted, initializeDisconnect }, null, 2));
+  const initializeResponseThenDisconnect = await testAcpInitializeResponseThenDisconnect();
+  console.log(JSON.stringify({
+    ok: true,
+    projection,
+    acp,
+    idleFinalize,
+    preAborted,
+    initializeDisconnect,
+    initializeResponseThenDisconnect,
+  }, null, 2));
 }
 
 main().catch((error) => {

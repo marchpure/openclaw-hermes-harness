@@ -36,6 +36,7 @@ const defaultLogger: Logger = {
 };
 
 const STREAM_IDLE_FINALIZE_MS = 2500;
+const ACP_INITIALIZE_STABILITY_MS = 25;
 
 type AcpEnvVariable = { name: string; value: string };
 type AcpMcpServer =
@@ -85,6 +86,10 @@ export class HermesAcpClient extends EventEmitter {
       client_info: { name: "openclaw-plugin-hermes", version: "1.0.0" },
       client_capabilities: {},
     });
+    await new Promise<void>((resolve) => setTimeout(resolve, ACP_INITIALIZE_STABILITY_MS));
+    if (!this.socket || this.socket.destroyed) {
+      throw new Error("TCP connection closed during ACP initialize");
+    }
 
     this.connected = true;
     this.logger.info(`ACP initialized (tcp): ${JSON.stringify(initResult)}`);
