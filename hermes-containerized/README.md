@@ -32,7 +32,7 @@ hermes-containerized/
 # 1. 初始化项目
 make setup
 
-# 2. 编辑 .env，填入 API Key
+# 2. 编辑 .env，填入 API Key 和 Base URL
 vim .env
 
 # 3. 构建镜像
@@ -50,11 +50,14 @@ make logs
 
 ## 模型配置
 
-默认使用火山方舟 ARK 端点的 MiniMax-M2.5 模型：
+支持国内与海外火山方舟 ARK / BytePlus 端点：
 
-- **API Base**: `https://ark.cn-beijing.volces.com/api/coding/v3`
+- **国内 ARK**: `https://ark.cn-beijing.volces.com/api/coding/v3`
+- **海外 ARK**: `https://ark.ap-southeast.bytepluses.com/api/coding/v3`
 - **Model ID**: `minimax-m2.5`
 - **协议**: OpenAI-compatible
+
+如果你是通过仓库根目录的 `scripts/hermes-install.sh` 安装，并且 OpenClaw 已经配置好 provider、model、apiKey 和 baseUrl，安装脚本会直接复用 OpenClaw 中的配置。
 
 首次启动后，编辑 `data/config.yaml` 修改模型配置：
 

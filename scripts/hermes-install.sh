@@ -6,18 +6,13 @@
 
 set -Eeuo pipefail
 
-# ─── 地域检测 ──────────────────────────────────────────────────────────────────
+# ─── 站点 / 地域 / TOS 配置 ───────────────────────────────────────────────────
+METADATA_BASE_URL="${METADATA_BASE_URL:-http://100.96.0.96}"
+HERMES_SITE="${HERMES_SITE:-}"
 HERMES_REGION="${HERMES_REGION:-}"
-if [[ -z "${HERMES_REGION}" ]]; then
-    HERMES_REGION=$(curl --connect-timeout 5 --max-time 10 -s "http://100.96.0.96/latest/region_id" || echo "")
-fi
-if [[ -z "${HERMES_REGION}" ]]; then
-    HERMES_REGION="cn-beijing"
-fi
-
-# ─── 配置 ────────────────────────────────────────────────────────────────────
-TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-image/hermes-agent-image.tar.gz}"
-TOS_PLUGIN_URL="${TOS_PLUGIN_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-plugin/openclaw-plugin-hermes.tar.gz}"
+TOS_BASE="${TOS_BASE:-}"
+TOS_IMAGE_URL="${TOS_IMAGE_URL:-}"
+TOS_PLUGIN_URL="${TOS_PLUGIN_URL:-}"
 CONTAINER_NAME="hermes-agent"
 DATA_DIR="/opt/hermes-data"
 ACP_PORT=3100
@@ -95,6 +90,75 @@ log_warn()  { log_line "WARN" "${YELLOW}" "$*"; }
 log_error() { log_line "ERROR" "${RED}" "$*"; }
 log_step()  { printf '\n%b%s [STEP]%b %s\n' "${CYAN}" "$(timestamp)" "${NC}" "$1"; }
 die()       { log_error "$@"; exit 1; }
+
+fetch_metadata() {
+    local path="$1"
+    curl --connect-timeout 5 --max-time 10 -s "${METADATA_BASE_URL}${path}" || echo "unknown"
+}
+
+detect_site_and_tos_config() {
+    local site_from_env=false region_from_env=false tos_base_from_env=false
+    local image_url_from_env=false plugin_url_from_env=false
+
+    [[ -n "${HERMES_SITE}" ]] && site_from_env=true
+    [[ -n "${HERMES_REGION}" ]] && region_from_env=true
+    [[ -n "${TOS_BASE}" ]] && tos_base_from_env=true
+    [[ -n "${TOS_IMAGE_URL}" ]] && image_url_from_env=true
+    [[ -n "${TOS_PLUGIN_URL}" ]] && plugin_url_from_env=true
+
+    if [[ -z "${HERMES_SITE}" ]]; then
+        HERMES_SITE="$(fetch_metadata "/volcstack/latest/site_name")"
+    fi
+    if [[ -z "${HERMES_SITE}" ]]; then
+        HERMES_SITE="unknown"
+    fi
+
+    if [[ -z "${HERMES_REGION}" ]]; then
+        HERMES_REGION="$(fetch_metadata "/latest/region_id")"
+    fi
+    if [[ -z "${HERMES_REGION}" || "${HERMES_REGION}" == "unknown" ]]; then
+        if [[ "${HERMES_SITE}" == "BytePlus" ]]; then
+            HERMES_REGION="ap-southeast-1"
+        else
+            HERMES_REGION="cn-beijing"
+        fi
+    fi
+
+    if [[ -z "${TOS_BASE}" ]]; then
+        local user_data
+        user_data="$(fetch_metadata "/latest/user_data")"
+
+        if [[ "${HERMES_SITE}" == "BytePlus" ]]; then
+            if [[ "${user_data}" == *"stg.tos"* ]]; then
+                TOS_BASE="https://bp-scarif-${HERMES_REGION}-stg.tos-${HERMES_REGION}.ibytepluses.com"
+            elif [[ "${user_data}" == *"ppe.tos"* ]]; then
+                TOS_BASE="https://bp-scarif-${HERMES_REGION}-ppe.tos-${HERMES_REGION}.ibytepluses.com"
+            else
+                TOS_BASE="https://bp-scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ibytepluses.com"
+            fi
+        else
+            if [[ "${user_data}" == *"arkclaw-dev"* ]]; then
+                TOS_BASE="https://arkclaw-dev.tos-${HERMES_REGION}.ivolces.com"
+            elif [[ "${user_data}" == *"ppe.tos"* ]]; then
+                TOS_BASE="https://scarif-${HERMES_REGION}-ppe.tos-${HERMES_REGION}.ivolces.com"
+            else
+                TOS_BASE="https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com"
+            fi
+        fi
+    fi
+
+    if [[ -z "${TOS_IMAGE_URL}" ]]; then
+        TOS_IMAGE_URL="${TOS_BASE}/arkclaw/hermes/hermes-image/hermes-agent-image.tar.gz"
+    fi
+    if [[ -z "${TOS_PLUGIN_URL}" ]]; then
+        TOS_PLUGIN_URL="${TOS_BASE}/arkclaw/hermes/hermes-plugin/openclaw-plugin-hermes.tar.gz"
+    fi
+
+    log_info "站点检测: site=${HERMES_SITE} (env=${site_from_env}) | region=${HERMES_REGION} (env=${region_from_env})"
+    log_info "TOS 基址: ${TOS_BASE} (env=${tos_base_from_env})"
+    log_info "镜像地址: ${TOS_IMAGE_URL} (env=${image_url_from_env})"
+    log_info "插件地址: ${TOS_PLUGIN_URL} (env=${plugin_url_from_env})"
+}
 
 # ─── 临时文件清理 trap ────────────────────────────────────────────────────────
 TEMP_FILES=()
@@ -1246,6 +1310,8 @@ main() {
         do_cleanup
         exit 0
     fi
+
+    detect_site_and_tos_config
 
     echo -e "${CYAN}  Hermes Agent 一键部署 / 安全升级${NC}"
     echo ""

@@ -73,7 +73,7 @@ vim .env
 | 变量 | 说明 |
 |------|------|
 | `OPENAI_API_KEY` | 火山方舟 ARK API Key |
-| `OPENAI_BASE_URL` | API 端点 (默认 `https://ark.cn-beijing.volces.com/api/coding/v3`) |
+| `OPENAI_BASE_URL` | API 端点，按站点显式配置：国内 `https://ark.cn-beijing.volces.com/api/coding/v3`，海外 `https://ark.ap-southeast.bytepluses.com/api/coding/v3` |
 
 可选项：`OPENROUTER_API_KEY`、`GOOGLE_API_KEY`、`MINIMAX_API_KEY`
 
@@ -96,6 +96,22 @@ make up-acp   # 启动 ACP TCP 模式 (端口 3100)
 make test     # 健康检查
 make logs     # 查看日志
 ```
+
+### 安装脚本站点适配
+
+`scripts/hermes-install.sh` 已支持根据元数据自动探测站点并选择对应的 TOS 下载域名：
+
+- 国内站点默认使用 `ivolces.com`
+- 海外 `BytePlus` 站点默认使用 `ibytepluses.com`
+- 若未探测到地域，默认回退为 `BytePlus -> ap-southeast-1`、国内 -> `cn-beijing`
+
+如需手工覆盖，可显式传入以下环境变量：
+
+- `TOS_BASE`
+- `TOS_IMAGE_URL`
+- `TOS_PLUGIN_URL`
+- `HERMES_SITE`
+- `HERMES_REGION`
 
 ## 运行模式
 
@@ -125,11 +141,14 @@ make shell-acp # 进入容器
 
 ## 模型配置
 
-默认使用火山方舟 ARK 端点的 MiniMax-M2.5 模型：
+支持国内与海外火山方舟 ARK / BytePlus 端点：
 
-- **API Base**: `https://ark.cn-beijing.volces.com/api/coding/v3`
+- **国内 ARK**: `https://ark.cn-beijing.volces.com/api/coding/v3`
+- **海外 ARK**: `https://ark.ap-southeast.bytepluses.com/api/coding/v3`
 - **Model ID**: `minimax-m2.5`
 - **协议**: OpenAI-compatible
+
+如果你通过 `scripts/hermes-install.sh` 安装，且 OpenClaw 已经配置好 provider、model、apiKey 和 baseUrl，安装脚本会优先复用 OpenClaw 中的模型配置。
 
 首次启动后，编辑 `data/config.yaml` 修改模型配置：
 
