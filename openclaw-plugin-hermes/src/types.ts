@@ -255,6 +255,10 @@ export interface HermesPluginConfig {
     maxAgeHours: number;
     maxCount: number;
   };
+  otel?: {
+    endpoint?: string;
+    serviceName?: string;
+  };
 }
 
 export const DEFAULT_CONFIG: HermesPluginConfig = {

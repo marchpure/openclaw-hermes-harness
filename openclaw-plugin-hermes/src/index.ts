@@ -15,9 +15,23 @@ import { createHermesAgentHarness } from "./harness.js";
 import { checkHealth, formatHealthReport } from "./health.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
 import { buildHermesProvider } from "./provider.js";
+import {
+  cancelAllSessions,
+  cancelSession,
+  generateDispatchId,
+  getActiveSessions,
+  registerSession,
+  unregisterSession,
+} from "./session-registry.js";
 import type { HermesPluginConfig, DispatchRequest } from "./types.js";
 import { cleanupExecEnvs } from "./execenv-builder.js";
 import { registerHostBackedSkillTools } from "./host-skill-tools.js";
+import {
+  extractApmplusContext,
+  removeApmplusContext,
+  shutdownProvider,
+  traceDispatch,
+} from "./observability/index.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
@@ -115,27 +129,35 @@ const plugin = {
         required: ["task"],
       },
 
-      async execute(_id: string, params: Record<string, unknown>) {
-        const task = params.task as string;
+      /**
+       * OpenClaw passes (toolCallId, params, signal?, onUpdate?). Preserve the
+       * existing dispatch behavior: strip APM transport metadata, trace the
+       * dispatch, and forward cancellation into the Hermes ACP session.
+       */
+      async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
+        const apmplusCtx = extractApmplusContext(params);
+        const cleanParams = removeApmplusContext(params);
+
+        const task = cleanParams.task as string;
         if (!task?.trim()) {
           return { content: [{ type: "text", text: "Error: task is required" }] };
         }
 
         const request: DispatchRequest = {
           task,
-          model: params.model as string | undefined,
-          timeout: params.timeout as number | undefined,
+          model: cleanParams.model as string | undefined,
+          timeout: cleanParams.timeout as number | undefined,
         };
 
         // Apply overrides
-        if (params.contextLevel) {
-          request.contextLevel = params.contextLevel as DispatchRequest["contextLevel"];
+        if (cleanParams.contextLevel) {
+          request.contextLevel = cleanParams.contextLevel as DispatchRequest["contextLevel"];
         }
-        if (params.writeback) {
-          request.writeback = params.writeback as DispatchRequest["writeback"];
+        if (cleanParams.writeback) {
+          request.writeback = cleanParams.writeback as DispatchRequest["writeback"];
         }
-        if (params.credentialScope || params.credentialKeys) {
-          const scopeStr = (params.credentialScope as string) ?? "C1";
+        if (cleanParams.credentialScope || cleanParams.credentialKeys) {
+          const scopeStr = (cleanParams.credentialScope as string) ?? "C1";
           if (scopeStr === "C0") {
             request.credentialScope = { mode: "none" };
           } else if (scopeStr === "C2") {
@@ -143,36 +165,71 @@ const plugin = {
           } else {
             request.credentialScope = {
               mode: "specified",
-              keys: (params.credentialKeys as string[]) ?? [],
+              keys: (cleanParams.credentialKeys as string[]) ?? [],
             };
           }
         }
 
         try {
           // 单次调用可覆盖 enableLayeredProtocol 配置
-          const effectiveConfig = params.enableLayeredProtocol !== undefined
-            ? { ...config, enableLayeredProtocol: params.enableLayeredProtocol as boolean }
+          const effectiveConfig = cleanParams.enableLayeredProtocol !== undefined
+            ? { ...config, enableLayeredProtocol: cleanParams.enableLayeredProtocol as boolean }
             : config;
 
-          const result = await dispatchToHermes(request, {
-            config: effectiveConfig,
-            workspaceDir,
-            logger,
+          const dispatchId = generateDispatchId();
+          const abortController = new AbortController();
+          registerSession(dispatchId, {
+            abortController,
+            task,
+            startTime: Date.now(),
           });
 
-          const meta = [
-            `Strategy: ${formatStrategy(result.strategy)}`,
-            `Duration: ${(result.duration / 1000).toFixed(1)}s`,
-            `Tokens: ${result.tokensUsed}`,
-            `Status: ${result.status}`,
-          ].join(" | ");
+          const upstreamAbortHandler = () => abortController.abort();
+          if (signal) {
+            if (signal.aborted) {
+              abortController.abort();
+            } else {
+              signal.addEventListener("abort", upstreamAbortHandler, { once: true });
+            }
+          }
 
-          return {
-            content: [
-              { type: "text", text: result.result },
-              { type: "text", text: `\n---\n_${meta}_` },
-            ],
-          };
+          try {
+            const result = await traceDispatch(
+              {
+                endpoint: config.otel?.endpoint,
+                apmplusCtx,
+                task,
+                params: cleanParams,
+                defaultModel: config.defaultModel,
+                serviceName: config.otel?.serviceName,
+              },
+              () =>
+                dispatchToHermes(request, {
+                  config: effectiveConfig,
+                  workspaceDir,
+                  logger,
+                  signal: abortController.signal,
+                  allowUserDetailInfoReport: apmplusCtx?.allowUserDetailInfoReport === true,
+                }),
+            );
+
+            const meta = [
+              `Strategy: ${formatStrategy(result.strategy)}`,
+              `Duration: ${(result.duration / 1000).toFixed(1)}s`,
+              `Tokens: ${result.tokensUsed}`,
+              `Status: ${result.status}`,
+            ].join(" | ");
+
+            return {
+              content: [
+                { type: "text", text: result.result },
+                { type: "text", text: `\n---\n_${meta}_` },
+              ],
+            };
+          } finally {
+            signal?.removeEventListener("abort", upstreamAbortHandler);
+            unregisterSession(dispatchId);
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger.error(`hermes_dispatch failed: ${msg}`);
@@ -248,8 +305,80 @@ const plugin = {
       },
     });
 
+    // ── Tool: hermes_cancel ────────────────────────────────────────────
+
+    api.registerTool({
+      name: "hermes_cancel",
+      description: [
+        "Cancel a running Hermes task. Sends session/cancel to the Hermes container",
+        "to stop the currently executing task.",
+        "",
+        "With no parameters: cancels ALL active tasks.",
+        "With dispatchId: cancels only the specified task.",
+        "",
+        "Use hermes_cancel (no params) when the user wants to abort all running Hermes work.",
+      ].join("\n"),
+      parameters: {
+        type: "object",
+        properties: {
+          dispatchId: {
+            type: "string",
+            description: "The specific dispatch ID to cancel. Omit to cancel all active tasks.",
+          },
+        },
+      },
+
+      async execute(_id: string, params: Record<string, unknown>) {
+        const dispatchId = params.dispatchId as string | undefined;
+        const sessions = getActiveSessions();
+
+        if (sessions.length === 0) {
+          return {
+            content: [{ type: "text", text: "No active Hermes tasks to cancel." }],
+          };
+        }
+
+        if (dispatchId) {
+          const found = cancelSession(dispatchId);
+          if (found) {
+            logger.info(`Cancelled Hermes task: ${dispatchId}`);
+            return {
+              content: [{ type: "text", text: `Cancelled task ${dispatchId}.` }],
+            };
+          }
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Task ${dispatchId} not found. Active tasks: ${sessions.map((session) => session.id).join(", ")}`,
+              },
+            ],
+          };
+        }
+
+        const count = cancelAllSessions();
+        logger.info(`Cancelled all ${count} active Hermes task(s)`);
+        return {
+          content: [{ type: "text", text: `Cancelled ${count} active Hermes task(s).` }],
+        };
+      },
+    });
+
+    const cleanupHandler = () => {
+      const count = cancelAllSessions();
+      if (count > 0) {
+        logger.info(`Process signal received - cancelled ${count} active Hermes task(s)`);
+      }
+      void shutdownProvider().catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`Observability shutdown failed: ${msg}`);
+      });
+    };
+    process.once("SIGINT", cleanupHandler);
+    process.once("SIGTERM", cleanupHandler);
+
     logger.info(
-      "Hermes Agent plugin registered (provider, harness, and tools: hermes_dispatch, hermes_status, hermes_strategy, byted_web_search, computer_use)",
+      "Hermes Agent plugin registered (provider, harness, and tools: hermes_dispatch, hermes_status, hermes_strategy, hermes_cancel, byted_web_search, computer_use)",
     );
   },
 };

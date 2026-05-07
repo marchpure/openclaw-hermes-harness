@@ -145,6 +145,21 @@
           "maxCount": { "type": "number", "minimum": 1 }
         }
       },
+      "otel": {
+        "type": "object",
+        "description": "Optional OpenTelemetry export settings for Hermes dispatch tracing.",
+        "additionalProperties": false,
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "description": "OTLP HTTP base endpoint, for example http://localhost:4318"
+          },
+          "serviceName": {
+            "type": "string",
+            "description": "OpenTelemetry service.name override for Hermes dispatch spans"
+          }
+        }
+      },
       "transport": {
         "type": "string",
         "enum": [

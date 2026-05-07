@@ -102,6 +102,10 @@ export interface DispatcherOptions {
   logger?: Logger;
   /** Callback for W3 confirmation prompts */
   confirmAction?: (description: string) => Promise<boolean>;
+  /** External cancellation signal from OpenClaw tool execution. */
+  signal?: AbortSignal;
+  /** Controls whether user/task/tool details can be reported to OTEL. */
+  allowUserDetailInfoReport?: boolean;
 }
 
 /**
@@ -114,12 +118,16 @@ export async function dispatchToHermes(
   request: DispatchRequest,
   options: DispatcherOptions,
 ): Promise<DispatchResult> {
-  const { config, workspaceDir, logger } = options;
+  const { config, workspaceDir, logger, signal } = options;
   const startTime = Date.now();
+
+  if (signal?.aborted) {
+    return makeCancelledResult("Aborted before dispatch", inferDefaultStrategy(request, config), startTime);
+  }
 
   // 当分层协议关闭时，直接派发原始任务给 Hermes，跳过策略/上下文/凭证/回写
   if (!config.enableLayeredProtocol) {
-    return dispatchDirectly(request, config, workspaceDir, logger, startTime);
+    return dispatchDirectly(request, config, workspaceDir, logger, startTime, signal);
   }
 
   // ── Step 1: Determine Strategy ──────────────────────────────────────
@@ -212,25 +220,48 @@ export async function dispatchToHermes(
       logger,
     });
 
+    const abortHandler = () => {
+      logger?.info("Abort signal received - cancelling Hermes session");
+      void acpClient.cancel(sessionId).catch(() => {});
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        await acpClient.cancel(sessionId).catch(() => {});
+        return makeCancelledResult("Aborted before prompt", strategy, startTime);
+      }
+      signal.addEventListener("abort", abortHandler, { once: true });
+    }
+
     // Send the prompt
-    const timeout = (request.timeout ?? config.timeout) * 1000;
-    const result = await acpClient.prompt(promptText, sessionId, { timeout });
+    try {
+      const timeout = (request.timeout ?? config.timeout) * 1000;
+      const result = await acpClient.prompt(promptText, sessionId, { timeout, signal });
 
-    acpText = result.text;
-    acpEvents = result.events;
-    tokensUsed = result.usage?.total_tokens ?? 0;
-    const touchedSkillNames = extractTouchedSkillNames(acpEvents);
+      acpText = result.text;
+      acpEvents = result.events;
+      tokensUsed = result.usage?.total_tokens ?? 0;
+      const touchedSkillNames = extractTouchedSkillNames(acpEvents);
 
-    logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
-    await mirrorWorkspaceFromContainer(
-      config,
-      workspaceDir,
-      [],
-      execution.execEnv.runtimeExecEnvPath,
-      touchedSkillNames,
-    );
+      logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
+      await mirrorWorkspaceFromContainer(
+        config,
+        workspaceDir,
+        [],
+        execution.execEnv.runtimeExecEnvPath,
+        touchedSkillNames,
+      );
+    } finally {
+      signal?.removeEventListener("abort", abortHandler);
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+
+    if (signal?.aborted || msg.includes("aborted") || msg.includes("Prompt aborted")) {
+      logger?.info("Hermes task cancelled via abort signal");
+      return makeCancelledResult("Task cancelled", strategy, startTime);
+    }
+
     logger?.error(`Hermes execution failed: ${msg}`);
 
     // Check if it's a timeout
@@ -310,6 +341,46 @@ function makeTimeoutResult(
   };
 }
 
+function makeCancelledResult(
+  message: string,
+  strategy: StrategyTriple,
+  startTime: number,
+): DispatchResult {
+  return {
+    status: "cancelled",
+    result: message,
+    tokensUsed: 0,
+    duration: Date.now() - startTime,
+    strategy,
+  };
+}
+
+function inferDefaultStrategy(request: DispatchRequest, config: HermesPluginConfig): StrategyTriple {
+  if (request.explicitStrategy && request.contextLevel && request.credentialScope && request.writeback) {
+    return {
+      context: request.contextLevel,
+      credential: request.credentialScope,
+      writeback: request.writeback,
+      confidence: 1,
+      reasoning: "Explicit strategy provided by caller",
+    };
+  }
+  if (config.autoStrategy) {
+    const strategy = inferStrategy(request.task);
+    if (request.contextLevel) strategy.context = request.contextLevel;
+    if (request.credentialScope) strategy.credential = request.credentialScope;
+    if (request.writeback) strategy.writeback = request.writeback;
+    return strategy;
+  }
+  return {
+    context: request.contextLevel ?? config.defaultContextLevel,
+    credential: request.credentialScope ?? { mode: config.defaultCredentialScope },
+    writeback: request.writeback ?? config.defaultWriteback,
+    confidence: 0.5,
+    reasoning: "Using config defaults (autoStrategy disabled)",
+  };
+}
+
 /**
  * 直接派发模式：跳过分层协议，将原始 task 文本直接发送给 Hermes。
  * 不执行策略推断、上下文组装、凭证注入和结果回写。
@@ -320,6 +391,7 @@ async function dispatchDirectly(
   workspaceDir: string,
   logger: Logger | undefined,
   startTime: number,
+  signal?: AbortSignal,
 ): Promise<DispatchResult> {
   const bypassStrategy: StrategyTriple = {
     context: "L0",
@@ -337,6 +409,9 @@ async function dispatchDirectly(
   let bindingHash: string | null = null;
 
   try {
+    if (signal?.aborted) {
+      return makeCancelledResult("Aborted before direct dispatch", bypassStrategy, startTime);
+    }
     const execution = await prepareProjectedExecutionEnv({
       task: request.task,
       taskId: `task-${Date.now()}`,
@@ -358,8 +433,24 @@ async function dispatchDirectly(
       bindingHash: execution.sessionBindingHash,
       logger,
     });
+    const abortHandler = () => {
+      logger?.info("Abort signal received - cancelling direct Hermes session");
+      void acpClient.cancel(sessionId).catch(() => {});
+    };
+    if (signal) {
+      if (signal.aborted) {
+        await acpClient.cancel(sessionId).catch(() => {});
+        return makeCancelledResult("Aborted before direct prompt", bypassStrategy, startTime);
+      }
+      signal.addEventListener("abort", abortHandler, { once: true });
+    }
     const timeout = (request.timeout ?? config.timeout) * 1000;
-    const result = await acpClient.prompt(request.task, sessionId, { timeout });
+    let result;
+    try {
+      result = await acpClient.prompt(request.task, sessionId, { timeout, signal });
+    } finally {
+      signal?.removeEventListener("abort", abortHandler);
+    }
 
     acpText = result.text;
     tokensUsed = result.usage?.total_tokens ?? 0;
@@ -368,6 +459,12 @@ async function dispatchDirectly(
     await mirrorWorkspaceFromContainer(config, workspaceDir, [], execution.execEnv.runtimeExecEnvPath, []);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+
+    if (signal?.aborted || msg.includes("aborted") || msg.includes("Prompt aborted")) {
+      logger?.info("Direct Hermes task cancelled via abort signal");
+      return makeCancelledResult("Task cancelled", bypassStrategy, startTime);
+    }
+
     logger?.error(`Direct dispatch failed: ${msg}`);
 
     if (msg.includes("timed out")) {

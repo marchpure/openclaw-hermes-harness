@@ -46,6 +46,7 @@ function readHermesAcpPartialConfig(
   const skillProjection = readObject(input.skillProjection);
   const execEnvCleanup = readObject(input.execEnvCleanup);
   const mcpBridge = readObject(input.mcpBridge);
+  const otel = readObject(input.otel);
   return {
     ...(readNonEmptyString(input.hermesContainerName)
       ? { hermesContainerName: readNonEmptyString(input.hermesContainerName) }
@@ -141,6 +142,18 @@ function readHermesAcpPartialConfig(
               DEFAULT_CONFIG.execEnvCleanup.maxAgeHours,
             maxCount:
               readPositiveNumber(execEnvCleanup.maxCount) ?? DEFAULT_CONFIG.execEnvCleanup.maxCount,
+          },
+        }
+      : {}),
+    ...(otel
+      ? {
+          otel: {
+            ...(readNonEmptyString(otel.endpoint)
+              ? { endpoint: readNonEmptyString(otel.endpoint) }
+              : {}),
+            ...(readNonEmptyString(otel.serviceName)
+              ? { serviceName: readNonEmptyString(otel.serviceName) }
+              : {}),
           },
         }
       : {}),
