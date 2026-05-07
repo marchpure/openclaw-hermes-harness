@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+ACP_TCP_STREAM_LIMIT = int(os.environ.get("ACP_TCP_STREAM_LIMIT", str(64 * 1024 * 1024)))
+
 # Ensure Hermes source is on sys.path
 project_root = str(Path("/opt/hermes"))
 if project_root not in sys.path:
@@ -460,7 +462,7 @@ async def handle_client(
 
 
 async def run_server(host: str, port: int) -> None:
-    server = await asyncio.start_server(handle_client, host, port)
+    server = await asyncio.start_server(handle_client, host, port, limit=ACP_TCP_STREAM_LIMIT)
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
     logger.info("ACP TCP server listening on %s", addrs)
 

@@ -37,6 +37,7 @@ const defaultLogger: Logger = {
 
 const STREAM_IDLE_FINALIZE_MS = 2500;
 const ACP_INITIALIZE_STABILITY_MS = 25;
+const ACP_CLOSE_TIMEOUT_MS = 1000;
 
 type AcpEnvVariable = { name: string; value: string };
 type AcpMcpServer =
@@ -57,6 +58,7 @@ export class HermesAcpClient extends EventEmitter {
   private sessionId: string | null = null;
   private stderr = "";
   private connected = false;
+  private closing = false;
   private logger: Logger;
 
   constructor(
@@ -76,6 +78,7 @@ export class HermesAcpClient extends EventEmitter {
     if (this.connected) {
       throw new Error("ACP client already connected");
     }
+    this.closing = false;
 
     await this.startTcp();
 
@@ -142,10 +145,11 @@ export class HermesAcpClient extends EventEmitter {
 
       this.socket.on("close", () => {
         const wasConnected = this.connected;
+        const wasClosing = this.closing;
         this.connected = false;
         this.logger.info("TCP connection closed");
-        this.rejectAllPending(new Error("TCP connection closed"));
-        if (wasConnected) {
+        this.rejectAllPending(new Error(wasClosing ? "ACP client closed" : "TCP connection closed"));
+        if (wasConnected && !wasClosing) {
           this.emit("exit", { code: null, signal: null });
         }
       });
@@ -374,9 +378,10 @@ export class HermesAcpClient extends EventEmitter {
    * Close the ACP connection.
    */
   async close(): Promise<void> {
+    this.closing = true;
     if (this.sessionId) {
       try {
-        await this.sendRequestResult("session/close", { session_id: this.sessionId });
+        await this.sendRequest("session/close", { session_id: this.sessionId }, ACP_CLOSE_TIMEOUT_MS).promise;
       } catch {
         // Best-effort
       }
