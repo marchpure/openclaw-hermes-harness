@@ -418,7 +418,9 @@ export function serializeProjectedContextForPrompt(
       ...(exposedSkills.length > 0
         ? [
             `Projected OpenClaw skill files:`,
-            ...exposedSkills.map((skill) => `- ${skill.name}: ${skill.projectedPath ?? "(path unavailable)"}`),
+            ...exposedSkills
+              .filter((skill) => skill.placement === "projected-local" || skill.placement === "container-env-required")
+              .map((skill) => `- ${skill.name}: ${skill.projectedPath ?? "(path unavailable)"}`),
           ]
         : []),
     ].join("\n"),

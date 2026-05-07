@@ -299,6 +299,9 @@ export const DEFAULT_CONFIG: HermesPluginConfig = {
       "feishu-troubleshoot",
       "browser",
       "browser-use",
+      "computer-use",
+      "byted-web-search",
+      "web_search",
     ],
     containerEnvSkillNames: [],
     alwaysExposeSkillNames: [

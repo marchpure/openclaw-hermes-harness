@@ -34,10 +34,45 @@ export function readHermesPluginConfig(value: unknown): HermesPluginConfig {
 
 export function resolveHermesAcpConfig(pluginConfig?: unknown): HermesAcpPluginConfig {
   const parsed = readHermesPluginConfig(pluginConfig);
+  const partial = readHermesAcpPartialConfig(parsed);
+  const mergedSkillProjection = {
+    ...DEFAULT_CONFIG.skillProjection,
+    ...(partial.skillProjection ?? {}),
+    hostBackedDenylist: uniqueStrings([
+      ...DEFAULT_CONFIG.skillProjection.hostBackedDenylist,
+      ...(partial.skillProjection?.hostBackedDenylist ?? []),
+    ]),
+    hostBackedSkillNames: uniqueStrings([
+      ...DEFAULT_CONFIG.skillProjection.hostBackedSkillNames,
+      ...(partial.skillProjection?.hostBackedSkillNames ?? []),
+    ]),
+    containerEnvSkillNames: uniqueStrings([
+      ...DEFAULT_CONFIG.skillProjection.containerEnvSkillNames,
+      ...(partial.skillProjection?.containerEnvSkillNames ?? []),
+    ]),
+    alwaysExposeSkillNames: uniqueStrings([
+      ...DEFAULT_CONFIG.skillProjection.alwaysExposeSkillNames,
+      ...(partial.skillProjection?.alwaysExposeSkillNames ?? []),
+    ]),
+  };
   return {
     ...DEFAULT_CONFIG,
-    ...readHermesAcpPartialConfig(parsed),
+    ...partial,
+    skillProjection: mergedSkillProjection,
   };
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    result.push(trimmed);
+  }
+  return result;
 }
 
 function readHermesAcpPartialConfig(
