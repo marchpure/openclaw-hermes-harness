@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access } from "node:fs/promises";
+import { access, readFile, readdir, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join } from "node:path";
 import type { HermesPluginConfig } from "./types.js";
@@ -15,6 +15,7 @@ type ToolResult = {
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_CHARS = 20_000;
 const OPENCLAW_WORKSPACE_SKILLS_DIR = "/root/.openclaw/workspace/skills";
+const CUA_RUNS_DIR = "/root/.cua/runs";
 const SENSITIVE_ENV_KEYS = [
   "WEB_SEARCH_API_KEY",
   "VOLCENGINE_ACCESS_KEY",
@@ -113,6 +114,173 @@ async function runCommand(params: {
       resolve({ exitCode, signal, stdout, stderr });
     });
   });
+}
+
+function safeJsonParse(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function valueAtPath(obj: unknown, path: string[]): unknown {
+  let current = obj;
+  for (const part of path) {
+    if (!current || typeof current !== "object" || !(part in current)) return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function shortJsonValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+async function newestCuaRunDir(sinceMs: number): Promise<string | undefined> {
+  let entries: string[] = [];
+  try {
+    entries = await readdir(CUA_RUNS_DIR);
+  } catch {
+    return undefined;
+  }
+  let newest: { dir: string; mtimeMs: number } | undefined;
+  for (const entry of entries) {
+    const dir = join(CUA_RUNS_DIR, entry);
+    try {
+      const info = await stat(join(dir, "run.meta.json"));
+      if (info.mtimeMs + 5_000 < sinceMs) continue;
+      if (!newest || info.mtimeMs > newest.mtimeMs) newest = { dir, mtimeMs: info.mtimeMs };
+    } catch {
+      // Ignore non-run entries.
+    }
+  }
+  return newest?.dir;
+}
+
+function extractRunDirFromStdout(stdout: string): string | undefined {
+  for (const line of stdout.split(/\r?\n/)) {
+    const parsed = safeJsonParse(line.trim());
+    if (!parsed || typeof parsed !== "object") continue;
+    const runDir = (parsed as Record<string, unknown>).run_dir;
+    if (typeof runDir === "string" && runDir.trim()) return runDir.trim();
+  }
+  return undefined;
+}
+
+async function summarizeCuaRun(runDir: string | undefined): Promise<string> {
+  if (!runDir) return "";
+  let stepsRaw = "";
+  try {
+    stepsRaw = await readFile(join(runDir, "steps.jsonl"), "utf8");
+  } catch {
+    return `\n\ncua_run_summary:\n- runDir: ${runDir}\n- status: run directory detected, but steps.jsonl is not available yet.`;
+  }
+
+  const steps = stepsRaw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => safeJsonParse(line))
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === "object");
+
+  if (!steps.length) {
+    return `\n\ncua_run_summary:\n- runDir: ${runDir}\n- status: steps.jsonl is empty.`;
+  }
+
+  const last = steps[steps.length - 1];
+  const brain = valueAtPath(last, ["brain"]);
+  const lines = [
+    "",
+    "",
+    "cua_run_summary:",
+    `- runDir: ${runDir}`,
+    `- stepsCompleted: ${steps.length}`,
+    `- lastStep: ${shortJsonValue(last.step)}`,
+    `- lastAction: ${shortJsonValue(last.actionName)} ${shortJsonValue(last.actionArgs)}`.trim(),
+  ];
+  const screenshotPath = shortJsonValue(last.screenshotPath);
+  if (screenshotPath) lines.push(`- lastScreenshot: ${screenshotPath}`);
+  const progress = shortJsonValue(valueAtPath(brain, ["progress"]));
+  if (progress) lines.push(`- progress: ${progress}`);
+  const failureReason = shortJsonValue(valueAtPath(brain, ["failure_reason"]));
+  if (failureReason) lines.push(`- failureReason: ${failureReason}`);
+  const nextGoal = shortJsonValue(valueAtPath(brain, ["next_goal"]));
+  if (nextGoal) lines.push(`- nextGoal: ${nextGoal}`);
+
+  const recent = steps.slice(-5).map((step) => {
+    const action = `${shortJsonValue(step.actionName)} ${shortJsonValue(step.actionArgs)}`.trim();
+    const rationale = Array.isArray(valueAtPath(step, ["llm", "rationales"]))
+      ? (valueAtPath(step, ["llm", "rationales"]) as unknown[]).map(shortJsonValue).filter(Boolean)[0]
+      : "";
+    return `  step ${shortJsonValue(step.step)}: ${action}${rationale ? `; rationale=${rationale}` : ""}`;
+  });
+  lines.push("- recentSteps:");
+  lines.push(...recent);
+
+  try {
+    const finalRaw = await readFile(join(runDir, "steps.json"), "utf8");
+    const final = safeJsonParse(finalRaw);
+    if (final && typeof final === "object") {
+      const success = shortJsonValue((final as Record<string, unknown>).success);
+      const reason = shortJsonValue((final as Record<string, unknown>).reason);
+      if (success || reason) lines.push(`- final: success=${success || "unknown"} reason=${reason || ""}`);
+    }
+  } catch {
+    // Many interrupted CUA runs do not write steps.json; steps.jsonl is still useful.
+  }
+
+  return lines.join("\n");
+}
+
+async function runComputerUseCommand(params: {
+  script: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  mode: "run" | "preflight";
+  task?: string;
+  timeoutMs: number;
+}): Promise<{ exitCode: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
+  const startedAt = Date.now();
+  const result = await runCommand({
+    command: "bash",
+    args: params.mode === "preflight" ? [params.script, "preflight"] : [params.script, "run", params.task ?? ""],
+    cwd: params.cwd,
+    env: params.env,
+    timeoutMs: params.timeoutMs,
+  });
+
+  if (params.mode !== "run") return result;
+
+  const runDir = extractRunDirFromStdout(result.stdout) ?? (await newestCuaRunDir(startedAt));
+  const summary = await summarizeCuaRun(runDir);
+  const status =
+    result.exitCode === 0
+      ? "completed"
+      : result.exitCode === 130
+        ? "interrupted_or_handoff"
+        : result.signal
+          ? "terminated"
+          : "partial_or_failed";
+  const guidance = [
+    "",
+    "",
+    "computer_use_interpretation:",
+    `- status: ${status}`,
+    "- note: If cua_run_summary contains completed steps or extracted page information, do not report this as \"tool unavailable\". Report the partial result and the last completed step instead.",
+    "- note: exitCode=130 from the underlying CUA often means interrupted/handoff/record-finalization failure, not that MCP or the query tool is unavailable.",
+  ].join("\n");
+
+  return {
+    ...result,
+    stdout: `${summary}${guidance}\n\nraw_stdout:\n${result.stdout.trim()}`.trim(),
+  };
 }
 
 function formatProcessResult(params: {
@@ -232,7 +400,7 @@ export function registerHostBackedSkillTools(params: {
         },
         timeoutSeconds: {
           type: "number",
-          description: "Optional timeout in seconds. Defaults to 600 for run and 60 for preflight, capped at 3600.",
+          description: "Optional timeout in seconds. Defaults to 180 for run and 60 for preflight, capped at 300 for run and 3600 for preflight.",
         },
       },
     },
@@ -247,12 +415,14 @@ export function registerHostBackedSkillTools(params: {
           content: [{ type: "text", text: `Error: computer-use script not found: ${computerUseScript}` }],
         };
       }
-      const defaultTimeoutSeconds = mode === "preflight" ? 60 : 600;
-      const timeoutSeconds = Math.min(Math.max(numberParam(toolParams.timeoutSeconds) ?? defaultTimeoutSeconds, 10), 3600);
+      const defaultTimeoutSeconds = mode === "preflight" ? 60 : 180;
+      const maxTimeoutSeconds = mode === "preflight" ? 3600 : 300;
+      const timeoutSeconds = Math.min(Math.max(numberParam(toolParams.timeoutSeconds) ?? defaultTimeoutSeconds, 10), maxTimeoutSeconds);
       params.logger.warn(`computer_use requested; mode=${mode} timeoutSeconds=${timeoutSeconds}`);
-      const result = await runCommand({
-        command: "bash",
-        args: mode === "preflight" ? [computerUseScript, "preflight"] : [computerUseScript, "run", task ?? ""],
+      const result = await runComputerUseCommand({
+        script: computerUseScript,
+        mode,
+        task,
         cwd: computerUseDir,
         env: buildHostSkillEnv(params.config),
         timeoutMs: timeoutSeconds * 1000,
