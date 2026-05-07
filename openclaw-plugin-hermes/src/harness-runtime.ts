@@ -34,7 +34,15 @@ type AgentHarnessMcpBridge = {
 };
 type AgentHarnessRuntimeModule = {
   prepareAgentHarnessMcpBridge?: (params: Record<string, unknown>) => Promise<AgentHarnessMcpBridge>;
+  appendSessionTranscriptMessage?: (params: {
+    transcriptPath: string;
+    message: AgentMessageForTranscript;
+    config?: unknown;
+  }) => Promise<unknown>;
+  emitSessionTranscriptUpdate?: (update: string | { sessionFile: string; sessionKey?: string }) => void;
 };
+
+type AgentMessageForTranscript = Record<string, unknown>;
 
 export type HermesRunResponse = {
   assistantText?: string;
@@ -545,11 +553,19 @@ export async function runHermesHarnessAttempt(
       aborted: false,
       errorMessage: null,
     });
-    const messagesSnapshot = [
-      ...conversationHistory.messages,
+    const currentTurnMessages: HarnessMessage[] = [
       buildUserMessage(params),
       ...(lastAssistant ? [lastAssistant] : []),
+    ];
+    const messagesSnapshot = [
+      ...(conversationHistory.messages ?? []),
+      ...currentTurnMessages,
     ] as AgentHarnessAttemptResult["messagesSnapshot"];
+    await mirrorHermesTranscriptBestEffort({
+      sessionFile: params.sessionFile,
+      sessionKey: params.sessionKey,
+      messages: currentTurnMessages,
+    });
 
     return {
       assistantText,
@@ -589,6 +605,15 @@ export async function runHermesHarnessAttempt(
       aborted: Boolean(params.abortSignal?.aborted),
       errorMessage: err instanceof Error ? err.message : String(err),
     });
+    const currentTurnMessages: HarnessMessage[] = [
+      buildUserMessage(params),
+      ...(lastAssistant ? [lastAssistant] : []),
+    ];
+    await mirrorHermesTranscriptBestEffort({
+      sessionFile: params.sessionFile,
+      sessionKey: params.sessionKey,
+      messages: currentTurnMessages,
+    });
     return {
       assistantText: "",
       assistantTexts: [],
@@ -599,7 +624,10 @@ export async function runHermesHarnessAttempt(
       promptError: err,
       promptErrorSource: "prompt",
       finalPromptText: sanitizedPrompt,
-      messagesSnapshot: [...conversationHistory.messages, buildUserMessage(params), lastAssistant] as AgentHarnessAttemptResult["messagesSnapshot"],
+      messagesSnapshot: [
+        ...(conversationHistory.messages ?? []),
+        ...currentTurnMessages,
+      ] as AgentHarnessAttemptResult["messagesSnapshot"],
       toolMetas: [...toolMetas.values()],
       lastAssistant,
       currentAttemptAssistant: lastAssistant,
@@ -801,4 +829,53 @@ function normalizeAcpUsage(
     output: usage.output_tokens,
     total: usage.total_tokens,
   };
+}
+
+async function mirrorHermesTranscriptBestEffort(params: {
+  sessionFile?: string;
+  sessionKey?: string;
+  messages: AgentHarnessAttemptResult["messagesSnapshot"];
+}): Promise<void> {
+  const sessionFile =
+    typeof params.sessionFile === "string" && params.sessionFile.trim()
+      ? params.sessionFile.trim()
+      : "";
+  if (!sessionFile || !params.messages?.length) {
+    return;
+  }
+
+  try {
+    const module = await loadAgentHarnessRuntimeModule();
+    const append = module.appendSessionTranscriptMessage;
+    const emitUpdate = module.emitSessionTranscriptUpdate;
+    if (typeof append !== "function") {
+      return;
+    }
+
+    for (const message of params.messages) {
+      if (!message || typeof message !== "object") {
+        continue;
+      }
+      const role = (message as { role?: unknown }).role;
+      if (role !== "user" && role !== "assistant") {
+        continue;
+      }
+      await append({
+        transcriptPath: sessionFile,
+        message: message as AgentMessageForTranscript,
+      });
+    }
+
+    if (typeof emitUpdate === "function") {
+      const sessionKey =
+        typeof params.sessionKey === "string" && params.sessionKey.trim()
+          ? params.sessionKey.trim()
+          : undefined;
+      emitUpdate(sessionKey ? { sessionFile, sessionKey } : sessionFile);
+    }
+  } catch (error) {
+    console.warn(
+      `[hermes-acp] failed to mirror current turn into OpenClaw transcript: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 }
