@@ -17,6 +17,7 @@ import { inferStrategy, formatStrategy } from "./strategy-engine.js";
 import { buildHermesProvider } from "./provider.js";
 import type { HermesPluginConfig, DispatchRequest } from "./types.js";
 import { cleanupExecEnvs } from "./execenv-builder.js";
+import { registerHostBackedSkillTools } from "./host-skill-tools.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
@@ -45,6 +46,8 @@ const plugin = {
       warn: (msg: string, ...args: unknown[]) => api.logger?.warn?.(msg, ...args) ?? console.warn(`[hermes] ${msg}`),
       error: (msg: string, ...args: unknown[]) => api.logger?.error?.(msg, ...args) ?? console.error(`[hermes] ${msg}`),
     };
+
+    registerHostBackedSkillTools({ api, config, logger });
 
     // Cleanup is fire-and-forget so plugin registration stays cheap even when
     // a previous run left many projected execenv directories behind.
@@ -246,7 +249,7 @@ const plugin = {
     });
 
     logger.info(
-      "Hermes Agent plugin registered (provider, harness, and 3 tools: hermes_dispatch, hermes_status, hermes_strategy)",
+      "Hermes Agent plugin registered (provider, harness, and tools: hermes_dispatch, hermes_status, hermes_strategy, byted_web_search, computer_use)",
     );
   },
 };

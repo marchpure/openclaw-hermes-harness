@@ -158,6 +158,18 @@ const HOST_BACKED_MCP_TOOL_HINTS: Record<string, { tool: string; hint: string }>
     tool: "mcp_openclaw_browser",
     hint: "Use the OpenClaw MCP `mcp_openclaw_browser` tool; read the projected browser-use SKILL.md when it is available for operating rules.",
   },
+  "byted-web-search": {
+    tool: "mcp_openclaw_byted_web_search",
+    hint: "Use the OpenClaw MCP `mcp_openclaw_byted_web_search` tool for Volcano Engine web/image search. It runs host-backed so API credentials stay in the OpenClaw gateway environment.",
+  },
+  web_search: {
+    tool: "mcp_openclaw_byted_web_search",
+    hint: "Use the OpenClaw MCP `mcp_openclaw_byted_web_search` tool for web/image search when available.",
+  },
+  "computer-use": {
+    tool: "mcp_openclaw_computer_use",
+    hint: "Use the OpenClaw MCP `mcp_openclaw_computer_use` tool for host-backed CUA tasks. Use `mcp_openclaw_browser` for browser-only operations.",
+  },
   feishu: {
     tool: "mcp_openclaw_feishu_*",
     hint: "Use the concrete OpenClaw MCP Feishu tools exposed in tools/list. Common names include `mcp_openclaw_feishu_doc` with action `read`, or openclaw-lark tools such as `mcp_openclaw_feishu_fetch_doc`, `mcp_openclaw_feishu_create_doc`, and `mcp_openclaw_feishu_update_doc` when those are present.",
