@@ -41,14 +41,21 @@ type AgentHarnessRuntimeModule = {
   }) => Promise<unknown>;
   emitSessionTranscriptUpdate?: (update: string | { sessionFile: string; sessionKey?: string }) => void;
 };
+type McpLoopbackRuntime = {
+  port: number;
+  token?: string;
+  ownerToken?: string;
+  nonOwnerToken?: string;
+};
 type McpHttpModule = {
   ensureMcpLoopbackServer?: () => Promise<{ port: number; close?: () => Promise<void> }>;
-  getActiveMcpLoopbackRuntime?: () => { port: number; token: string } | undefined;
+  getActiveMcpLoopbackRuntime?: () => McpLoopbackRuntime | undefined;
+  resolveMcpLoopbackBearerToken?: (runtime: McpLoopbackRuntime, senderIsOwner: boolean) => string;
   createMcpLoopbackServerConfig?: (port: number) => {
     mcpServers?: Record<string, unknown>;
   };
   n?: () => Promise<{ port: number; close?: () => Promise<void> }>;
-  i?: () => { port: number; token: string } | undefined;
+  i?: () => McpLoopbackRuntime | undefined;
   r?: (port: number) => {
     mcpServers?: Record<string, unknown>;
   };
@@ -269,7 +276,7 @@ async function normalizeContainerReachableMcpBridge(args: {
     return bridge;
   }
 
-  const loopback = await resolveMcpLoopbackBridge();
+  const loopback = await resolveMcpLoopbackBridge(args.params.senderIsOwner);
   if (!loopback) {
     console.warn("[hermes-acp] OpenClaw MCP loopback unavailable; disabling unreachable stdio plugin tools bridge");
     return {
@@ -285,7 +292,7 @@ async function normalizeContainerReachableMcpBridge(args: {
 
   const env = {
     ...(bridge.env ?? {}),
-    OPENCLAW_MCP_TOKEN: loopback.runtime.token,
+    OPENCLAW_MCP_TOKEN: loopback.token,
     OPENCLAW_MCP_SESSION_KEY: args.params.sessionKey ?? "main",
     ...(args.params.agentId ? { OPENCLAW_MCP_AGENT_ID: args.params.agentId } : {}),
     ...(args.params.agentAccountId ? { OPENCLAW_MCP_ACCOUNT_ID: args.params.agentAccountId } : {}),
@@ -365,8 +372,35 @@ function materializeStringRecord(record: Record<string, unknown>, env: Record<st
   );
 }
 
-async function resolveMcpLoopbackBridge(): Promise<
-  { runtime: { port: number; token: string }; mcpServers?: Record<string, unknown> } | undefined
+function readNonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function resolveMcpLoopbackBearerToken(args: {
+  module: McpHttpModule;
+  runtime: McpLoopbackRuntime;
+  senderIsOwner?: boolean;
+}): string | undefined {
+  const legacyToken = readNonEmptyString(args.runtime.token);
+  if (legacyToken) return legacyToken;
+
+  const senderIsOwner = args.senderIsOwner === true;
+  const exportedResolver = args.module.resolveMcpLoopbackBearerToken;
+  if (typeof exportedResolver === "function") {
+    try {
+      const resolved = readNonEmptyString(exportedResolver(args.runtime, senderIsOwner));
+      if (resolved) return resolved;
+    } catch {}
+  }
+
+  const ownerToken = readNonEmptyString(args.runtime.ownerToken);
+  const nonOwnerToken = readNonEmptyString(args.runtime.nonOwnerToken);
+  if (senderIsOwner && ownerToken) return ownerToken;
+  return nonOwnerToken;
+}
+
+async function resolveMcpLoopbackBridge(senderIsOwner?: boolean): Promise<
+  { runtime: McpLoopbackRuntime; token: string; mcpServers?: Record<string, unknown> } | undefined
 > {
   const module = await loadMcpHttpModule();
   const ensureMcpLoopbackServer = module.ensureMcpLoopbackServer ?? module.n;
@@ -375,8 +409,13 @@ async function resolveMcpLoopbackBridge(): Promise<
   await ensureMcpLoopbackServer?.();
   const runtime = getActiveMcpLoopbackRuntime?.();
   if (!runtime) return undefined;
+  const token = resolveMcpLoopbackBearerToken({ module, runtime, senderIsOwner });
+  if (!token) {
+    console.warn("[hermes-acp] OpenClaw MCP loopback runtime did not expose a usable bearer token");
+    return undefined;
+  }
   const config = createMcpLoopbackServerConfig?.(runtime.port);
-  return { runtime, mcpServers: config?.mcpServers };
+  return { runtime, token, mcpServers: config?.mcpServers };
 }
 
 async function loadMcpHttpModule(): Promise<McpHttpModule> {
