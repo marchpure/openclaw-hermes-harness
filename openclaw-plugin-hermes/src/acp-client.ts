@@ -38,6 +38,8 @@ const defaultLogger: Logger = {
 const STREAM_IDLE_FINALIZE_MS = 2500;
 const ACP_INITIALIZE_STABILITY_MS = 25;
 const ACP_CLOSE_TIMEOUT_MS = 1000;
+const ACP_CLOSE_SESSION_ON_DISCONNECT =
+  process.env.HERMES_ACP_CLOSE_SESSION_ON_DISCONNECT === "true";
 
 type AcpEnvVariable = { name: string; value: string };
 type AcpMcpServer =
@@ -379,7 +381,7 @@ export class HermesAcpClient extends EventEmitter {
    */
   async close(): Promise<void> {
     this.closing = true;
-    if (this.sessionId) {
+    if (this.sessionId && ACP_CLOSE_SESSION_ON_DISCONNECT) {
       try {
         await this.sendRequest("session/close", { session_id: this.sessionId }, ACP_CLOSE_TIMEOUT_MS).promise;
       } catch {

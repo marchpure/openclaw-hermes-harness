@@ -3,6 +3,7 @@ import type {
   AgentHarnessAttemptResult,
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
@@ -40,6 +41,17 @@ type AgentHarnessRuntimeModule = {
     config?: unknown;
   }) => Promise<unknown>;
   emitSessionTranscriptUpdate?: (update: string | { sessionFile: string; sessionKey?: string }) => void;
+  acquireSessionWriteLock?: (params: {
+    sessionFile: string;
+    timeoutMs?: number;
+    allowReentrant?: boolean;
+  }) => Promise<{ release: () => Promise<void> | void }>;
+  resolveSessionWriteLockAcquireTimeoutMs?: (config?: unknown) => number;
+  runAgentHarnessBeforeMessageWriteHook?: (params: {
+    message: AgentMessageForTranscript;
+    agentId?: string;
+    sessionKey?: string;
+  }) => AgentMessageForTranscript | null;
 };
 type McpLoopbackRuntime = {
   port: number;
@@ -778,6 +790,9 @@ export async function runHermesHarnessAttempt(
     await mirrorHermesTranscriptBestEffort({
       sessionFile: params.sessionFile,
       sessionKey: params.sessionKey,
+      agentId: params.agentId,
+      idempotencyScope: buildHermesMirrorIdempotencyScope(params),
+      config: params.config,
       messages: currentTurnMessages,
     });
 
@@ -826,6 +841,9 @@ export async function runHermesHarnessAttempt(
     await mirrorHermesTranscriptBestEffort({
       sessionFile: params.sessionFile,
       sessionKey: params.sessionKey,
+      agentId: params.agentId,
+      idempotencyScope: buildHermesMirrorIdempotencyScope(params),
+      config: params.config,
       messages: currentTurnMessages,
     });
     return {
@@ -1045,9 +1063,59 @@ function normalizeAcpUsage(
   };
 }
 
+async function readTranscriptIdempotencyKeys(sessionFile: string): Promise<Set<string>> {
+  const keys = new Set<string>();
+  let raw: string;
+  try {
+    raw = await readFile(sessionFile, "utf8");
+  } catch {
+    return keys;
+  }
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as { message?: { idempotencyKey?: unknown } };
+      if (typeof parsed.message?.idempotencyKey === "string") {
+        keys.add(parsed.message.idempotencyKey);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return keys;
+}
+
+function fingerprintMirrorMessageContent(message: AgentMessageForTranscript): string {
+  const payload = JSON.stringify({
+    role: message.role,
+    content: message.content,
+  });
+  return createHash("sha256").update(payload).digest("hex").slice(0, 16);
+}
+
+function buildHermesMirrorIdempotencyScope(params: AgentHarnessAttemptParams): string | undefined {
+  const explicit = [
+    (params as { runId?: unknown }).runId,
+    params.currentMessageId,
+    params.messageThreadId,
+  ].find((value) => typeof value === "string" || typeof value === "number");
+  if (explicit !== undefined) {
+    return `hermes:${String(explicit)}`;
+  }
+  return undefined;
+}
+
+function buildHermesMirrorDedupeIdentity(message: AgentMessageForTranscript): string {
+  const role = typeof message.role === "string" ? message.role : "message";
+  return `${role}:${fingerprintMirrorMessageContent(message)}`;
+}
+
 async function mirrorHermesTranscriptBestEffort(params: {
   sessionFile?: string;
   sessionKey?: string;
+  agentId?: string;
+  idempotencyScope?: string;
+  config?: unknown;
   messages: AgentHarnessAttemptResult["messagesSnapshot"];
 }): Promise<void> {
   const sessionFile =
@@ -1062,22 +1130,57 @@ async function mirrorHermesTranscriptBestEffort(params: {
     const module = await loadAgentHarnessRuntimeModule();
     const append = module.appendSessionTranscriptMessage;
     const emitUpdate = module.emitSessionTranscriptUpdate;
+    const runBeforeWriteHook = module.runAgentHarnessBeforeMessageWriteHook;
     if (typeof append !== "function") {
       return;
     }
 
-    for (const message of params.messages) {
-      if (!message || typeof message !== "object") {
-        continue;
+    const release = await module.acquireSessionWriteLock?.({
+      sessionFile,
+      timeoutMs: module.resolveSessionWriteLockAcquireTimeoutMs?.(params.config),
+    });
+    try {
+      const existingIdempotencyKeys = await readTranscriptIdempotencyKeys(sessionFile);
+      for (const message of params.messages) {
+        if (!message || typeof message !== "object") {
+          continue;
+        }
+        const role = (message as { role?: unknown }).role;
+        if (role !== "user" && role !== "assistant") {
+          continue;
+        }
+        const idempotencyKey = params.idempotencyScope
+          ? `${params.idempotencyScope}:${buildHermesMirrorDedupeIdentity(message as AgentMessageForTranscript)}`
+          : undefined;
+        if (idempotencyKey && existingIdempotencyKeys.has(idempotencyKey)) {
+          continue;
+        }
+        const transcriptMessage = {
+          ...(message as AgentMessageForTranscript),
+          ...(idempotencyKey ? { idempotencyKey } : {}),
+        };
+        const nextMessage =
+          typeof runBeforeWriteHook === "function"
+            ? runBeforeWriteHook({
+                message: transcriptMessage,
+                agentId: params.agentId,
+                sessionKey: params.sessionKey,
+              })
+            : transcriptMessage;
+        if (!nextMessage) {
+          continue;
+        }
+        await append({
+          transcriptPath: sessionFile,
+          message: idempotencyKey ? { ...nextMessage, idempotencyKey } : nextMessage,
+          config: params.config,
+        });
+        if (idempotencyKey) {
+          existingIdempotencyKeys.add(idempotencyKey);
+        }
       }
-      const role = (message as { role?: unknown }).role;
-      if (role !== "user" && role !== "assistant") {
-        continue;
-      }
-      await append({
-        transcriptPath: sessionFile,
-        message: message as AgentMessageForTranscript,
-      });
+    } finally {
+      await release?.release();
     }
 
     if (typeof emitUpdate === "function") {
