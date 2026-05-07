@@ -16,6 +16,8 @@ PUBLIC_BUCKET_BASE_URL="${PUBLIC_BUCKET_BASE_URL:-https://haoxingjun-test.tos-cn
 BASE_INSTALL_URL="${BASE_INSTALL_URL:-${PUBLIC_BUCKET_BASE_URL}/hermes-install.sh}"
 PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${PUBLIC_BUCKET_BASE_URL}/openclaw-plugin-hermes-install-v3.tgz}"
 RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/feat/hermes-runtime-bridge-productized-onecommit}"
+REMOTE_REPO_URL="${REMOTE_REPO_URL:-https://github.com/marchpure/openclaw-hermes-harness.git}"
+REMOTE_REPO_REF="${REMOTE_REPO_REF:-feat/hermes-runtime-bridge-productized-onecommit}"
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
 if [[ -n "${SCRIPT_SOURCE}" && -e "${SCRIPT_SOURCE}" ]]; then
@@ -134,6 +136,9 @@ check_prereqs() {
     if [[ -n "${LOCAL_PLUGIN_DIR}" && -d "${LOCAL_PLUGIN_DIR}" ]]; then
         command -v tar >/dev/null 2>&1 || die "缺少 tar，无法打包本地插件"
         command -v npm >/dev/null 2>&1 || die "缺少 npm，无法打包本地插件"
+    elif command -v git >/dev/null 2>&1; then
+        command -v tar >/dev/null 2>&1 || die "缺少 tar，无法打包远端插件"
+        command -v npm >/dev/null 2>&1 || die "缺少 npm，无法打包远端插件"
     fi
 }
 
@@ -164,6 +169,29 @@ resolve_plugin_tarball() {
         plugin_tar="${tmp_dir}/${plugin_tar}"
         printf '%s\n' "${plugin_tar}"
         return 0
+    fi
+
+    if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        local tmp_dir remote_repo remote_plugin_dir pack_output plugin_tar
+        tmp_dir="$(mktemp -d)"
+        TEMP_DIRS+=("${tmp_dir}")
+        remote_repo="${tmp_dir}/repo"
+        { log_info "拉取远端分支插件源码: ${REMOTE_REPO_URL}#${REMOTE_REPO_REF}"; } >&2
+        if git clone --depth 1 --branch "${REMOTE_REPO_REF}" --single-branch "${REMOTE_REPO_URL}" "${remote_repo}" >&2; then
+            remote_plugin_dir="${remote_repo}/openclaw-plugin-hermes"
+            if [[ -f "${remote_plugin_dir}/openclaw.plugin.json" ]]; then
+                { log_info "构建远端 Hermes 插件源码"; } >&2
+                (cd "${remote_plugin_dir}" && npm run build >&2)
+                pack_output="$(cd "${remote_plugin_dir}" && npm pack --pack-destination "${tmp_dir}" --json)"
+                plugin_tar="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[0]["filename"])' <<<"${pack_output}")"
+                plugin_tar="${tmp_dir}/${plugin_tar}"
+                printf '%s\n' "${plugin_tar}"
+                return 0
+            fi
+            log_warn "远端分支缺少 openclaw-plugin-hermes/openclaw.plugin.json，回退公共插件包"
+        else
+            log_warn "远端分支插件源码拉取失败，回退公共插件包"
+        fi
     fi
 
     local tmp_dir plugin_tar
@@ -657,6 +685,120 @@ PYEOF
     fi
 }
 
+patch_hermes_plugin_manifest_schema() {
+    local manifest="${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_DIR_NAME}/openclaw.plugin.json"
+    [[ -f "${manifest}" ]] || return 0
+
+    log_info "检查 Hermes 插件 manifest v4 配置 schema"
+
+    if command -v jq >/dev/null 2>&1; then
+        local tmp
+        tmp="$(mktemp)"
+        TEMP_DIRS+=("${tmp}")
+        jq '
+          .configSchema = (.configSchema // {})
+          | .configSchema.properties = (.configSchema.properties // {})
+          | .configSchema.properties.runtimeMinContextLevel = {
+              "type": "string",
+              "enum": ["L0", "L1", "L2", "L3"],
+              "description": "Minimum context level projected for /model hermes agent harness attempts"
+            }
+          | .configSchema.properties.runtimeProjectWorkspaceSkills = {
+              "type": "boolean",
+              "description": "Expose OpenClaw-selected workspace skills to Hermes runtime projections"
+            }
+          | .configSchema.properties.mirrorExecEnvToContainer = {
+              "type": "boolean",
+              "description": "Mirror projected execution environments into the Hermes container before ACP turns"
+            }
+          | .configSchema.properties.skillProjection = (.configSchema.properties.skillProjection // {"type": "object", "additionalProperties": false, "properties": {}})
+          | .configSchema.properties.skillProjection.properties = (.configSchema.properties.skillProjection.properties // {})
+          | .configSchema.properties.skillProjection.properties.alwaysExposeSkillNames = {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Workspace skill names that should be projected into Hermes even when OpenClaw per-turn skill snapshot did not select them."
+            }
+        ' "${manifest}" > "${tmp}" && mv "${tmp}" "${manifest}"
+    else
+        python3 - "${manifest}" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+schema = data.setdefault("configSchema", {})
+props = schema.setdefault("properties", {})
+props["runtimeMinContextLevel"] = {
+    "type": "string",
+    "enum": ["L0", "L1", "L2", "L3"],
+    "description": "Minimum context level projected for /model hermes agent harness attempts",
+}
+props["runtimeProjectWorkspaceSkills"] = {
+    "type": "boolean",
+    "description": "Expose OpenClaw-selected workspace skills to Hermes runtime projections",
+}
+props["mirrorExecEnvToContainer"] = {
+    "type": "boolean",
+    "description": "Mirror projected execution environments into the Hermes container before ACP turns",
+}
+skill = props.setdefault("skillProjection", {"type": "object", "additionalProperties": False, "properties": {}})
+skill.setdefault("properties", {})["alwaysExposeSkillNames"] = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "Workspace skill names that should be projected into Hermes even when OpenClaw per-turn skill snapshot did not select them.",
+}
+with open(path, "w") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+PYEOF
+    fi
+}
+
+sync_hermes_agent_models_cache() {
+    local agent_models="${OPENCLAW_AGENT_MODELS:-/root/.openclaw/agents/main/agent/models.json}"
+    [[ -f "${OPENCLAW_CONFIG}" ]] || return 0
+
+    log_info "同步 Hermes provider 到 OpenClaw agent models.json"
+
+    if command -v jq >/dev/null 2>&1; then
+        local tmp
+        tmp="$(mktemp)"
+        TEMP_DIRS+=("${tmp}")
+        mkdir -p "$(dirname "${agent_models}")"
+        if [[ ! -f "${agent_models}" ]]; then
+            printf '{"providers":{}}\n' > "${agent_models}"
+        fi
+        jq --slurpfile cfg "${OPENCLAW_CONFIG}" '
+          .providers = (.providers // {})
+          | .providers.hermes = $cfg[0].models.providers.hermes
+        ' "${agent_models}" > "${tmp}" && mv "${tmp}" "${agent_models}"
+        chmod 0600 "${agent_models}" 2>/dev/null || true
+    else
+        python3 - "${OPENCLAW_CONFIG}" "${agent_models}" <<'PYEOF'
+import json, os, sys
+config_path, models_path = sys.argv[1], sys.argv[2]
+with open(config_path) as f:
+    config = json.load(f)
+hermes = config.get("models", {}).get("providers", {}).get("hermes")
+if not hermes:
+    sys.exit(0)
+try:
+    with open(models_path) as f:
+        models = json.load(f)
+except Exception:
+    models = {}
+models.setdefault("providers", {})["hermes"] = hermes
+os.makedirs(os.path.dirname(models_path), exist_ok=True)
+with open(models_path, "w") as f:
+    json.dump(models, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+try:
+    os.chmod(models_path, 0o600)
+except Exception:
+    pass
+PYEOF
+    fi
+}
+
 patch_openclaw_lark_manifest_contracts() {
     local manifest="${OPENCLAW_EXTENSIONS_DIR}/openclaw-lark/openclaw.plugin.json"
     [[ -f "${manifest}" ]] || return 0
@@ -1075,7 +1217,9 @@ main() {
     ACP_TCP_SERVER_PATCH_HOST_PATH="${ACP_TCP_SERVER_PATCH_HOST_PATH}" \
     bash "${patched_install_script}" "$@"
 
+    patch_hermes_plugin_manifest_schema
     normalize_runtime_entries
+    sync_hermes_agent_models_cache
     patch_openclaw_lark_manifest_contracts
     patch_openclaw_lark_ambient_tool_context
     patch_agent_identity_before_tool_call_context
