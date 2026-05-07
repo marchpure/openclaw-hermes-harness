@@ -4,12 +4,22 @@
 # 1. 本地仓库执行: bash scripts/install-v5.sh
 # 2. 远端直执行: curl -fsSL .../install-v5.sh | bash
 # 3. Fresh install / legacy upgrade 均可
+#
+# v5 在 v3 刷新脚本基础上增量加入 Hermes runtime 安装流程:
+# - 使用镜像仓库引用启动 Hermes runtime，避免下载 TOS tar 后 docker load。
+# - 容器使用 host network，并显式设置 ACP_TCP_HOST/ACP_TCP_PORT。
+# - 默认启用 layered protocol 和 OpenClaw host-backed skill/MCP 路由。
 
 set -Eeuo pipefail
 
 PUBLIC_BUCKET_BASE_URL="${PUBLIC_BUCKET_BASE_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com}"
 BASE_INSTALL_URL="${BASE_INSTALL_URL:-${PUBLIC_BUCKET_BASE_URL}/hermes-install.sh}"
-PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${PUBLIC_BUCKET_BASE_URL}/openclaw-plugin-hermes-install-v5.tgz}"
+RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/feat/hermes-runtime-bridge-productized-onecommit-squashed-after-e743208}"
+PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${RAW_REPO_BASE_URL}/openclaw-plugin-hermes-install-v5.tgz}"
+REMOTE_REPO_URL="${REMOTE_REPO_URL:-https://github.com/marchpure/openclaw-hermes-harness.git}"
+REMOTE_REPO_REF="${REMOTE_REPO_REF:-feat/hermes-runtime-bridge-productized-onecommit-squashed-after-e743208}"
+NPM_REGISTRY_URL="${NPM_REGISTRY_URL:-https://registry.npmmirror.com}"
+PREFER_PREBUILT_PLUGIN_URL="${PREFER_PREBUILT_PLUGIN_URL:-true}"
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
 if [[ -n "${SCRIPT_SOURCE}" && -e "${SCRIPT_SOURCE}" ]]; then
@@ -22,6 +32,8 @@ fi
 
 BASE_INSTALL_SCRIPT="${SCRIPT_DIR:+${SCRIPT_DIR}/hermes-install.sh}"
 LOCAL_PLUGIN_DIR="${REPO_ROOT:+${REPO_ROOT}/openclaw-plugin-hermes}"
+LOCAL_ACP_TCP_SERVER_PATCH="${REPO_ROOT:+${REPO_ROOT}/hermes-containerized/scripts/acp-tcp-server.py}"
+REMOTE_ACP_TCP_SERVER_PATCH_URL="${REMOTE_ACP_TCP_SERVER_PATCH_URL:-${RAW_REPO_BASE_URL}/hermes-containerized/scripts/acp-tcp-server.py}"
 
 MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION:-2026.4.15}"
 DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR:-/var/cache/hermes-agent}"
@@ -30,6 +42,15 @@ PLUGIN_DIR_NAME="${PLUGIN_DIR_NAME:-openclaw-plugin-hermes}"
 PLUGIN_LEGACY_DIR_NAME="${PLUGIN_LEGACY_DIR_NAME:-hermes}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/root/.openclaw/openclaw.json}"
 OPENCLAW_EXTENSIONS_DIR="${OPENCLAW_EXTENSIONS_DIR:-/root/.openclaw/extensions}"
+
+HERMES_IMAGE_REF="${HERMES_IMAGE_REF:-iaas-test01-cn-beijing.cr.volces.com/hermes/hermes-dockerimage:v1.2.0}"
+HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"
+CONTAINER_NAME="${CONTAINER_NAME:-hermes-agent}"
+DATA_DIR="${DATA_DIR:-/opt/hermes-data}"
+ACP_TCP_HOST="${ACP_TCP_HOST:-127.0.0.1}"
+ACP_TCP_PORT="${ACP_TCP_PORT:-3100}"
+ACP_PORT="${ACP_PORT:-${ACP_TCP_PORT}}"
+ACP_TCP_SERVER_PATCH_HOST_PATH="${ACP_TCP_SERVER_PATCH_HOST_PATH:-${DATA_DIR}/openclaw-acp-tcp-server.py}"
 
 if [[ -t 1 ]]; then
     RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' CYAN='\033[0;36m' NC='\033[0m'
@@ -48,7 +69,16 @@ log_warn()  { log_line "WARN" "${YELLOW}" "$*"; }
 log_error() { log_line "ERROR" "${RED}" "$*"; }
 die()       { log_error "$@"; exit 1; }
 
+normalize_port() {
+    local name="$1" value="$2"
+    [[ "${value}" =~ ^[0-9]+$ ]] || die "${name} 必须是 1-65535 之间的整数，当前值: ${value}"
+    local normalized=$((10#${value}))
+    (( normalized >= 1 && normalized <= 65535 )) || die "${name} 必须是 1-65535 之间的整数，当前值: ${value}"
+    printf '%s\n' "${normalized}"
+}
+
 TEMP_DIRS=()
+RESOLVED_PLUGIN_SOURCE=""
 cleanup_temp() {
     local path=""
     for path in "${TEMP_DIRS[@]:-}"; do
@@ -64,9 +94,47 @@ download_file() {
 
 check_prereqs() {
     command -v curl >/dev/null 2>&1 || die "缺少 curl，无法下载基础脚本或插件包"
+    command -v python3 >/dev/null 2>&1 || die "缺少 python3，无法 patch v5 runtime installer"
+    ACP_TCP_PORT="$(normalize_port "ACP_TCP_PORT" "${ACP_TCP_PORT}")"
+    ACP_PORT="${ACP_TCP_PORT}"
     if [[ -n "${LOCAL_PLUGIN_DIR}" && -d "${LOCAL_PLUGIN_DIR}" ]]; then
         command -v tar >/dev/null 2>&1 || die "缺少 tar，无法打包本地插件"
+        command -v npm >/dev/null 2>&1 || die "缺少 npm，无法打包本地插件"
+    elif command -v git >/dev/null 2>&1; then
+        command -v tar >/dev/null 2>&1 || die "缺少 tar，无法打包远端插件"
+        command -v npm >/dev/null 2>&1 || die "缺少 npm，无法打包远端插件"
     fi
+}
+
+ensure_plugin_build_artifacts() {
+    local plugin_dir="$1"
+    [[ -d "${plugin_dir}" ]] || die "插件目录不存在: ${plugin_dir}"
+    [[ -f "${plugin_dir}/package.json" ]] || die "插件目录缺少 package.json: ${plugin_dir}"
+    [[ -f "${plugin_dir}/openclaw.plugin.json" ]] || die "插件目录缺少 openclaw.plugin.json: ${plugin_dir}"
+
+    if [[ ! -x "${plugin_dir}/node_modules/typescript/bin/tsc" ]]; then
+        { log_info "安装 Hermes 插件构建依赖: ${plugin_dir}"; } >&2
+        (cd "${plugin_dir}" && npm install --no-audit --no-fund --registry "${NPM_REGISTRY_URL}" >&2)
+    fi
+
+    [[ -x "${plugin_dir}/node_modules/typescript/bin/tsc" ]] || die "未找到 TypeScript 编译器: ${plugin_dir}/node_modules/typescript/bin/tsc"
+
+    { log_info "编译 Hermes 插件 dist 产物"; } >&2
+    (cd "${plugin_dir}" && node node_modules/typescript/lib/tsc.js >&2)
+
+    [[ -f "${plugin_dir}/dist/index.js" ]] || die "Hermes 插件构建完成后缺少 dist/index.js"
+}
+
+pack_plugin_tarball() {
+    local plugin_dir="$1" source_label="$2" tmp_dir pack_output plugin_tar
+    tmp_dir="$(mktemp -d)"
+    TEMP_DIRS+=("${tmp_dir}")
+    ensure_plugin_build_artifacts "${plugin_dir}"
+    { log_info "打包 ${source_label} Hermes 插件源码"; } >&2
+    pack_output="$(cd "${plugin_dir}" && npm pack --pack-destination "${tmp_dir}" --json)"
+    plugin_tar="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[0]["filename"])' <<<"${pack_output}")"
+    RESOLVED_PLUGIN_SOURCE="${source_label}"
+    printf '%s\n' "${tmp_dir}/${plugin_tar}"
 }
 
 resolve_base_install_script() {
@@ -86,15 +154,38 @@ resolve_base_install_script() {
 
 resolve_plugin_tarball() {
     if [[ -n "${LOCAL_PLUGIN_DIR}" && -d "${LOCAL_PLUGIN_DIR}" && -f "${LOCAL_PLUGIN_DIR}/openclaw.plugin.json" ]]; then
-        command -v npm >/dev/null 2>&1 || die "缺少 npm，无法打包本地插件"
-        local tmp_dir pack_output plugin_tar
+        pack_plugin_tarball "${LOCAL_PLUGIN_DIR}" "当前仓库"
+        return 0
+    fi
+
+    if [[ "${PREFER_PREBUILT_PLUGIN_URL}" == "true" ]]; then
+        local tmp_dir plugin_tar
         tmp_dir="$(mktemp -d)"
         TEMP_DIRS+=("${tmp_dir}")
-        pack_output="$(cd "${LOCAL_PLUGIN_DIR}" && npm pack --pack-destination "${tmp_dir}" --json)"
-        plugin_tar="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[0]["filename"])' <<<"${pack_output}")"
-        plugin_tar="${tmp_dir}/${plugin_tar}"
-        printf '%s\n' "${plugin_tar}"
-        return 0
+        plugin_tar="${tmp_dir}/openclaw-plugin-hermes-install-v5.tgz"
+        if download_file "${PUBLIC_PLUGIN_URL}" "${plugin_tar}"; then
+            RESOLVED_PLUGIN_SOURCE="公共预构建插件包"
+            printf '%s\n' "${plugin_tar}"
+            return 0
+        fi
+        log_warn "公共预构建插件包下载失败，将尝试源码打包: ${PUBLIC_PLUGIN_URL}"
+    fi
+
+    if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        local tmp_dir remote_repo remote_plugin_dir
+        tmp_dir="$(mktemp -d)"
+        TEMP_DIRS+=("${tmp_dir}")
+        remote_repo="${tmp_dir}/repo"
+        { log_info "拉取远端分支插件源码: ${REMOTE_REPO_URL}#${REMOTE_REPO_REF}"; } >&2
+        if git clone --depth 1 --branch "${REMOTE_REPO_REF}" --single-branch "${REMOTE_REPO_URL}" "${remote_repo}" >&2; then
+            remote_plugin_dir="${remote_repo}/openclaw-plugin-hermes"
+            if [[ -f "${remote_plugin_dir}/openclaw.plugin.json" ]]; then
+                pack_plugin_tarball "${remote_plugin_dir}" "远端分支 ${REMOTE_REPO_REF}"
+                return 0
+            fi
+            die "远端分支缺少 openclaw-plugin-hermes/openclaw.plugin.json: ${REMOTE_REPO_URL}#${REMOTE_REPO_REF}"
+        fi
+        log_warn "远端分支插件源码拉取失败: ${REMOTE_REPO_URL}#${REMOTE_REPO_REF}"
     fi
 
     local tmp_dir plugin_tar
@@ -102,7 +193,157 @@ resolve_plugin_tarball() {
     TEMP_DIRS+=("${tmp_dir}")
     plugin_tar="${tmp_dir}/openclaw-plugin-hermes-install-v5.tgz"
     download_file "${PUBLIC_PLUGIN_URL}" "${plugin_tar}"
+    RESOLVED_PLUGIN_SOURCE="公共桶回退包"
     printf '%s\n' "${plugin_tar}"
+}
+
+create_v5_base_installer() {
+    local source_script="$1"
+    local tmp_dir patched_script
+    tmp_dir="$(mktemp -d)"
+    TEMP_DIRS+=("${tmp_dir}")
+    patched_script="${tmp_dir}/hermes-install-v5-patched.sh"
+
+    HERMES_IMAGE_REF="${HERMES_IMAGE_REF}" \
+    ACP_TCP_HOST="${ACP_TCP_HOST}" \
+    ACP_TCP_PORT="${ACP_TCP_PORT}" \
+    python3 - "${source_script}" "${patched_script}" <<'PYEOF'
+import os
+import sys
+from pathlib import Path
+
+src, dst = map(Path, sys.argv[1:3])
+text = src.read_text()
+image_ref = os.environ["HERMES_IMAGE_REF"]
+tcp_host = os.environ["ACP_TCP_HOST"]
+tcp_port = os.environ["ACP_TCP_PORT"]
+
+def replace_once(label, old, new):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"{label}: patch anchor count={count}, expected 1")
+    return text.replace(old, new, 1)
+
+text = replace_once(
+    "image source config",
+    'TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-image/hermes-agent-image.tar.gz}"',
+    f'TOS_IMAGE_URL="${{TOS_IMAGE_URL:-}}"\nHERMES_IMAGE_REF="${{HERMES_IMAGE_REF:-{image_ref}}}"',
+)
+text = replace_once(
+    "image name default",
+    'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"',
+    'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-${HERMES_IMAGE_REF}}"',
+)
+text = replace_once("acp port default", 'ACP_PORT="${ACP_PORT:-3100}"', f'ACP_PORT="${{ACP_PORT:-{tcp_port}}}"')
+text = replace_once("env acp tcp port", 'echo "ACP_TCP_PORT=3100"', 'echo "ACP_TCP_PORT=${ACP_PORT}"')
+text = replace_once("env acp tcp host", 'echo "ACP_TCP_HOST=0.0.0.0"', f'echo "ACP_TCP_HOST=${{ACP_TCP_HOST:-{tcp_host}}}"')
+text = replace_once(
+    "docker image pull phase",
+    '''phase2_pull_image() {
+    log_step "拉取 Hermes 镜像"
+
+    local current_image_id=""
+    if image_exists "${HERMES_IMAGE_NAME}:latest"; then
+        current_image_id="$(docker image inspect --format '{{.Id}}' "${HERMES_IMAGE_NAME}:latest")"
+        log_info "当前镜像 ID: ${current_image_id}"
+    else
+        log_info "当前不存在 ${HERMES_IMAGE_NAME}:latest，将导入新镜像"
+    fi
+
+    local image_file="${CACHE_DIR}/hermes-agent-image.tar.gz"
+
+    log_info "下载镜像: ${TOS_IMAGE_URL}"
+    download_file "${TOS_IMAGE_URL}" "${image_file}"
+
+    log_info "加载镜像..."
+    docker load < "${image_file}"
+
+    if ! image_exists "${HERMES_IMAGE_NAME}:latest"; then
+        die "镜像加载后未找到 ${HERMES_IMAGE_NAME}:latest，请检查镜像名"
+    fi
+
+    local new_image_id
+    new_image_id="$(docker image inspect --format '{{.Id}}' "${HERMES_IMAGE_NAME}:latest")"
+    if [[ -n "${current_image_id}" && "${current_image_id}" == "${new_image_id}" ]]; then
+        log_info "镜像导入完成，ID 未变化: ${new_image_id}"
+    else
+        log_info "镜像导入完成，新镜像 ID: ${new_image_id}"
+    fi
+}''',
+    '''phase2_pull_image() {
+    log_step "拉取 Hermes 镜像"
+
+    log_info "拉取镜像: ${HERMES_IMAGE_REF}"
+    docker pull "${HERMES_IMAGE_REF}"
+
+    if ! image_exists "${HERMES_IMAGE_REF}"; then
+        die "镜像拉取后未找到 ${HERMES_IMAGE_REF}"
+    fi
+
+    local image_id
+    image_id="$(docker image inspect --format '{{.Id}}' "${HERMES_IMAGE_REF}")"
+    log_info "镜像就绪: ${HERMES_IMAGE_REF} (${image_id})"
+
+    docker tag "${HERMES_IMAGE_REF}" "${HERMES_IMAGE_NAME}:latest"
+    log_info "已标记本地镜像: ${HERMES_IMAGE_NAME}:latest -> ${HERMES_IMAGE_REF}"
+}''',
+)
+text = replace_once(
+    "docker run command",
+    '''    docker run -d \\
+        --name "${CONTAINER_NAME}" \\
+        --init \\
+        --restart unless-stopped \\
+        --user root \\
+        -e TZ=Asia/Shanghai \\
+        --env-file "${DATA_DIR}/.env" \\
+        --entrypoint "/opt/hermes/docker/entrypoint-acp.sh" \\
+        --security-opt no-new-privileges=true \\
+        --tmpfs /tmp:size=256M \\
+        -v "${DATA_DIR}:/opt/data" \\
+        -p "127.0.0.1:${ACP_PORT}:3100" \\
+        --cpus="${CPU_LIMIT}" \\
+        --memory="${MEM_LIMIT}" \\
+        --log-driver json-file \\
+        --log-opt max-size=20m \\
+        --log-opt max-file=5 \\
+        "${image_ref}" >/dev/null''',
+    '''    local -a openclaw_patch_mount=()
+    if [[ -n "${ACP_TCP_SERVER_PATCH_HOST_PATH:-}" && -f "${ACP_TCP_SERVER_PATCH_HOST_PATH}" ]]; then
+        openclaw_patch_mount=(-v "${ACP_TCP_SERVER_PATCH_HOST_PATH}:/opt/hermes/acp-tcp-server.py:ro")
+        log_info "使用 OpenClaw patched ACP TCP server: ${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+    else
+        log_warn "未找到 OpenClaw patched ACP TCP server，Hermes MCP bridge 将使用镜像内置 ACP server"
+    fi
+
+    docker run -d \\
+        --name "${CONTAINER_NAME}" \\
+        --init \\
+        --restart unless-stopped \\
+        --user root \\
+        --network host \\
+        -e ACP_TCP_HOST="${ACP_TCP_HOST:-127.0.0.1}" \\
+        -e ACP_TCP_PORT="${ACP_PORT}" \\
+        -e TZ=Asia/Shanghai \\
+        --env-file "${DATA_DIR}/.env" \\
+        --entrypoint "/opt/hermes/docker/entrypoint-acp.sh" \\
+        --security-opt no-new-privileges=true \\
+        --tmpfs /tmp:size=256M \\
+        -v "${DATA_DIR}:/opt/data" \\
+        "${openclaw_patch_mount[@]}" \\
+        --cpus="${CPU_LIMIT}" \\
+        --memory="${MEM_LIMIT}" \\
+        --log-driver json-file \\
+        --log-opt max-size=20m \\
+        --log-opt max-file=5 \\
+        "${image_ref}" >/dev/null''',
+)
+
+dst.write_text(text)
+dst.chmod(0o755)
+PYEOF
+
+    printf '%s\n' "${patched_script}"
 }
 
 detect_existing_installation() {
@@ -145,7 +386,7 @@ PYEOF
 normalize_runtime_entries() {
     [[ -f "${OPENCLAW_CONFIG}" ]] || return 0
 
-    log_info "补齐 Hermes runtime 配置归一化"
+    log_info "补齐 Hermes runtime v5 配置归一化"
 
     if command -v jq >/dev/null 2>&1; then
         local tmp default_model
@@ -156,8 +397,10 @@ normalize_runtime_entries() {
         jq \
           --arg pk "${PLUGIN_CONFIG_KEY}" \
           --arg legacy_pk "hermes" \
-          --arg cn "${CONTAINER_NAME:-hermes-agent}" \
+          --arg cn "${CONTAINER_NAME}" \
           --arg dm "${default_model:-doubao-seed-2-0-pro-260215}" \
+          --arg tcp_host "${ACP_TCP_HOST}" \
+          --argjson tcp_port "${ACP_TCP_PORT}" \
           '
           del(.plugins.entries[$legacy_pk])
           | .plugins.allow = (((.plugins.allow // []) | map(select(. != $legacy_pk))) + [$pk] | unique)
@@ -167,8 +410,25 @@ normalize_runtime_entries() {
               "hermesContainerName": $cn,
               "defaultModel": $dm,
               "autoStrategy": true,
-              "enableLayeredProtocol": false,
-              "timeout": 600
+              "enableLayeredProtocol": true,
+              "defaultContextLevel": "L3",
+              "runtimeMinContextLevel": "L3",
+              "runtimeProjectWorkspaceSkills": true,
+              "transport": "tcp",
+              "tcpHost": $tcp_host,
+              "tcpPort": $tcp_port,
+              "timeout": 1800,
+              "skillProjection": {
+                "hostBackedDenylist": ["browser", "browser-use", "feishu"],
+                "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"],
+                "containerEnvSkillNames": [],
+                "alwaysExposeSkillNames": ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]
+              },
+              "mcpBridge": {
+                "enabled": true,
+                "servers": {},
+                "env": {}
+              }
             })
           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
               "hermes/default": { "alias": "hermes" }
@@ -191,9 +451,9 @@ normalize_runtime_entries() {
             }
           ' "${OPENCLAW_CONFIG}" > "${tmp}" && mv "${tmp}" "${OPENCLAW_CONFIG}"
     elif command -v python3 >/dev/null 2>&1; then
-        python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME:-hermes-agent}" <<'PYEOF'
+        python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME}" "${ACP_TCP_HOST}" "${ACP_TCP_PORT}" <<'PYEOF'
 import json, sys
-cf, pk, cn = sys.argv[1], sys.argv[2], sys.argv[3]
+cf, pk, cn, tcp_host, tcp_port = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
 with open(cf) as f:
     data = json.load(f)
 plugins = data.setdefault("plugins", {}).setdefault("entries", {})
@@ -206,8 +466,25 @@ cfg.update({
     "hermesContainerName": cn,
     "defaultModel": cfg.get("defaultModel", "doubao-seed-2-0-pro-260215"),
     "autoStrategy": True,
-    "enableLayeredProtocol": False,
-    "timeout": 600,
+    "enableLayeredProtocol": True,
+    "defaultContextLevel": "L3",
+    "runtimeMinContextLevel": "L3",
+    "runtimeProjectWorkspaceSkills": True,
+    "transport": "tcp",
+    "tcpHost": tcp_host,
+    "tcpPort": tcp_port,
+    "timeout": 1800,
+    "skillProjection": {
+        "hostBackedDenylist": ["browser", "browser-use", "feishu"],
+        "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"],
+        "containerEnvSkillNames": [],
+        "alwaysExposeSkillNames": ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"],
+    },
+    "mcpBridge": {
+        "enabled": True,
+        "servers": {},
+        "env": {},
+    },
 })
 data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("models", {})["hermes/default"] = {"alias": "hermes"}
 data.setdefault("models", {}).setdefault("providers", {})["hermes"] = {
@@ -249,6 +526,27 @@ invalidate_cached_plugin_archive() {
     fi
 }
 
+prepare_acp_tcp_server_patch() {
+    mkdir -p "${DATA_DIR}"
+
+    if [[ -f "${LOCAL_ACP_TCP_SERVER_PATCH}" ]]; then
+        cp -f "${LOCAL_ACP_TCP_SERVER_PATCH}" "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        chmod 0644 "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        log_info "已准备 OpenClaw patched ACP TCP server: ${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        return 0
+    fi
+
+    if download_file "${REMOTE_ACP_TCP_SERVER_PATCH_URL}" "${ACP_TCP_SERVER_PATCH_HOST_PATH}.tmp"; then
+        mv -f "${ACP_TCP_SERVER_PATCH_HOST_PATH}.tmp" "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        chmod 0644 "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        log_info "已下载 OpenClaw patched ACP TCP server: ${REMOTE_ACP_TCP_SERVER_PATCH_URL}"
+        return 0
+    fi
+    rm -f "${ACP_TCP_SERVER_PATCH_HOST_PATH}.tmp"
+
+    log_warn "未找到 patched ACP TCP server，Hermes MCP bridge 将使用镜像内置 ACP server"
+}
+
 main() {
     check_prereqs
     detect_existing_installation
@@ -256,24 +554,37 @@ main() {
     local base_install_script
     base_install_script="$(resolve_base_install_script)"
 
+    local patched_install_script
+    patched_install_script="$(create_v5_base_installer "${base_install_script}")"
+
     local plugin_tar
     plugin_tar="$(resolve_plugin_tarball)"
     if [[ -n "${LOCAL_PLUGIN_DIR}" && -d "${LOCAL_PLUGIN_DIR}" && -f "${LOCAL_PLUGIN_DIR}/openclaw.plugin.json" ]]; then
-        log_info "使用当前仓库插件源码打包安装: ${plugin_tar}"
+        log_info "使用当前仓库 Hermes 插件包安装: ${plugin_tar}"
     else
-        log_info "使用公共桶插件包安装: ${plugin_tar}"
+        log_info "使用远端/预构建 Hermes 插件包安装: ${plugin_tar}"
     fi
     log_info "要求 OpenClaw 版本 >= ${MIN_OPENCLAW_VERSION}"
+    log_info "Hermes runtime 镜像: ${HERMES_IMAGE_REF}"
+    log_info "Hermes ACP 监听: ${ACP_TCP_HOST}:${ACP_TCP_PORT}"
 
     # 旧版 install-v2 可能把错误插件包缓存到固定路径
     # /var/cache/hermes-agent/hermes-plugin.tar.gz。这里只失效插件缓存，
     # 不动大镜像缓存，避免每次都重新加载 1.1G 镜像。
     invalidate_cached_plugin_archive
+    prepare_acp_tcp_server_patch
 
     MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION}" \
     DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR}" \
     TOS_PLUGIN_URL="file://${plugin_tar}" \
-    bash "${base_install_script}" "$@"
+    HERMES_IMAGE_REF="${HERMES_IMAGE_REF}" \
+    HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME}" \
+    CONTAINER_NAME="${CONTAINER_NAME}" \
+    DATA_DIR="${DATA_DIR}" \
+    ACP_PORT="${ACP_TCP_PORT}" \
+    ACP_TCP_HOST="${ACP_TCP_HOST}" \
+    ACP_TCP_SERVER_PATCH_HOST_PATH="${ACP_TCP_SERVER_PATCH_HOST_PATH}" \
+    bash "${patched_install_script}" "$@"
 
     normalize_runtime_entries
     log_info "install-v5 执行完成"
