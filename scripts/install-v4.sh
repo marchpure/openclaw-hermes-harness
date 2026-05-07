@@ -15,6 +15,7 @@ set -Eeuo pipefail
 PUBLIC_BUCKET_BASE_URL="${PUBLIC_BUCKET_BASE_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com}"
 BASE_INSTALL_URL="${BASE_INSTALL_URL:-${PUBLIC_BUCKET_BASE_URL}/hermes-install.sh}"
 PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${PUBLIC_BUCKET_BASE_URL}/openclaw-plugin-hermes-install-v3.tgz}"
+RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/feat/hermes-runtime-bridge-productized-onecommit}"
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
 if [[ -n "${SCRIPT_SOURCE}" && -e "${SCRIPT_SOURCE}" ]]; then
@@ -28,6 +29,7 @@ fi
 BASE_INSTALL_SCRIPT="${SCRIPT_DIR:+${SCRIPT_DIR}/hermes-install.sh}"
 LOCAL_PLUGIN_DIR="${REPO_ROOT:+${REPO_ROOT}/openclaw-plugin-hermes}"
 LOCAL_ACP_TCP_SERVER_PATCH="${REPO_ROOT:+${REPO_ROOT}/hermes-containerized/scripts/acp-tcp-server.py}"
+REMOTE_ACP_TCP_SERVER_PATCH_URL="${REMOTE_ACP_TCP_SERVER_PATCH_URL:-${RAW_REPO_BASE_URL}/hermes-containerized/scripts/acp-tcp-server.py}"
 
 MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION:-2026.4.15}"
 DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR:-/var/cache/hermes-agent}"
@@ -206,6 +208,34 @@ PYEOF
         log_info "检测到已有 Hermes 安装痕迹，本次按升级流程执行"
     else
         log_info "未检测到 Hermes 安装痕迹，本次按全新安装流程执行"
+    fi
+}
+
+sanitize_openclaw_config_for_current_schema() {
+    [[ -f "${OPENCLAW_CONFIG}" ]] || return 0
+
+    if command -v jq >/dev/null 2>&1; then
+        if jq -e '.agents.defaults.agentRuntime? != null' "${OPENCLAW_CONFIG}" >/dev/null 2>&1; then
+            local tmp
+            tmp="$(mktemp)"
+            TEMP_DIRS+=("${tmp}")
+            jq 'del(.agents.defaults.agentRuntime)' "${OPENCLAW_CONFIG}" >"${tmp}" && mv "${tmp}" "${OPENCLAW_CONFIG}"
+            log_info "已移除当前 OpenClaw schema 不兼容的 agents.defaults.agentRuntime"
+        fi
+    else
+        python3 - "${OPENCLAW_CONFIG}" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    data = json.load(f)
+defaults = data.get("agents", {}).get("defaults")
+if isinstance(defaults, dict) and "agentRuntime" in defaults:
+    defaults.pop("agentRuntime", None)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+PYEOF
+        log_info "已检查当前 OpenClaw schema 不兼容的 agents.defaults.agentRuntime"
     fi
 }
 
@@ -525,9 +555,6 @@ normalize_runtime_entries() {
           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
               "hermes/default": { "alias": "hermes" }
             })
-          | .agents.defaults.agentRuntime = ((.agents.defaults.agentRuntime // {}) + {
-              "id": "auto"
-            })
           | .models.providers.hermes = {
               "baseUrl": "http://127.0.0.1/hermes-runtime",
               "apiKey": "hermes-runtime",
@@ -601,7 +628,6 @@ cfg.update({
     },
 })
 data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("models", {})["hermes/default"] = {"alias": "hermes"}
-data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("agentRuntime", {})["id"] = "auto"
 data.setdefault("models", {}).setdefault("providers", {})["hermes"] = {
     "baseUrl": "http://127.0.0.1/hermes-runtime",
     "apiKey": "hermes-runtime",
@@ -848,7 +874,136 @@ NODE
         return 0
     fi
 
-    die "当前 OpenClaw 未暴露 prepareAgentHarnessMcpBridge；请先升级到包含 Hermes MCP bridge SDK 的 OpenClaw core，再执行 install-v4"
+    local runtime_js="/usr/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js"
+    local runtime_dts="/usr/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.d.ts"
+    local package_json="/usr/lib/node_modules/openclaw/package.json"
+    if [[ ! -d "$(dirname "${runtime_js}")" || ! -f "${package_json}" ]]; then
+        die "当前 OpenClaw 未暴露 prepareAgentHarnessMcpBridge，且未找到可补齐的全局 OpenClaw SDK 路径"
+    fi
+
+    log_info "补齐 OpenClaw MCP bridge SDK helper: ${runtime_js}"
+    cat >"${runtime_js}" <<'JSEOF'
+import { createHash } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeRecord(value) {
+  return isRecord(value) ? { ...value } : {};
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashJson(value) {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function resolveOpenClawRoot() {
+  return path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
+}
+
+function resolvePluginToolsMcpServer() {
+  return {
+    command: process.execPath,
+    args: [path.join(resolveOpenClawRoot(), "dist", "mcp", "plugin-tools-serve.js")],
+  };
+}
+
+function normalizeConfiguredServers(params) {
+  const servers = normalizeRecord(params.configuredServers);
+  const cfg = isRecord(params.config) ? params.config : {};
+  const configured = isRecord(cfg.mcp) ? normalizeRecord(cfg.mcp.servers) : {};
+  return { ...configured, ...servers };
+}
+
+function normalizeEnv(params) {
+  const configured = normalizeRecord(params.configuredEnv);
+  return Object.fromEntries(
+    Object.entries(configured).filter((entry) => typeof entry[1] === "string"),
+  );
+}
+
+function buildContextEnv(params) {
+  return Object.fromEntries(
+    Object.entries({
+      OPENCLAW_AGENT_ID: readString(params.agentId),
+      OPENCLAW_ACCOUNT_ID: readString(params.accountId),
+      OPENCLAW_SESSION_KEY: readString(params.sessionKey),
+      OPENCLAW_WORKSPACE_DIR: readString(params.workspaceDir),
+      OPENCLAW_MESSAGE_CHANNEL: readString(params.messageChannel ?? params.messageProvider),
+      OPENCLAW_MESSAGE_TO: readString(params.messageTo),
+      OPENCLAW_MESSAGE_THREAD_ID: params.messageThreadId == null ? undefined : String(params.messageThreadId),
+      OPENCLAW_CURRENT_CHANNEL_ID: readString(params.currentChannelId),
+      OPENCLAW_CURRENT_THREAD_TS: readString(params.currentThreadTs),
+      OPENCLAW_CURRENT_MESSAGE_ID: params.currentMessageId == null ? undefined : String(params.currentMessageId),
+      OPENCLAW_REQUESTER_SENDER_ID: readString(params.requesterSenderId),
+      OPENCLAW_SENDER_IS_OWNER: typeof params.senderIsOwner === "boolean" ? String(params.senderIsOwner) : undefined,
+    }).filter((entry) => entry[1] !== undefined),
+  );
+}
+
+export async function prepareAgentHarnessMcpBridge(params = {}) {
+  if (params.enabled === false) return {};
+  const mcpServers = normalizeConfiguredServers(params);
+  if (!mcpServers["openclaw-plugin-tools"]) {
+    mcpServers["openclaw-plugin-tools"] = resolvePluginToolsMcpServer();
+  }
+  const env = {
+    ...normalizeEnv(params),
+    ...buildContextEnv(params),
+  };
+  const mcpConfigHash = hashJson(mcpServers);
+  const credentialScopeHash = hashJson(Object.keys(env).sort());
+  return {
+    mcpServers,
+    env,
+    mcpConfigHash,
+    mcpResumeHash: hashJson({
+      mcpConfigHash,
+      sessionKey: readString(params.sessionKey),
+      agentId: readString(params.agentId),
+      workspaceDir: readString(params.workspaceDir),
+    }),
+    credentialScopeHash,
+  };
+}
+JSEOF
+    cat >"${runtime_dts}" <<'DTSEOF'
+export type AgentHarnessMcpBridge = {
+  mcpServers?: Record<string, unknown>;
+  env?: Record<string, string>;
+  mcpConfigHash?: string;
+  mcpResumeHash?: string;
+  credentialScopeHash?: string;
+};
+export declare function prepareAgentHarnessMcpBridge(params?: Record<string, unknown>): Promise<AgentHarnessMcpBridge>;
+DTSEOF
+
+    node -c "${runtime_js}"
+    if ! node <<'NODE' >/dev/null 2>&1
+const { pathToFileURL } = require("node:url");
+(async () => {
+  const mod = await import(pathToFileURL("/usr/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js").href);
+  process.exit(typeof mod.prepareAgentHarnessMcpBridge === "function" ? 0 : 1);
+})();
+NODE
+    then
+        die "OpenClaw MCP bridge SDK helper 补齐后校验失败"
+    fi
+    log_info "OpenClaw MCP bridge SDK helper 已补齐"
 }
 
 invalidate_cached_plugin_archive() {
@@ -870,7 +1025,16 @@ prepare_acp_tcp_server_patch() {
         return 0
     fi
 
-    log_warn "未找到本地 patched ACP TCP server 源文件: ${LOCAL_ACP_TCP_SERVER_PATCH:-<empty>}"
+    mkdir -p "${DATA_DIR}"
+    if download_file "${REMOTE_ACP_TCP_SERVER_PATCH_URL}" "${ACP_TCP_SERVER_PATCH_HOST_PATH}.tmp"; then
+        mv -f "${ACP_TCP_SERVER_PATCH_HOST_PATH}.tmp" "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        chmod 0644 "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
+        log_info "已下载 OpenClaw patched ACP TCP server: ${REMOTE_ACP_TCP_SERVER_PATCH_URL}"
+        return 0
+    fi
+    rm -f "${ACP_TCP_SERVER_PATCH_HOST_PATH}.tmp"
+
+    log_warn "未找到本地 patched ACP TCP server 源文件，且远端下载失败: ${REMOTE_ACP_TCP_SERVER_PATCH_URL}"
     return 0
 }
 
@@ -895,6 +1059,7 @@ main() {
     log_info "Hermes v4 镜像: ${HERMES_IMAGE_REF}"
     log_info "Hermes ACP 监听: ${ACP_TCP_HOST}:${ACP_TCP_PORT}"
 
+    sanitize_openclaw_config_for_current_schema
     invalidate_cached_plugin_archive
     prepare_acp_tcp_server_patch
 
