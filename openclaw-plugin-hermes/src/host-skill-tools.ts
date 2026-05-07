@@ -220,21 +220,26 @@ export function registerHostBackedSkillTools(params: {
     ].join("\n"),
     parameters: {
       type: "object",
-      required: ["task"],
       properties: {
+        mode: {
+          type: "string",
+          enum: ["run", "preflight"],
+          description: "Use preflight for local readiness checks without launching a full computer-use task.",
+        },
         task: {
           type: "string",
-          description: "Computer-use task content, including target app/page and expected result.",
+          description: "Computer-use task content, including target app/page and expected result. Required when mode is run.",
         },
         timeoutSeconds: {
           type: "number",
-          description: "Optional timeout in seconds. Defaults to 600, capped at 3600.",
+          description: "Optional timeout in seconds. Defaults to 600 for run and 60 for preflight, capped at 3600.",
         },
       },
     },
     async execute(_id: string, toolParams: Record<string, unknown>) {
+      const mode = stringifyParam(toolParams.mode) === "preflight" ? "preflight" : "run";
       const task = stringifyParam(toolParams.task);
-      if (!task) return { content: [{ type: "text", text: "Error: task is required" }] };
+      if (mode === "run" && !task) return { content: [{ type: "text", text: "Error: task is required when mode is run" }] };
       try {
         await ensureExecutable(computerUseScript);
       } catch {
@@ -242,11 +247,12 @@ export function registerHostBackedSkillTools(params: {
           content: [{ type: "text", text: `Error: computer-use script not found: ${computerUseScript}` }],
         };
       }
-      const timeoutSeconds = Math.min(Math.max(numberParam(toolParams.timeoutSeconds) ?? 600, 30), 3600);
-      params.logger.warn(`computer_use requested; timeoutSeconds=${timeoutSeconds}`);
+      const defaultTimeoutSeconds = mode === "preflight" ? 60 : 600;
+      const timeoutSeconds = Math.min(Math.max(numberParam(toolParams.timeoutSeconds) ?? defaultTimeoutSeconds, 10), 3600);
+      params.logger.warn(`computer_use requested; mode=${mode} timeoutSeconds=${timeoutSeconds}`);
       const result = await runCommand({
         command: "bash",
-        args: [computerUseScript, "run", task],
+        args: mode === "preflight" ? [computerUseScript, "preflight"] : [computerUseScript, "run", task ?? ""],
         cwd: computerUseDir,
         env: buildHostSkillEnv(params.config),
         timeoutMs: timeoutSeconds * 1000,
