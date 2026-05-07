@@ -14,12 +14,13 @@ set -Eeuo pipefail
 
 PUBLIC_BUCKET_BASE_URL="${PUBLIC_BUCKET_BASE_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com}"
 BASE_INSTALL_URL="${BASE_INSTALL_URL:-${PUBLIC_BUCKET_BASE_URL}/hermes-install.sh}"
-PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${PUBLIC_BUCKET_BASE_URL}/openclaw-plugin-hermes-install-v3.tgz}"
+PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${PUBLIC_BUCKET_BASE_URL}/openclaw-plugin-hermes-install-v4.tgz}"
 RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/feat/hermes-runtime-bridge-productized-onecommit}"
 REMOTE_REPO_URL="${REMOTE_REPO_URL:-https://github.com/marchpure/openclaw-hermes-harness.git}"
 REMOTE_REPO_REF="${REMOTE_REPO_REF:-feat/hermes-runtime-bridge-productized-onecommit}"
 NPM_REGISTRY_URL="${NPM_REGISTRY_URL:-https://registry.npmmirror.com}"
 ALLOW_PUBLIC_PLUGIN_FALLBACK="${ALLOW_PUBLIC_PLUGIN_FALLBACK:-false}"
+PREFER_PREBUILT_PLUGIN_URL="${PREFER_PREBUILT_PLUGIN_URL:-true}"
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
 if [[ -n "${SCRIPT_SOURCE}" && -e "${SCRIPT_SOURCE}" ]]; then
@@ -195,6 +196,19 @@ resolve_plugin_tarball() {
     if [[ -n "${LOCAL_PLUGIN_DIR}" && -d "${LOCAL_PLUGIN_DIR}" && -f "${LOCAL_PLUGIN_DIR}/openclaw.plugin.json" ]]; then
         pack_plugin_tarball "${LOCAL_PLUGIN_DIR}" "当前仓库"
         return 0
+    fi
+
+    if [[ "${PREFER_PREBUILT_PLUGIN_URL}" == "true" ]]; then
+        local tmp_dir plugin_tar
+        tmp_dir="$(mktemp -d)"
+        TEMP_DIRS+=("${tmp_dir}")
+        plugin_tar="${tmp_dir}/openclaw-plugin-hermes-install-v4.tgz"
+        if download_file "${PUBLIC_PLUGIN_URL}" "${plugin_tar}"; then
+            RESOLVED_PLUGIN_SOURCE="公共预构建插件包"
+            printf '%s\n' "${plugin_tar}"
+            return 0
+        fi
+        log_warn "公共预构建插件包下载失败，将尝试源码打包: ${PUBLIC_PLUGIN_URL}"
     fi
 
     if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
