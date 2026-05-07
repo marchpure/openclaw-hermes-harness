@@ -4,7 +4,7 @@ import type {
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
 import { createRequire } from "node:module";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
@@ -40,6 +40,18 @@ type AgentHarnessRuntimeModule = {
     config?: unknown;
   }) => Promise<unknown>;
   emitSessionTranscriptUpdate?: (update: string | { sessionFile: string; sessionKey?: string }) => void;
+};
+type McpHttpModule = {
+  ensureMcpLoopbackServer?: () => Promise<{ port: number; close?: () => Promise<void> }>;
+  getActiveMcpLoopbackRuntime?: () => { port: number; token: string } | undefined;
+  createMcpLoopbackServerConfig?: (port: number) => {
+    mcpServers?: Record<string, unknown>;
+  };
+  n?: () => Promise<{ port: number; close?: () => Promise<void> }>;
+  i?: () => { port: number; token: string } | undefined;
+  r?: (port: number) => {
+    mcpServers?: Record<string, unknown>;
+  };
 };
 
 type AgentMessageForTranscript = Record<string, unknown>;
@@ -212,6 +224,7 @@ async function prepareHermesMcpBridge(params: {
       };
     }
     return await prepare({
+      runtime: "container",
       enabled: true,
       config: params.openClawConfig,
       workspaceDir: params.workspaceDir,
@@ -229,7 +242,12 @@ async function prepareHermesMcpBridge(params: {
       currentMessageId: params.currentMessageId,
       requesterSenderId: params.senderId,
       senderIsOwner: params.senderIsOwner,
-    });
+    }).then((bridge) =>
+      normalizeContainerReachableMcpBridge({
+        bridge,
+        params,
+      }),
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[hermes-acp] OpenClaw MCP bridge unavailable: ${message}`);
@@ -238,6 +256,163 @@ async function prepareHermesMcpBridge(params: {
       env: params.config.mcpBridge.env,
     };
   }
+}
+
+async function normalizeContainerReachableMcpBridge(args: {
+  bridge: AgentHarnessMcpBridge;
+  params: Parameters<typeof prepareHermesMcpBridge>[0];
+}): Promise<AgentHarnessMcpBridge> {
+  const bridge = args.bridge;
+  const servers = bridge.mcpServers ?? {};
+  const pluginTools = servers["openclaw-plugin-tools"];
+  if (!isHostOpenClawPluginToolsServer(pluginTools)) {
+    return bridge;
+  }
+
+  const loopback = await resolveMcpLoopbackBridge();
+  if (!loopback) {
+    console.warn("[hermes-acp] OpenClaw MCP loopback unavailable; disabling unreachable stdio plugin tools bridge");
+    return {
+      ...bridge,
+      mcpServers: omitUnreachablePluginToolsServer(servers),
+    };
+  }
+
+  const openclawServer = loopback.mcpServers?.openclaw;
+  if (!openclawServer) {
+    return bridge;
+  }
+
+  const env = {
+    ...(bridge.env ?? {}),
+    OPENCLAW_MCP_TOKEN: loopback.runtime.token,
+    OPENCLAW_MCP_SESSION_KEY: args.params.sessionKey ?? "main",
+    ...(args.params.agentId ? { OPENCLAW_MCP_AGENT_ID: args.params.agentId } : {}),
+    ...(args.params.agentAccountId ? { OPENCLAW_MCP_ACCOUNT_ID: args.params.agentAccountId } : {}),
+    ...(args.params.messageChannel || args.params.messageProvider
+      ? { OPENCLAW_MCP_MESSAGE_CHANNEL: args.params.messageChannel ?? args.params.messageProvider ?? "" }
+      : {}),
+    ...(typeof args.params.senderIsOwner === "boolean"
+      ? { OPENCLAW_MCP_SENDER_IS_OWNER: String(args.params.senderIsOwner) }
+      : {}),
+  };
+
+  return {
+    ...bridge,
+    mcpServers: {
+      ...omitUnreachablePluginToolsServer(servers),
+      openclaw: materializeMcpServerEnvPlaceholders(withOpenClawMcpMeta(openclawServer), env),
+    },
+    env,
+  };
+}
+
+function omitUnreachablePluginToolsServer(servers: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(servers).filter(([name]) => name !== "openclaw-plugin-tools"),
+  );
+}
+
+function isHostOpenClawPluginToolsServer(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const server = value as Record<string, unknown>;
+  return (
+    server.command === process.execPath &&
+    Array.isArray(server.args) &&
+    server.args.some(
+      (arg) =>
+        typeof arg === "string" &&
+        arg.endsWith("/dist/mcp/plugin-tools-serve.js") &&
+        arg.includes("/node_modules/openclaw/"),
+    )
+  );
+}
+
+function withOpenClawMcpMeta(server: unknown): unknown {
+  if (!server || typeof server !== "object" || Array.isArray(server)) return server;
+  return {
+    ...(server as Record<string, unknown>),
+    _meta: {
+      ...(((server as Record<string, unknown>)._meta as Record<string, unknown> | undefined) ?? {}),
+      openclaw: {
+        timeout: 600,
+        connectTimeout: 60,
+      },
+    },
+  };
+}
+
+function materializeMcpServerEnvPlaceholders(server: unknown, env: Record<string, string>): unknown {
+  if (!server || typeof server !== "object" || Array.isArray(server)) return server;
+  const record = server as Record<string, unknown>;
+  return {
+    ...record,
+    ...(record.headers && typeof record.headers === "object" && !Array.isArray(record.headers)
+      ? { headers: materializeStringRecord(record.headers as Record<string, unknown>, env) }
+      : {}),
+    ...(record.env && typeof record.env === "object" && !Array.isArray(record.env)
+      ? { env: materializeStringRecord(record.env as Record<string, unknown>, env) }
+      : {}),
+  };
+}
+
+function materializeStringRecord(record: Record<string, unknown>, env: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(record).flatMap(([key, value]) => {
+      if (typeof value !== "string") return [];
+      return [[key, value.replace(/\$\{([A-Z0-9_]+)\}/g, (_match, name: string) => env[name] ?? "")]];
+    }),
+  );
+}
+
+async function resolveMcpLoopbackBridge(): Promise<
+  { runtime: { port: number; token: string }; mcpServers?: Record<string, unknown> } | undefined
+> {
+  const module = await loadMcpHttpModule();
+  const ensureMcpLoopbackServer = module.ensureMcpLoopbackServer ?? module.n;
+  const getActiveMcpLoopbackRuntime = module.getActiveMcpLoopbackRuntime ?? module.i;
+  const createMcpLoopbackServerConfig = module.createMcpLoopbackServerConfig ?? module.r;
+  await ensureMcpLoopbackServer?.();
+  const runtime = getActiveMcpLoopbackRuntime?.();
+  if (!runtime) return undefined;
+  const config = createMcpLoopbackServerConfig?.(runtime.port);
+  return { runtime, mcpServers: config?.mcpServers };
+}
+
+async function loadMcpHttpModule(): Promise<McpHttpModule> {
+  const require = createRequire(import.meta.url);
+  const candidates: string[] = [];
+  try {
+    candidates.push(require.resolve("openclaw/plugin-sdk/gateway/mcp-http"));
+  } catch {}
+  for (const root of await resolveOpenClawDistDirs(require)) {
+    try {
+      const entries = await readdir(root);
+      for (const entry of entries) {
+        if (entry.startsWith("mcp-http-") && entry.endsWith(".js")) {
+          candidates.push(join(root, entry));
+        }
+      }
+    } catch {}
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return (await import(pathToFileURL(candidate).href)) as McpHttpModule;
+    } catch {}
+  }
+  throw new Error("OpenClaw MCP loopback SDK entry not found");
+}
+
+async function resolveOpenClawDistDirs(require: NodeRequire): Promise<string[]> {
+  const dirs: string[] = [];
+  try {
+    const sdkEntry = require.resolve("openclaw/plugin-sdk/agent-harness");
+    dirs.push(dirname(dirname(sdkEntry)));
+  } catch {}
+  dirs.push("/usr/lib/node_modules/openclaw/dist");
+  dirs.push("/usr/local/lib/node_modules/openclaw/dist");
+  return [...new Set(dirs)];
 }
 
 async function loadAgentHarnessRuntimeModule(): Promise<AgentHarnessRuntimeModule> {
