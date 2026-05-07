@@ -3,10 +3,18 @@
   "version": "1.0.0",
   "type": "module",
   "description": "OpenClaw plugin — delegate heavy tasks to containerized Hermes Agent via ACP",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
+  "files": [
+    "src/",
+    "dist/",
+    "openclaw.plugin.json",
+    "README.md",
+    "AGENTS.md",
+    "tsconfig.json"
+  ],
   "openclaw": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ],
     "compat": {
       "pluginApi": ">=2026.3.24-beta.2"
@@ -17,10 +25,12 @@
         "child_process",
         "net"
       ]
-    },
-    "hooks": {}
+    }
   },
   "license": "MIT",
+  "scripts": {
+    "build": "npx tsc"
+  },
   "devDependencies": {
     "@types/node": "^25.6.0",
     "tsx": "^4.21.0",
