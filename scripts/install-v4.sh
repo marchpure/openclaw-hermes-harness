@@ -18,6 +18,8 @@ PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${PUBLIC_BUCKET_BASE_URL}/openclaw-plugi
 RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/feat/hermes-runtime-bridge-productized-onecommit}"
 REMOTE_REPO_URL="${REMOTE_REPO_URL:-https://github.com/marchpure/openclaw-hermes-harness.git}"
 REMOTE_REPO_REF="${REMOTE_REPO_REF:-feat/hermes-runtime-bridge-productized-onecommit}"
+NPM_REGISTRY_URL="${NPM_REGISTRY_URL:-https://registry.npmmirror.com}"
+ALLOW_PUBLIC_PLUGIN_FALLBACK="${ALLOW_PUBLIC_PLUGIN_FALLBACK:-false}"
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
 if [[ -n "${SCRIPT_SOURCE}" && -e "${SCRIPT_SOURCE}" ]]; then
@@ -115,6 +117,7 @@ normalize_port() {
 }
 
 TEMP_DIRS=()
+RESOLVED_PLUGIN_SOURCE=""
 cleanup_temp() {
     local path=""
     for path in "${TEMP_DIRS[@]:-}"; do
@@ -142,6 +145,37 @@ check_prereqs() {
     fi
 }
 
+ensure_plugin_build_artifacts() {
+    local plugin_dir="$1"
+    [[ -d "${plugin_dir}" ]] || die "插件目录不存在: ${plugin_dir}"
+    [[ -f "${plugin_dir}/package.json" ]] || die "插件目录缺少 package.json: ${plugin_dir}"
+    [[ -f "${plugin_dir}/openclaw.plugin.json" ]] || die "插件目录缺少 openclaw.plugin.json: ${plugin_dir}"
+
+    if [[ ! -x "${plugin_dir}/node_modules/typescript/bin/tsc" ]]; then
+        { log_info "安装 Hermes 插件构建依赖: ${plugin_dir}"; } >&2
+        (cd "${plugin_dir}" && npm install --no-audit --no-fund --registry "${NPM_REGISTRY_URL}" >&2)
+    fi
+
+    [[ -x "${plugin_dir}/node_modules/typescript/bin/tsc" ]] || die "未找到 TypeScript 编译器: ${plugin_dir}/node_modules/typescript/bin/tsc"
+
+    { log_info "编译 Hermes 插件 dist 产物"; } >&2
+    (cd "${plugin_dir}" && node node_modules/typescript/lib/tsc.js >&2)
+
+    [[ -f "${plugin_dir}/dist/index.js" ]] || die "Hermes 插件构建完成后缺少 dist/index.js"
+}
+
+pack_plugin_tarball() {
+    local plugin_dir="$1" source_label="$2" tmp_dir pack_output plugin_tar
+    tmp_dir="$(mktemp -d)"
+    TEMP_DIRS+=("${tmp_dir}")
+    ensure_plugin_build_artifacts "${plugin_dir}"
+    { log_info "打包 ${source_label} Hermes 插件源码"; } >&2
+    pack_output="$(cd "${plugin_dir}" && npm pack --pack-destination "${tmp_dir}" --json)"
+    plugin_tar="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[0]["filename"])' <<<"${pack_output}")"
+    RESOLVED_PLUGIN_SOURCE="${source_label}"
+    printf '%s\n' "${tmp_dir}/${plugin_tar}"
+}
+
 resolve_base_install_script() {
     if [[ -n "${BASE_INSTALL_SCRIPT}" && -f "${BASE_INSTALL_SCRIPT}" ]]; then
         printf '%s\n' "${BASE_INSTALL_SCRIPT}"
@@ -159,20 +193,12 @@ resolve_base_install_script() {
 
 resolve_plugin_tarball() {
     if [[ -n "${LOCAL_PLUGIN_DIR}" && -d "${LOCAL_PLUGIN_DIR}" && -f "${LOCAL_PLUGIN_DIR}/openclaw.plugin.json" ]]; then
-        local tmp_dir pack_output plugin_tar
-        tmp_dir="$(mktemp -d)"
-        TEMP_DIRS+=("${tmp_dir}")
-        { log_info "构建本地 Hermes 插件源码"; } >&2
-        (cd "${LOCAL_PLUGIN_DIR}" && npm run build >&2)
-        pack_output="$(cd "${LOCAL_PLUGIN_DIR}" && npm pack --pack-destination "${tmp_dir}" --json)"
-        plugin_tar="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[0]["filename"])' <<<"${pack_output}")"
-        plugin_tar="${tmp_dir}/${plugin_tar}"
-        printf '%s\n' "${plugin_tar}"
+        pack_plugin_tarball "${LOCAL_PLUGIN_DIR}" "当前仓库"
         return 0
     fi
 
     if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-        local tmp_dir remote_repo remote_plugin_dir pack_output plugin_tar
+        local tmp_dir remote_repo remote_plugin_dir
         tmp_dir="$(mktemp -d)"
         TEMP_DIRS+=("${tmp_dir}")
         remote_repo="${tmp_dir}/repo"
@@ -180,18 +206,17 @@ resolve_plugin_tarball() {
         if git clone --depth 1 --branch "${REMOTE_REPO_REF}" --single-branch "${REMOTE_REPO_URL}" "${remote_repo}" >&2; then
             remote_plugin_dir="${remote_repo}/openclaw-plugin-hermes"
             if [[ -f "${remote_plugin_dir}/openclaw.plugin.json" ]]; then
-                { log_info "构建远端 Hermes 插件源码"; } >&2
-                (cd "${remote_plugin_dir}" && npm run build >&2)
-                pack_output="$(cd "${remote_plugin_dir}" && npm pack --pack-destination "${tmp_dir}" --json)"
-                plugin_tar="$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[0]["filename"])' <<<"${pack_output}")"
-                plugin_tar="${tmp_dir}/${plugin_tar}"
-                printf '%s\n' "${plugin_tar}"
+                pack_plugin_tarball "${remote_plugin_dir}" "远端分支 ${REMOTE_REPO_REF}"
                 return 0
             fi
-            log_warn "远端分支缺少 openclaw-plugin-hermes/openclaw.plugin.json，回退公共插件包"
+            die "远端分支缺少 openclaw-plugin-hermes/openclaw.plugin.json: ${REMOTE_REPO_URL}#${REMOTE_REPO_REF}"
         else
-            log_warn "远端分支插件源码拉取失败，回退公共插件包"
+            log_warn "远端分支插件源码拉取失败: ${REMOTE_REPO_URL}#${REMOTE_REPO_REF}"
         fi
+    fi
+
+    if [[ "${ALLOW_PUBLIC_PLUGIN_FALLBACK}" != "true" ]]; then
+        die "无法从当前仓库或远端分支构建 Hermes 插件包；默认禁止回退公共插件包。若确认需要旧公共包，请显式设置 ALLOW_PUBLIC_PLUGIN_FALLBACK=true"
     fi
 
     local tmp_dir plugin_tar
@@ -199,6 +224,7 @@ resolve_plugin_tarball() {
     TEMP_DIRS+=("${tmp_dir}")
     plugin_tar="${tmp_dir}/openclaw-plugin-hermes-install-v3.tgz"
     download_file "${PUBLIC_PLUGIN_URL}" "${plugin_tar}"
+    RESOLVED_PLUGIN_SOURCE="公共桶回退包"
     printf '%s\n' "${plugin_tar}"
 }
 
@@ -1192,11 +1218,7 @@ main() {
 
     local plugin_tar
     plugin_tar="$(resolve_plugin_tarball)"
-    if [[ -n "${LOCAL_PLUGIN_DIR}" && -d "${LOCAL_PLUGIN_DIR}" && -f "${LOCAL_PLUGIN_DIR}/openclaw.plugin.json" ]]; then
-        log_info "使用当前仓库插件源码打包安装: ${plugin_tar}"
-    else
-        log_info "使用公共桶插件包安装: ${plugin_tar}"
-    fi
+    log_info "使用 ${RESOLVED_PLUGIN_SOURCE:-未知来源} 的 Hermes 插件包安装: ${plugin_tar}"
     log_info "要求 OpenClaw 版本 >= ${MIN_OPENCLAW_VERSION}"
     log_info "Hermes v4 镜像: ${HERMES_IMAGE_REF}"
     log_info "Hermes ACP 监听: ${ACP_TCP_HOST}:${ACP_TCP_PORT}"
