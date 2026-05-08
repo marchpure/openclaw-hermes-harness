@@ -547,6 +547,196 @@ prepare_acp_tcp_server_patch() {
     log_warn "未找到 patched ACP TCP server，Hermes MCP bridge 将使用镜像内置 ACP server"
 }
 
+patch_openclaw_runtime_for_hermes_toolset() {
+    if ! command -v openclaw >/dev/null 2>&1; then
+        log_warn "未找到 openclaw CLI，跳过 Hermes MCP bridge 能力校验"
+        return 0
+    fi
+    command -v node >/dev/null 2>&1 || die "缺少 node，无法校验 OpenClaw MCP bridge SDK helper"
+
+    if node <<'NODE' >/dev/null 2>&1
+const path = require("node:path");
+const { pathToFileURL } = require("node:url");
+
+(async () => {
+  const candidates = [];
+  try {
+    candidates.push(require.resolve("openclaw/plugin-sdk/agent-harness-runtime"));
+  } catch {}
+  try {
+    const sdkEntry = require.resolve("openclaw/plugin-sdk/agent-harness");
+    const packageRoot = path.dirname(path.dirname(sdkEntry));
+    candidates.push(path.join(packageRoot, "plugin-sdk", "agent-harness-runtime.js"));
+  } catch {}
+  candidates.push("/usr/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js");
+  candidates.push("/usr/local/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js");
+
+  for (const candidate of candidates) {
+    try {
+      const mod = await import(pathToFileURL(candidate).href);
+      if (typeof mod.prepareAgentHarnessMcpBridge === "function") {
+        process.exit(0);
+      }
+    } catch {}
+  }
+  process.exit(1);
+})();
+NODE
+    then
+        log_info "OpenClaw MCP bridge SDK helper 已就绪"
+        return 0
+    fi
+
+    local openclaw_bin openclaw_real openclaw_dist runtime_js runtime_dts package_json
+    openclaw_bin="$(command -v openclaw || true)"
+    [[ -n "${openclaw_bin}" ]] || die "未找到 openclaw CLI，无法补齐 OpenClaw MCP bridge SDK helper"
+    openclaw_real="$(readlink -f "${openclaw_bin}" 2>/dev/null || realpath "${openclaw_bin}" 2>/dev/null || printf '%s\n' "${openclaw_bin}")"
+    openclaw_dist=""
+    for candidate in \
+        "$(dirname "${openclaw_real}")/../lib/node_modules/openclaw/dist" \
+        "$(dirname "${openclaw_real}")/../node_modules/openclaw/dist" \
+        "$(dirname "$(dirname "${openclaw_real}")")/lib/node_modules/openclaw/dist" \
+        "/usr/lib/node_modules/openclaw/dist" \
+        "/usr/local/lib/node_modules/openclaw/dist"
+    do
+        if [[ -d "${candidate}" && -f "$(dirname "${candidate}")/package.json" ]]; then
+            openclaw_dist="$(cd "${candidate}" && pwd)"
+            break
+        fi
+    done
+    [[ -n "${openclaw_dist}" ]] || die "无法定位 OpenClaw dist 目录，无法补齐 MCP bridge SDK helper"
+
+    runtime_js="${openclaw_dist}/plugin-sdk/agent-harness-runtime.js"
+    runtime_dts="${openclaw_dist}/plugin-sdk/agent-harness-runtime.d.ts"
+    package_json="$(dirname "${openclaw_dist}")/package.json"
+    [[ -f "${package_json}" ]] || die "OpenClaw package.json 不存在: ${package_json}"
+
+    log_info "补齐 OpenClaw MCP bridge SDK helper: ${runtime_js}"
+    mkdir -p "$(dirname "${runtime_js}")"
+    cat >"${runtime_js}" <<'JSEOF'
+import { createHash } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeRecord(value) {
+  return isRecord(value) ? { ...value } : {};
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashJson(value) {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function resolveOpenClawRoot() {
+  return path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
+}
+
+function resolvePluginToolsMcpServer() {
+  return {
+    command: process.execPath,
+    args: [path.join(resolveOpenClawRoot(), "dist", "mcp", "plugin-tools-serve.js")],
+  };
+}
+
+function normalizeConfiguredServers(params) {
+  const servers = normalizeRecord(params.configuredServers);
+  const cfg = isRecord(params.config) ? params.config : {};
+  const configured = isRecord(cfg.mcp) ? normalizeRecord(cfg.mcp.servers) : {};
+  return { ...configured, ...servers };
+}
+
+function normalizeEnv(params) {
+  const configured = normalizeRecord(params.configuredEnv);
+  return Object.fromEntries(
+    Object.entries(configured).filter((entry) => typeof entry[1] === "string"),
+  );
+}
+
+function buildContextEnv(params) {
+  return Object.fromEntries(
+    Object.entries({
+      OPENCLAW_AGENT_ID: readString(params.agentId),
+      OPENCLAW_ACCOUNT_ID: readString(params.accountId),
+      OPENCLAW_SESSION_KEY: readString(params.sessionKey),
+      OPENCLAW_WORKSPACE_DIR: readString(params.workspaceDir),
+      OPENCLAW_MESSAGE_CHANNEL: readString(params.messageChannel ?? params.messageProvider),
+      OPENCLAW_MESSAGE_TO: readString(params.messageTo),
+      OPENCLAW_MESSAGE_THREAD_ID: params.messageThreadId == null ? undefined : String(params.messageThreadId),
+      OPENCLAW_CURRENT_CHANNEL_ID: readString(params.currentChannelId),
+      OPENCLAW_CURRENT_THREAD_TS: readString(params.currentThreadTs),
+      OPENCLAW_CURRENT_MESSAGE_ID: params.currentMessageId == null ? undefined : String(params.currentMessageId),
+      OPENCLAW_REQUESTER_SENDER_ID: readString(params.requesterSenderId),
+      OPENCLAW_SENDER_IS_OWNER: typeof params.senderIsOwner === "boolean" ? String(params.senderIsOwner) : undefined,
+    }).filter((entry) => entry[1] !== undefined),
+  );
+}
+
+export async function prepareAgentHarnessMcpBridge(params = {}) {
+  if (params.enabled === false) return {};
+  const mcpServers = normalizeConfiguredServers(params);
+  if (!mcpServers["openclaw-plugin-tools"]) {
+    mcpServers["openclaw-plugin-tools"] = resolvePluginToolsMcpServer();
+  }
+  const env = {
+    ...normalizeEnv(params),
+    ...buildContextEnv(params),
+  };
+  const mcpConfigHash = hashJson(mcpServers);
+  const credentialScopeHash = hashJson(Object.keys(env).sort());
+  return {
+    mcpServers,
+    env,
+    mcpConfigHash,
+    mcpResumeHash: hashJson({
+      mcpConfigHash,
+      sessionKey: readString(params.sessionKey),
+      agentId: readString(params.agentId),
+      workspaceDir: readString(params.workspaceDir),
+    }),
+    credentialScopeHash,
+  };
+}
+JSEOF
+    cat >"${runtime_dts}" <<'DTSEOF'
+export type AgentHarnessMcpBridge = {
+  mcpServers?: Record<string, unknown>;
+  env?: Record<string, string>;
+  mcpConfigHash?: string;
+  mcpResumeHash?: string;
+  credentialScopeHash?: string;
+};
+export declare function prepareAgentHarnessMcpBridge(params?: Record<string, unknown>): Promise<AgentHarnessMcpBridge>;
+DTSEOF
+
+    node -c "${runtime_js}"
+    if ! RUNTIME_JS="${runtime_js}" node <<'NODE' >/dev/null 2>&1
+const { pathToFileURL } = require("node:url");
+(async () => {
+  const mod = await import(pathToFileURL(process.env.RUNTIME_JS).href);
+  process.exit(typeof mod.prepareAgentHarnessMcpBridge === "function" ? 0 : 1);
+})();
+NODE
+    then
+        die "OpenClaw MCP bridge SDK helper 补齐后校验失败"
+    fi
+    log_info "OpenClaw MCP bridge SDK helper 已补齐"
+}
+
 main() {
     check_prereqs
     detect_existing_installation
@@ -573,6 +763,7 @@ main() {
     # 不动大镜像缓存，避免每次都重新加载 1.1G 镜像。
     invalidate_cached_plugin_archive
     prepare_acp_tcp_server_patch
+    patch_openclaw_runtime_for_hermes_toolset
 
     MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION}" \
     DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR}" \
@@ -587,6 +778,7 @@ main() {
     bash "${patched_install_script}" "$@"
 
     normalize_runtime_entries
+    patch_openclaw_runtime_for_hermes_toolset
     log_info "install-v5 执行完成"
 }
 

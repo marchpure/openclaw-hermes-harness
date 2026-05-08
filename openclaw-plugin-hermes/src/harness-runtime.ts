@@ -4,8 +4,9 @@ import type {
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
@@ -461,9 +462,48 @@ async function resolveOpenClawDistDirs(require: NodeRequire): Promise<string[]> 
     const sdkEntry = require.resolve("openclaw/plugin-sdk/agent-harness");
     dirs.push(dirname(dirname(sdkEntry)));
   } catch {}
+  dirs.push(...(await resolveOpenClawDistDirsFromCli()));
   dirs.push("/usr/lib/node_modules/openclaw/dist");
   dirs.push("/usr/local/lib/node_modules/openclaw/dist");
   return [...new Set(dirs)];
+}
+
+async function resolveOpenClawDistDirsFromCli(): Promise<string[]> {
+  const openclawBin = (await execFileText("sh", ["-lc", "command -v openclaw || true"]))
+    .trim()
+    .split(/\r?\n/)[0];
+  if (!openclawBin) return [];
+
+  const resolvedBin = await safeRealpath(openclawBin);
+  if (!resolvedBin) return [];
+
+  const candidates = [
+    join(dirname(resolvedBin), "..", "lib", "node_modules", "openclaw", "dist"),
+    join(dirname(resolvedBin), "..", "node_modules", "openclaw", "dist"),
+    join(dirname(dirname(resolvedBin)), "lib", "node_modules", "openclaw", "dist"),
+  ];
+  const result: string[] = [];
+  for (const candidate of candidates) {
+    const resolved = await safeRealpath(candidate);
+    if (resolved) result.push(resolved);
+  }
+  return result;
+}
+
+async function safeRealpath(path: string): Promise<string | undefined> {
+  try {
+    return await realpath(path);
+  } catch {
+    return undefined;
+  }
+}
+
+async function execFileText(file: string, args: string[]): Promise<string> {
+  return await new Promise<string>((resolve) => {
+    execFile(file, args, (error, stdout) => {
+      resolve(error ? "" : stdout.toString());
+    });
+  });
 }
 
 async function loadAgentHarnessRuntimeModule(): Promise<AgentHarnessRuntimeModule> {
@@ -477,6 +517,9 @@ async function loadAgentHarnessRuntimeModule(): Promise<AgentHarnessRuntimeModul
     const pkgRoot = dirname(dirname(sdkEntry));
     candidates.push(join(pkgRoot, "plugin-sdk", "agent-harness-runtime.js"));
   } catch {}
+  for (const root of await resolveOpenClawDistDirs(require)) {
+    candidates.push(join(root, "plugin-sdk", "agent-harness-runtime.js"));
+  }
   candidates.push("/usr/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js");
   candidates.push("/usr/local/lib/node_modules/openclaw/dist/plugin-sdk/agent-harness-runtime.js");
 
