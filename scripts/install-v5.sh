@@ -387,10 +387,12 @@ normalize_runtime_entries() {
     [[ -f "${OPENCLAW_CONFIG}" ]] || return 0
 
     log_info "补齐 Hermes runtime v5 配置归一化"
+    local config_dir
+    config_dir="$(dirname "${OPENCLAW_CONFIG}")"
 
     if command -v jq >/dev/null 2>&1; then
         local tmp default_model
-        tmp="$(mktemp)"
+        tmp="$(mktemp "${config_dir}/openclaw.json.tmp.XXXXXX")"
         TEMP_DIRS+=("${tmp}")
         default_model="$(jq -r --arg pk "${PLUGIN_CONFIG_KEY}" '.plugins.entries[$pk].config.defaultModel // "doubao-seed-2-0-pro-260215"' "${OPENCLAW_CONFIG}" 2>/dev/null)"
 
@@ -402,11 +404,14 @@ normalize_runtime_entries() {
           --arg tcp_host "${ACP_TCP_HOST}" \
           --argjson tcp_port "${ACP_TCP_PORT}" \
           '
-          del(.plugins.entries[$legacy_pk])
+          .plugins = (.plugins // {})
+          | .plugins.entries = (.plugins.entries // {})
+          | del(.plugins.entries[$legacy_pk])
           | .plugins.allow = (((.plugins.allow // []) | map(select(. != $legacy_pk))) + [$pk] | unique)
           | .plugins.entries[$pk] = (.plugins.entries[$pk] // {})
           | .plugins.entries[$pk].enabled = true
-          | .plugins.entries[$pk].config = ((.plugins.entries[$pk].config // {}) + {
+          | (.plugins.entries[$pk].config // {}) as $cfg
+          | .plugins.entries[$pk].config = ($cfg + {
               "hermesContainerName": $cn,
               "defaultModel": $dm,
               "autoStrategy": true,
@@ -419,20 +424,24 @@ normalize_runtime_entries() {
               "tcpPort": $tcp_port,
               "timeout": 1800,
               "skillProjection": {
-                "hostBackedDenylist": ["browser", "browser-use", "feishu"],
-                "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"],
-                "containerEnvSkillNames": [],
-                "alwaysExposeSkillNames": ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]
+                "hostBackedDenylist": (((($cfg.skillProjection.hostBackedDenylist // []) + ["browser", "browser-use", "feishu"]) | unique)),
+                "hostBackedSkillNames": (((($cfg.skillProjection.hostBackedSkillNames // []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"]) | unique)),
+                "containerEnvSkillNames": ($cfg.skillProjection.containerEnvSkillNames // []),
+                "alwaysExposeSkillNames": (((($cfg.skillProjection.alwaysExposeSkillNames // []) + ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]) | unique))
               },
               "mcpBridge": {
                 "enabled": true,
-                "servers": {},
-                "env": {}
+                "servers": ($cfg.mcpBridge.servers // {}),
+                "env": ($cfg.mcpBridge.env // {})
               }
             })
+          | .agents = (.agents // {})
+          | .agents.defaults = (.agents.defaults // {})
           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
               "hermes/default": { "alias": "hermes" }
             })
+          | .models = (.models // {})
+          | .models.providers = (.models.providers // {})
           | .models.providers.hermes = {
               "baseUrl": "http://127.0.0.1/hermes-runtime",
               "apiKey": "hermes-runtime",
@@ -449,11 +458,15 @@ normalize_runtime_entries() {
                 }
               ]
             }
-          ' "${OPENCLAW_CONFIG}" > "${tmp}" && mv "${tmp}" "${OPENCLAW_CONFIG}"
+          ' "${OPENCLAW_CONFIG}" > "${tmp}" || die "OpenClaw 配置归一化失败: jq 写入失败"
+        mv "${tmp}" "${OPENCLAW_CONFIG}"
     elif command -v python3 >/dev/null 2>&1; then
-        python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME}" "${ACP_TCP_HOST}" "${ACP_TCP_PORT}" <<'PYEOF'
+        local tmp
+        tmp="$(mktemp "${config_dir}/openclaw.json.tmp.XXXXXX")"
+        TEMP_DIRS+=("${tmp}")
+        python3 - "${OPENCLAW_CONFIG}" "${tmp}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME}" "${ACP_TCP_HOST}" "${ACP_TCP_PORT}" <<'PYEOF' || die "OpenClaw 配置归一化失败: python 写入失败"
 import json, sys
-cf, pk, cn, tcp_host, tcp_port = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
+cf, tmp, pk, cn, tcp_host, tcp_port = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], int(sys.argv[6])
 with open(cf) as f:
     data = json.load(f)
 plugins = data.setdefault("plugins", {}).setdefault("entries", {})
@@ -462,6 +475,22 @@ entry = plugins.setdefault(pk, {})
 entry["enabled"] = True
 cfg = entry.setdefault("config", {})
 cfg.setdefault("defaultModel", "doubao-seed-2-0-pro-260215")
+skill_cfg = cfg.get("skillProjection") if isinstance(cfg.get("skillProjection"), dict) else {}
+mcp_cfg = cfg.get("mcpBridge") if isinstance(cfg.get("mcpBridge"), dict) else {}
+
+def unique(values):
+    out = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        key = value.strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value.strip())
+    return out
+
 cfg.update({
     "hermesContainerName": cn,
     "defaultModel": cfg.get("defaultModel", "doubao-seed-2-0-pro-260215"),
@@ -475,15 +504,15 @@ cfg.update({
     "tcpPort": tcp_port,
     "timeout": 1800,
     "skillProjection": {
-        "hostBackedDenylist": ["browser", "browser-use", "feishu"],
-        "hostBackedSkillNames": ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"],
-        "containerEnvSkillNames": [],
-        "alwaysExposeSkillNames": ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"],
+        "hostBackedDenylist": unique(skill_cfg.get("hostBackedDenylist", []) + ["browser", "browser-use", "feishu"]),
+        "hostBackedSkillNames": unique(skill_cfg.get("hostBackedSkillNames", []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"]),
+        "containerEnvSkillNames": unique(skill_cfg.get("containerEnvSkillNames", [])),
+        "alwaysExposeSkillNames": unique(skill_cfg.get("alwaysExposeSkillNames", []) + ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]),
     },
     "mcpBridge": {
         "enabled": True,
-        "servers": {},
-        "env": {},
+        "servers": mcp_cfg.get("servers", {}) if isinstance(mcp_cfg.get("servers"), dict) else {},
+        "env": mcp_cfg.get("env", {}) if isinstance(mcp_cfg.get("env"), dict) else {},
     },
 })
 data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("models", {})["hermes/default"] = {"alias": "hermes"}
@@ -508,9 +537,10 @@ allow = [item for item in allow if item != "hermes"]
 if pk not in allow:
     allow.append(pk)
 data["plugins"]["allow"] = allow
-with open(cf, "w") as f:
+with open(tmp, "w") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
 PYEOF
+        mv "${tmp}" "${OPENCLAW_CONFIG}"
     else
         die "缺少 jq 或 python3，无法归一化 OpenClaw 配置"
     fi
