@@ -165,9 +165,9 @@ export interface DispatchResult {
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
-    total_tokens?: number;
     cache_read_tokens?: number;
     cache_write_tokens?: number;
+    total_tokens?: number;
   };
   duration: number;
   strategy: StrategyTriple;
@@ -175,31 +175,88 @@ export interface DispatchResult {
 
 // ─── Plugin Config ──────────────────────────────────────────────────────────
 
-export type TransportMode = "tcp" | "stdio";
+export type ProjectedCapabilityClass =
+  | "projectable-local"
+  | "container-env-required"
+  | "host-backed"
+  | "unsupported";
+
+export type SkillExecutionPlacement =
+  | "projected-local"
+  | "host-backed"
+  | "container-env-required"
+  | "unsupported";
+
+export interface OpenClawSkillSnapshot {
+  prompt?: string;
+  skills?: Array<{
+    name: string;
+    primaryEnv?: string;
+    requiredEnv?: string[];
+  }>;
+  resolvedSkills?: Array<{
+    name?: string;
+    description?: string;
+    filePath?: string;
+    path?: string;
+    source?: string;
+  }>;
+  skillFilter?: string[];
+  version?: number;
+}
+
+export interface OpenClawAttemptContext {
+  agentId?: string;
+  skillsSnapshot?: OpenClawSkillSnapshot;
+  extraSystemPrompt?: string;
+  bootstrapContextMode?: string;
+}
 
 export interface HermesPluginConfig {
-  hermesCommand?: string;
   hermesContainerName: string;
   hermesDataDir?: string;
-  /** Transport mode: "tcp" (recommended) or "stdio" (docker exec). Default: "tcp" */
-  transport: TransportMode;
-  /** TCP host for Hermes ACP bridge. Default: "127.0.0.1" */
+  /** Host root dir for task-scoped execution envs. Defaults under hermesDataDir. */
+  execEnvRootDir?: string;
+  /** Runtime-visible root dir for task-scoped execution envs. Defaults to execEnvRootDir. */
+  runtimeExecEnvRootDir?: string;
+  /** If true, mirror host execenvs into the Hermes Docker container before ACP turns. */
+  mirrorExecEnvToContainer: boolean;
+  /** Stable schema/version marker used in session binding hashes. */
+  projectionVersion: string;
+  /** The local Hermes bridge is TCP-only in the current OpenClaw deployment. */
+  transport: "tcp";
+  /** TCP host for the local Hermes ACP bridge. */
   tcpHost: string;
-  /** TCP port for Hermes ACP bridge. Default: 3100 */
+  /** TCP port for the local Hermes ACP bridge. */
   tcpPort: number;
   defaultModel?: string;
   defaultContextLevel: ContextLevel;
+  runtimeMinContextLevel: ContextLevel;
+  runtimeProjectWorkspaceSkills: boolean;
   defaultCredentialScope: CredentialScopeMode;
   defaultWriteback: WritebackLevel;
   timeout: number;
   autoStrategy: boolean;
-  /** 是否启用分层协议（L/C/W），关闭后直接派发任务 */
+  /** Enable the layered L/C/W dispatch path. Disabled means direct dispatch. */
   enableLayeredProtocol: boolean;
-  /** OTEL 配置。不配置 endpoint 则不开启可观测能力。 */
+  skillProjection: {
+    hostBackedDenylist: string[];
+    hostBackedSkillNames: string[];
+    containerEnvSkillNames: string[];
+    alwaysExposeSkillNames: string[];
+  };
+  mcpBridge: {
+    enabled: boolean;
+    servers: Record<string, unknown>;
+    env: Record<string, string>;
+  };
+  execEnvCleanup: {
+    enabled: boolean;
+    maxAgeHours: number;
+    maxCount: number;
+  };
   otel?: {
-    /** APMPlus OTEL 上报地址，为空则不开启可观测能力 */
     endpoint?: string;
-    /** OTEL service.name。不配置则使用环境变量 OTEL_SERVICE_NAME。 */
     serviceName?: string;
   };
 }
@@ -209,12 +266,65 @@ export const DEFAULT_CONFIG: HermesPluginConfig = {
   transport: "tcp",
   tcpHost: "127.0.0.1",
   tcpPort: 3100,
+  projectionVersion: "c1c2-v1",
+  runtimeExecEnvRootDir: "/tmp/openclaw-hermes-execenv",
+  mirrorExecEnvToContainer: true,
   defaultContextLevel: "L1",
+  runtimeMinContextLevel: "L2",
+  runtimeProjectWorkspaceSkills: true,
   defaultCredentialScope: "none",
   defaultWriteback: "W1",
   timeout: 1800,
   autoStrategy: true,
   enableLayeredProtocol: true,
+  skillProjection: {
+    hostBackedDenylist: ["browser", "browser-use", "feishu"],
+    hostBackedSkillNames: [
+      "lark-doc",
+      "lark-calendar",
+      "lark-im",
+      "lark-sheets",
+      "lark-base",
+      "lark-drive",
+      "lark-task",
+      "lark-mail",
+      "feishu",
+      "feishu-fetch-doc",
+      "feishu-create-doc",
+      "feishu-update-doc",
+      "feishu-calendar",
+      "feishu-im-read",
+      "feishu-bitable",
+      "feishu-task",
+      "feishu-troubleshoot",
+      "browser",
+      "browser-use",
+      "computer-use",
+      "byted-web-search",
+      "web_search",
+    ],
+    containerEnvSkillNames: [],
+    alwaysExposeSkillNames: [
+      "browser-use",
+      "computer-use",
+      "byted-web-search",
+      "web_search",
+      "opencli",
+      "byted-seedream-image-generate",
+      "byted-seedance-video-generate",
+      "arkdrive-netdisk",
+    ],
+  },
+  mcpBridge: {
+    enabled: false,
+    servers: {},
+    env: {},
+  },
+  execEnvCleanup: {
+    enabled: true,
+    maxAgeHours: 24,
+    maxCount: 200,
+  },
 };
 
 // ─── ACP Protocol Types ─────────────────────────────────────────────────────
@@ -235,13 +345,13 @@ export interface AcpJsonRpcResponse {
 
 export interface AcpSessionEvent {
   type: "text" | "thinking" | "tool_progress" | "tool_result" | "done" | "error";
+  timestamp?: number;
   text?: string;
   toolName?: string;
   toolTitle?: string;
+  toolInput?: unknown;
   toolCallId?: string;
-  toolInput?: Record<string, unknown> | string;
   message?: string;
-  timestamp?: number;
 }
 
 // ─── Context Payload ────────────────────────────────────────────────────────
@@ -271,6 +381,96 @@ export interface ContextPayload {
   skills?: Array<{ name: string; path: string; description?: string }>;
   mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
   cronDefinitions?: Array<{ schedule: string; task: string; enabled: boolean }>;
+}
+
+// ─── Execution Projection ──────────────────────────────────────────────────
+
+export interface SkillManifestEntry {
+  name: string;
+  path: string;
+  description?: string;
+  requiredEnv?: string[];
+}
+
+export interface ProjectedSkill extends SkillManifestEntry {
+  classification: ProjectedCapabilityClass;
+  placement: SkillExecutionPlacement;
+  sourcePath?: string;
+  projectedPath?: string;
+  runtimePath?: string;
+  hash?: string;
+  mcpTool?: string;
+  mcpToolHint?: string;
+  diagnostics?: string[];
+}
+
+export interface ProjectedContextFiles {
+  soul?: string;
+  user?: string;
+  agent?: string;
+  task?: string;
+}
+
+export interface ProjectedContext {
+  files: ProjectedContextFiles;
+  memory?: ContextPayload["memory"];
+  commandAllowlist?: string[];
+  discoveredSkills: SkillManifestEntry[];
+  skillsPrompt?: string;
+  skillDiagnostics?: string[];
+}
+
+export interface ExecEnvInput {
+  taskId: string;
+  workspaceDir: string;
+  contextFiles: ProjectedContextFiles;
+  projectedSkills: ProjectedSkill[];
+  runtimeConfig: Record<string, unknown>;
+  openClaw?: {
+    agentId?: string;
+    skillsSnapshotVersion?: number;
+    skillsSource?: "snapshot" | "workspace";
+  };
+}
+
+export interface ExecEnvManifest {
+  version: string;
+  taskId: string;
+  hostWorkspaceDir: string;
+  runtimeCwd: string;
+  files: {
+    soul?: string;
+    user?: string;
+    agent?: string;
+    task?: string;
+  };
+  skills: ProjectedSkill[];
+  openClaw?: {
+    agentId?: string;
+    skillsSnapshotVersion?: number;
+    skillsSource?: "snapshot" | "workspace";
+  };
+  hashes: {
+    workspace: string;
+    skills: string;
+    projection: string;
+    sessionBinding: string;
+  };
+}
+
+export interface ExecEnvBuildResult {
+  hostExecEnvPath: string;
+  runtimeExecEnvPath: string;
+  manifestPath: string;
+  projectedSkills: ProjectedSkill[];
+  sessionBindingHash: string;
+}
+
+export interface HermesAcpSessionOptions {
+  cwd: string;
+  mcpServers?: Record<string, unknown>;
+  mcpConfigPath?: string;
+  env?: Record<string, string>;
 }
 
 // ─── Credential Entry ───────────────────────────────────────────────────────
