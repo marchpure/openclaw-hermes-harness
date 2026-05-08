@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-hermes",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "description": "OpenClaw plugin — delegate heavy tasks to containerized Hermes Agent via ACP",
   "main": "dist/index.js",
