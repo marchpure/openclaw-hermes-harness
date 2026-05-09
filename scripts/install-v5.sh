@@ -8,16 +8,17 @@
 # v5 在 v3 刷新脚本基础上增量加入 Hermes runtime 安装流程:
 # - 使用镜像仓库引用启动 Hermes runtime，避免下载 TOS tar 后 docker load。
 # - 容器使用 host network，并显式设置 ACP_TCP_HOST/ACP_TCP_PORT。
+# - v1.2.0 镜像已内置 OpenClaw patched ACP TCP server，不再挂载脚本覆盖。
 # - 默认启用 layered protocol 和 OpenClaw host-backed skill/MCP 路由。
 
 set -Eeuo pipefail
 
 PUBLIC_BUCKET_BASE_URL="${PUBLIC_BUCKET_BASE_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com}"
 BASE_INSTALL_URL="${BASE_INSTALL_URL:-${PUBLIC_BUCKET_BASE_URL}/hermes-install.sh}"
-RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/feat/hermes-runtime-bridge-productized-onecommit-squashed-after-e743208}"
+RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/feat/hermes-runtime-bridge-productized-squashed-from-1ca5fc3}"
 PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${RAW_REPO_BASE_URL}/openclaw-plugin-hermes-install-v5.tgz}"
 REMOTE_REPO_URL="${REMOTE_REPO_URL:-https://github.com/marchpure/openclaw-hermes-harness.git}"
-REMOTE_REPO_REF="${REMOTE_REPO_REF:-feat/hermes-runtime-bridge-productized-onecommit-squashed-after-e743208}"
+REMOTE_REPO_REF="${REMOTE_REPO_REF:-feat/hermes-runtime-bridge-productized-squashed-from-1ca5fc3}"
 NPM_REGISTRY_URL="${NPM_REGISTRY_URL:-https://registry.npmmirror.com}"
 PREFER_PREBUILT_PLUGIN_URL="${PREFER_PREBUILT_PLUGIN_URL:-true}"
 
@@ -32,8 +33,6 @@ fi
 
 BASE_INSTALL_SCRIPT="${SCRIPT_DIR:+${SCRIPT_DIR}/hermes-install.sh}"
 LOCAL_PLUGIN_DIR="${REPO_ROOT:+${REPO_ROOT}/openclaw-plugin-hermes}"
-LOCAL_ACP_TCP_SERVER_PATCH="${REPO_ROOT:+${REPO_ROOT}/hermes-containerized/scripts/acp-tcp-server.py}"
-REMOTE_ACP_TCP_SERVER_PATCH_URL="${REMOTE_ACP_TCP_SERVER_PATCH_URL:-${RAW_REPO_BASE_URL}/hermes-containerized/scripts/acp-tcp-server.py}"
 
 MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION:-2026.4.15}"
 DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR:-/var/cache/hermes-agent}"
@@ -43,14 +42,13 @@ PLUGIN_LEGACY_DIR_NAME="${PLUGIN_LEGACY_DIR_NAME:-hermes}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/root/.openclaw/openclaw.json}"
 OPENCLAW_EXTENSIONS_DIR="${OPENCLAW_EXTENSIONS_DIR:-/root/.openclaw/extensions}"
 
-HERMES_IMAGE_REF="${HERMES_IMAGE_REF:-iaas-test01-cn-beijing.cr.volces.com/hermes/hermes-dockerimage:v1.2.0}"
+HERMES_IMAGE_REF="${HERMES_IMAGE_REF:-scarif-2120977246-cn-beijing.cr.volces.com/hermes/hermes-agent:v1.2.0}"
 HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"
 CONTAINER_NAME="${CONTAINER_NAME:-hermes-agent}"
 DATA_DIR="${DATA_DIR:-/opt/hermes-data}"
 ACP_TCP_HOST="${ACP_TCP_HOST:-127.0.0.1}"
 ACP_TCP_PORT="${ACP_TCP_PORT:-3100}"
 ACP_PORT="${ACP_PORT:-${ACP_TCP_PORT}}"
-ACP_TCP_SERVER_PATCH_HOST_PATH="${ACP_TCP_SERVER_PATCH_HOST_PATH:-${DATA_DIR}/openclaw-acp-tcp-server.py}"
 
 if [[ -t 1 ]]; then
     RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' CYAN='\033[0;36m' NC='\033[0m'
@@ -308,15 +306,7 @@ text = replace_once(
         --log-opt max-size=20m \\
         --log-opt max-file=5 \\
         "${image_ref}" >/dev/null''',
-    '''    local -a openclaw_patch_mount=()
-    if [[ -n "${ACP_TCP_SERVER_PATCH_HOST_PATH:-}" && -f "${ACP_TCP_SERVER_PATCH_HOST_PATH}" ]]; then
-        openclaw_patch_mount=(-v "${ACP_TCP_SERVER_PATCH_HOST_PATH}:/opt/hermes/acp-tcp-server.py:ro")
-        log_info "使用 OpenClaw patched ACP TCP server: ${ACP_TCP_SERVER_PATCH_HOST_PATH}"
-    else
-        log_warn "未找到 OpenClaw patched ACP TCP server，Hermes MCP bridge 将使用镜像内置 ACP server"
-    fi
-
-    docker run -d \\
+    '''    docker run -d \\
         --name "${CONTAINER_NAME}" \\
         --init \\
         --restart unless-stopped \\
@@ -330,7 +320,6 @@ text = replace_once(
         --security-opt no-new-privileges=true \\
         --tmpfs /tmp:size=256M \\
         -v "${DATA_DIR}:/opt/data" \\
-        "${openclaw_patch_mount[@]}" \\
         --cpus="${CPU_LIMIT}" \\
         --memory="${MEM_LIMIT}" \\
         --log-driver json-file \\
@@ -556,27 +545,6 @@ invalidate_cached_plugin_archive() {
     fi
 }
 
-prepare_acp_tcp_server_patch() {
-    mkdir -p "${DATA_DIR}"
-
-    if [[ -f "${LOCAL_ACP_TCP_SERVER_PATCH}" ]]; then
-        cp -f "${LOCAL_ACP_TCP_SERVER_PATCH}" "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
-        chmod 0644 "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
-        log_info "已准备 OpenClaw patched ACP TCP server: ${ACP_TCP_SERVER_PATCH_HOST_PATH}"
-        return 0
-    fi
-
-    if download_file "${REMOTE_ACP_TCP_SERVER_PATCH_URL}" "${ACP_TCP_SERVER_PATCH_HOST_PATH}.tmp"; then
-        mv -f "${ACP_TCP_SERVER_PATCH_HOST_PATH}.tmp" "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
-        chmod 0644 "${ACP_TCP_SERVER_PATCH_HOST_PATH}"
-        log_info "已下载 OpenClaw patched ACP TCP server: ${REMOTE_ACP_TCP_SERVER_PATCH_URL}"
-        return 0
-    fi
-    rm -f "${ACP_TCP_SERVER_PATCH_HOST_PATH}.tmp"
-
-    log_warn "未找到 patched ACP TCP server，Hermes MCP bridge 将使用镜像内置 ACP server"
-}
-
 patch_openclaw_runtime_for_hermes_toolset() {
     if ! command -v openclaw >/dev/null 2>&1; then
         log_warn "未找到 openclaw CLI，跳过 Hermes MCP bridge 能力校验"
@@ -792,7 +760,6 @@ main() {
     # /var/cache/hermes-agent/hermes-plugin.tar.gz。这里只失效插件缓存，
     # 不动大镜像缓存，避免每次都重新加载 1.1G 镜像。
     invalidate_cached_plugin_archive
-    prepare_acp_tcp_server_patch
     patch_openclaw_runtime_for_hermes_toolset
 
     MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION}" \
@@ -804,7 +771,6 @@ main() {
     DATA_DIR="${DATA_DIR}" \
     ACP_PORT="${ACP_TCP_PORT}" \
     ACP_TCP_HOST="${ACP_TCP_HOST}" \
-    ACP_TCP_SERVER_PATCH_HOST_PATH="${ACP_TCP_SERVER_PATCH_HOST_PATH}" \
     bash "${patched_install_script}" "$@"
 
     normalize_runtime_entries
