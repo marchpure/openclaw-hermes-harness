@@ -54,6 +54,18 @@ type AgentHarnessRuntimeModule = {
     sessionKey?: string;
   }) => AgentMessageForTranscript | null;
 };
+type OpenClawTranscriptAppendResult =
+  | { ok: true; sessionFile: string; messageId: string }
+  | { ok: false; reason: string };
+type OpenClawTranscriptRuntimeModule = {
+  appendExactAssistantMessageToSessionTranscript?: (params: {
+    agentId?: string;
+    sessionKey: string;
+    message: AgentMessageForTranscript & { role: "assistant" };
+    idempotencyKey?: string;
+    updateMode?: "inline" | "file-only" | "none";
+  }) => Promise<OpenClawTranscriptAppendResult>;
+};
 type McpLoopbackRuntime = {
   port: number;
   token?: string;
@@ -531,6 +543,34 @@ async function loadAgentHarnessRuntimeModule(): Promise<AgentHarnessRuntimeModul
     }
   }
   throw new Error("OpenClaw agent-harness-runtime SDK entry not found");
+}
+
+async function loadOpenClawTranscriptRuntimeModule(): Promise<OpenClawTranscriptRuntimeModule> {
+  const require = createRequire(import.meta.url);
+  const candidates: string[] = [];
+  try {
+    candidates.push(require.resolve("openclaw/plugin-sdk/src/config/sessions/transcript.runtime"));
+  } catch {}
+  for (const root of await resolveOpenClawDistDirs(require)) {
+    candidates.push(join(root, "transcript.runtime.js"));
+    try {
+      const entries = await readdir(root);
+      for (const entry of entries) {
+        if (/^transcript\.runtime-[\w-]+\.js$/.test(entry)) {
+          candidates.push(join(root, entry));
+        }
+      }
+    } catch {}
+  }
+
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      return (await import(pathToFileURL(candidate).href)) as OpenClawTranscriptRuntimeModule;
+    } catch {
+      // Try the next installed OpenClaw runtime shard.
+    }
+  }
+  throw new Error("OpenClaw transcript runtime SDK entry not found");
 }
 
 function buildHermesSessionOptions(params: {
@@ -1153,6 +1193,52 @@ function buildHermesMirrorDedupeIdentity(message: AgentMessageForTranscript): st
   return `${role}:${fingerprintMirrorMessageContent(message)}`;
 }
 
+async function appendAssistantTranscriptViaOpenClawRuntimeBestEffort(params: {
+  sessionKey?: string;
+  agentId?: string;
+  idempotencyScope?: string;
+  message: AgentMessageForTranscript;
+}): Promise<boolean> {
+  const sessionKey =
+    typeof params.sessionKey === "string" && params.sessionKey.trim()
+      ? params.sessionKey.trim()
+      : "";
+  if (!sessionKey || params.message.role !== "assistant") {
+    return false;
+  }
+
+  const idempotencyKey = params.idempotencyScope
+    ? `${params.idempotencyScope}:${buildHermesMirrorDedupeIdentity(params.message)}`
+    : undefined;
+
+  try {
+    const module = await loadOpenClawTranscriptRuntimeModule();
+    const append = module.appendExactAssistantMessageToSessionTranscript;
+    if (typeof append !== "function") {
+      return false;
+    }
+    const result = await append({
+      agentId: params.agentId,
+      sessionKey,
+      message: {
+        ...(params.message as AgentMessageForTranscript & { role: "assistant" }),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+      },
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+      updateMode: "inline",
+    });
+    if (result.ok) {
+      return true;
+    }
+    console.warn(`[hermes-acp] OpenClaw transcript runtime append skipped: ${result.reason}`);
+  } catch (error) {
+    console.warn(
+      `[hermes-acp] OpenClaw transcript runtime append failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return false;
+}
+
 async function mirrorHermesTranscriptBestEffort(params: {
   sessionFile?: string;
   sessionKey?: string;
@@ -1165,73 +1251,86 @@ async function mirrorHermesTranscriptBestEffort(params: {
     typeof params.sessionFile === "string" && params.sessionFile.trim()
       ? params.sessionFile.trim()
       : "";
-  if (!sessionFile || !params.messages?.length) {
+  if (!params.messages?.length) {
     return;
   }
 
   try {
-    const module = await loadAgentHarnessRuntimeModule();
-    const append = module.appendSessionTranscriptMessage;
-    const emitUpdate = module.emitSessionTranscriptUpdate;
-    const runBeforeWriteHook = module.runAgentHarnessBeforeMessageWriteHook;
-    if (typeof append !== "function") {
-      return;
-    }
-
-    const release = await module.acquireSessionWriteLock?.({
-      sessionFile,
-      timeoutMs: module.resolveSessionWriteLockAcquireTimeoutMs?.(params.config),
-    });
-    try {
-      const existingIdempotencyKeys = await readTranscriptIdempotencyKeys(sessionFile);
-      for (const message of params.messages) {
-        if (!message || typeof message !== "object") {
-          continue;
-        }
-        const role = (message as { role?: unknown }).role;
-        if (role !== "user" && role !== "assistant") {
-          continue;
-        }
-        const idempotencyKey = params.idempotencyScope
-          ? `${params.idempotencyScope}:${buildHermesMirrorDedupeIdentity(message as AgentMessageForTranscript)}`
-          : undefined;
-        if (idempotencyKey && existingIdempotencyKeys.has(idempotencyKey)) {
-          continue;
-        }
-        const transcriptMessage = {
-          ...(message as AgentMessageForTranscript),
-          ...(idempotencyKey ? { idempotencyKey } : {}),
-        };
-        const nextMessage =
-          typeof runBeforeWriteHook === "function"
-            ? runBeforeWriteHook({
-                message: transcriptMessage,
-                agentId: params.agentId,
-                sessionKey: params.sessionKey,
-              })
-            : transcriptMessage;
-        if (!nextMessage) {
-          continue;
-        }
-        await append({
-          transcriptPath: sessionFile,
-          message: idempotencyKey ? { ...nextMessage, idempotencyKey } : nextMessage,
-          config: params.config,
+    if (sessionFile) {
+      const module = await loadAgentHarnessRuntimeModule();
+      const append = module.appendSessionTranscriptMessage;
+      const emitUpdate = module.emitSessionTranscriptUpdate;
+      const runBeforeWriteHook = module.runAgentHarnessBeforeMessageWriteHook;
+      if (typeof append === "function") {
+        const release = await module.acquireSessionWriteLock?.({
+          sessionFile,
+          timeoutMs: module.resolveSessionWriteLockAcquireTimeoutMs?.(params.config),
         });
-        if (idempotencyKey) {
-          existingIdempotencyKeys.add(idempotencyKey);
+        try {
+          const existingIdempotencyKeys = await readTranscriptIdempotencyKeys(sessionFile);
+          for (const message of params.messages) {
+            if (!message || typeof message !== "object") {
+              continue;
+            }
+            const role = (message as { role?: unknown }).role;
+            if (role !== "user" && role !== "assistant") {
+              continue;
+            }
+            const idempotencyKey = params.idempotencyScope
+              ? `${params.idempotencyScope}:${buildHermesMirrorDedupeIdentity(message as AgentMessageForTranscript)}`
+              : undefined;
+            if (idempotencyKey && existingIdempotencyKeys.has(idempotencyKey)) {
+              continue;
+            }
+            const transcriptMessage = {
+              ...(message as AgentMessageForTranscript),
+              ...(idempotencyKey ? { idempotencyKey } : {}),
+            };
+            const nextMessage =
+              typeof runBeforeWriteHook === "function"
+                ? runBeforeWriteHook({
+                    message: transcriptMessage,
+                    agentId: params.agentId,
+                    sessionKey: params.sessionKey,
+                  })
+                : transcriptMessage;
+            if (!nextMessage) {
+              continue;
+            }
+            await append({
+              transcriptPath: sessionFile,
+              message: idempotencyKey ? { ...nextMessage, idempotencyKey } : nextMessage,
+              config: params.config,
+            });
+            if (idempotencyKey) {
+              existingIdempotencyKeys.add(idempotencyKey);
+            }
+          }
+        } finally {
+          await release?.release();
         }
+
+        if (typeof emitUpdate === "function") {
+          const sessionKey =
+            typeof params.sessionKey === "string" && params.sessionKey.trim()
+              ? params.sessionKey.trim()
+              : undefined;
+          emitUpdate(sessionKey ? { sessionFile, sessionKey } : sessionFile);
+        }
+        return;
       }
-    } finally {
-      await release?.release();
     }
 
-    if (typeof emitUpdate === "function") {
-      const sessionKey =
-        typeof params.sessionKey === "string" && params.sessionKey.trim()
-          ? params.sessionKey.trim()
-          : undefined;
-      emitUpdate(sessionKey ? { sessionFile, sessionKey } : sessionFile);
+    for (const message of params.messages) {
+      if (!message || typeof message !== "object") {
+        continue;
+      }
+      await appendAssistantTranscriptViaOpenClawRuntimeBestEffort({
+        sessionKey: params.sessionKey,
+        agentId: params.agentId,
+        idempotencyScope: params.idempotencyScope,
+        message: message as AgentMessageForTranscript,
+      });
     }
   } catch (error) {
     console.warn(
