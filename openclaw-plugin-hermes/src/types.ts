@@ -302,6 +302,8 @@ export const DEFAULT_CONFIG: HermesPluginConfig = {
       "computer-use",
       "byted-web-search",
       "web_search",
+      "arkdrive-netdisk",
+      "workspace-netdrive",
     ],
     containerEnvSkillNames: [],
     alwaysExposeSkillNames: [

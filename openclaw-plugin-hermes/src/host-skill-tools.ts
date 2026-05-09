@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { access, readFile, readdir, stat } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { HermesPluginConfig } from "./types.js";
 
 type Logger = {
@@ -15,6 +15,7 @@ type ToolResult = {
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_CHARS = 20_000;
 const OPENCLAW_WORKSPACE_SKILLS_DIR = "/root/.openclaw/workspace/skills";
+const ARKDRIVE_MOUNT_PATH = "/root/.openclaw/workspace/arkdrive_uploads";
 const CUA_RUNS_DIR = "/root/.cua/runs";
 const SENSITIVE_ENV_KEYS = [
   "WEB_SEARCH_API_KEY",
@@ -298,6 +299,49 @@ function formatProcessResult(params: {
   return { content: [{ type: "text", text }] };
 }
 
+function resolveArkDrivePath(pathValue: unknown): { path?: string; error?: string } {
+  const raw = stringifyParam(pathValue) ?? ".";
+  const trimmed = raw.replace(/^\/+/, "");
+  if (!trimmed || trimmed === ".") return { path: ARKDRIVE_MOUNT_PATH };
+  const target = resolve(ARKDRIVE_MOUNT_PATH, trimmed);
+  const rel = relative(ARKDRIVE_MOUNT_PATH, target);
+  if (rel.startsWith("..") || rel === ".." || target !== ARKDRIVE_MOUNT_PATH && rel === "") {
+    return { error: `path escapes ArkDrive mount: ${raw}` };
+  }
+  return { path: target };
+}
+
+async function isArkDriveMounted(): Promise<{ mounted: boolean; detail: string }> {
+  const result = await runCommand({
+    command: "bash",
+    args: ["-lc", `mount | grep -F ' on ${ARKDRIVE_MOUNT_PATH} type fuse' || true`],
+    cwd: "/root",
+    env: process.env,
+    timeoutMs: 10_000,
+  });
+  const line = result.stdout.trim();
+  return {
+    mounted: Boolean(line),
+    detail: line || `No FUSE mount found at ${ARKDRIVE_MOUNT_PATH}`,
+  };
+}
+
+async function formatArkDriveStatus(checkScript: string, skillDir: string, config: HermesPluginConfig): Promise<ToolResult> {
+  try {
+    await ensureExecutable(checkScript);
+  } catch {
+    return { content: [{ type: "text", text: `Error: arkdrive-netdisk script not found: ${checkScript}` }] };
+  }
+  const result = await runCommand({
+    command: "bash",
+    args: [checkScript],
+    cwd: skillDir,
+    env: buildHostSkillEnv(config),
+    timeoutMs: 30_000,
+  });
+  return formatProcessResult({ label: "arkdrive_netdisk status", ...result });
+}
+
 export function registerHostBackedSkillTools(params: {
   api: any;
   config: HermesPluginConfig;
@@ -307,6 +351,8 @@ export function registerHostBackedSkillTools(params: {
   const bytedWebSearchScript = join(bytedWebSearchDir, "scripts", "web_search.py");
   const computerUseDir = join(OPENCLAW_WORKSPACE_SKILLS_DIR, "computer-use");
   const computerUseScript = join(computerUseDir, "scripts", "cua.sh");
+  const arkDriveDir = join(OPENCLAW_WORKSPACE_SKILLS_DIR, "arkdrive-netdisk");
+  const arkDriveCheckScript = join(arkDriveDir, "scripts", "check_arkdrive.sh");
 
   params.api.registerTool({
     name: "byted_web_search",
@@ -428,6 +474,96 @@ export function registerHostBackedSkillTools(params: {
         timeoutMs: timeoutSeconds * 1000,
       });
       return formatProcessResult({ label: "computer_use", ...result });
+    },
+  });
+
+  params.api.registerTool({
+    name: "arkdrive_netdisk",
+    description: [
+      "Run host-backed ArkDrive netdisk operations.",
+      "This tool checks and writes the host ArkDrive mount at /root/.openclaw/workspace/arkdrive_uploads through OpenClaw MCP.",
+      "Use this instead of running the projected arkdrive-netdisk skill inside the Hermes container, because FUSE mount state is host-scoped.",
+      "The internal ._arkdrive_lock file is hidden from list output and must not be modified.",
+    ].join("\n"),
+    parameters: {
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["status", "list", "mkdir", "write_text"],
+          description: "Operation to run. Use status before write operations.",
+        },
+        path: {
+          type: "string",
+          description: "Relative path inside ArkDrive. Defaults to the ArkDrive root.",
+        },
+        content: {
+          type: "string",
+          description: "UTF-8 content for write_text.",
+        },
+      },
+    },
+    async execute(_id: string, toolParams: Record<string, unknown>) {
+      const action = stringifyParam(toolParams.action) ?? "status";
+      if (action === "status") {
+        return await formatArkDriveStatus(arkDriveCheckScript, arkDriveDir, params.config);
+      }
+
+      const mount = await isArkDriveMounted();
+      if (!mount.mounted) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: [
+                "arkdrive_netdisk unavailable",
+                `mountPath: ${ARKDRIVE_MOUNT_PATH}`,
+                mount.detail,
+                "ArkDrive is not enabled or not mounted on the host.",
+              ].join("\n"),
+            },
+          ],
+        };
+      }
+
+      const resolved = resolveArkDrivePath(toolParams.path);
+      if (resolved.error || !resolved.path) {
+        return { content: [{ type: "text", text: `Error: ${resolved.error ?? "invalid ArkDrive path"}` }] };
+      }
+      if (resolved.path.endsWith("/._arkdrive_lock") || resolved.path === join(ARKDRIVE_MOUNT_PATH, "._arkdrive_lock")) {
+        return { content: [{ type: "text", text: "Error: ._arkdrive_lock is internal and cannot be modified or exposed" }] };
+      }
+
+      if (action === "list") {
+        const entries = await readdir(resolved.path, { withFileTypes: true });
+        const lines = entries
+          .filter((entry) => entry.name !== "._arkdrive_lock")
+          .map((entry) => `${entry.isDirectory() ? "dir " : "file"} ${entry.name}`)
+          .sort();
+        return {
+          content: [
+            {
+              type: "text",
+              text: [`arkdrive_netdisk list`, `path: ${relative(ARKDRIVE_MOUNT_PATH, resolved.path) || "."}`, ...lines].join("\n"),
+            },
+          ],
+        };
+      }
+
+      if (action === "mkdir") {
+        await mkdir(resolved.path, { recursive: true });
+        return { content: [{ type: "text", text: `arkdrive_netdisk mkdir ok: ${relative(ARKDRIVE_MOUNT_PATH, resolved.path) || "."}` }] };
+      }
+
+      if (action === "write_text") {
+        const content = stringifyParam(toolParams.content);
+        if (content === undefined) return { content: [{ type: "text", text: "Error: content is required for write_text" }] };
+        await mkdir(resolve(resolved.path, ".."), { recursive: true });
+        await writeFile(resolved.path, content, "utf8");
+        return { content: [{ type: "text", text: `arkdrive_netdisk write_text ok: ${relative(ARKDRIVE_MOUNT_PATH, resolved.path)}` }] };
+      }
+
+      return { content: [{ type: "text", text: `Error: unsupported arkdrive_netdisk action: ${action}` }] };
     },
   });
 }

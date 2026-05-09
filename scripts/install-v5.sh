@@ -414,7 +414,7 @@ normalize_runtime_entries() {
               "timeout": 1800,
               "skillProjection": {
                 "hostBackedDenylist": (((($cfg.skillProjection.hostBackedDenylist // []) + ["browser", "browser-use", "feishu"]) | unique)),
-                "hostBackedSkillNames": (((($cfg.skillProjection.hostBackedSkillNames // []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"]) | unique)),
+                "hostBackedSkillNames": (((($cfg.skillProjection.hostBackedSkillNames // []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use", "arkdrive-netdisk", "workspace-netdrive"]) | unique)),
                 "containerEnvSkillNames": ($cfg.skillProjection.containerEnvSkillNames // []),
                 "alwaysExposeSkillNames": (((($cfg.skillProjection.alwaysExposeSkillNames // []) + ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]) | unique))
               },
@@ -494,7 +494,7 @@ cfg.update({
     "timeout": 1800,
     "skillProjection": {
         "hostBackedDenylist": unique(skill_cfg.get("hostBackedDenylist", []) + ["browser", "browser-use", "feishu"]),
-        "hostBackedSkillNames": unique(skill_cfg.get("hostBackedSkillNames", []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"]),
+        "hostBackedSkillNames": unique(skill_cfg.get("hostBackedSkillNames", []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use", "arkdrive-netdisk", "workspace-netdrive"]),
         "containerEnvSkillNames": unique(skill_cfg.get("containerEnvSkillNames", [])),
         "alwaysExposeSkillNames": unique(skill_cfg.get("alwaysExposeSkillNames", []) + ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]),
     },

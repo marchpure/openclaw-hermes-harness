@@ -170,6 +170,14 @@ const HOST_BACKED_MCP_TOOL_HINTS: Record<string, { tool: string; hint: string }>
     tool: "mcp_openclaw_computer_use",
     hint: "Use the OpenClaw MCP `mcp_openclaw_computer_use` tool for host-backed CUA tasks. Use `mcp_openclaw_browser` for browser-only operations.",
   },
+  "arkdrive-netdisk": {
+    tool: "mcp_openclaw_arkdrive_netdisk",
+    hint: "Use the OpenClaw MCP `mcp_openclaw_arkdrive_netdisk` tool for ArkDrive status, listing, directory creation, and text writes. Do not run the projected ArkDrive script inside the Hermes container because FUSE mount state is host-scoped.",
+  },
+  "workspace-netdrive": {
+    tool: "mcp_openclaw_arkdrive_netdisk",
+    hint: "Use the OpenClaw MCP `mcp_openclaw_arkdrive_netdisk` tool for workspace netdisk operations.",
+  },
   feishu: {
     tool: "mcp_openclaw_feishu_*",
     hint: "Use the concrete OpenClaw MCP Feishu tools exposed in tools/list. Common names include `mcp_openclaw_feishu_doc` with action `read`, or openclaw-lark tools such as `mcp_openclaw_feishu_fetch_doc`, `mcp_openclaw_feishu_create_doc`, and `mcp_openclaw_feishu_update_doc` when those are present.",
