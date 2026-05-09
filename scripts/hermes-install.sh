@@ -18,15 +18,15 @@ fi
 # ─── 配置 ────────────────────────────────────────────────────────────────────
 TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-image/hermes-agent-image.tar.gz}"
 TOS_PLUGIN_URL="${TOS_PLUGIN_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-plugin/openclaw-plugin-hermes.tar.gz}"
-CONTAINER_NAME="hermes-agent"
-DATA_DIR="/opt/hermes-data"
-ACP_PORT=3100
-OPENCLAW_CONFIG="/root/.openclaw/openclaw.json"
-OPENCLAW_EXTENSIONS_DIR="/root/.openclaw/extensions"
+CONTAINER_NAME="${CONTAINER_NAME:-hermes-agent}"
+DATA_DIR="${DATA_DIR:-/opt/hermes-data}"
+ACP_PORT="${ACP_PORT:-3100}"
+OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/root/.openclaw/openclaw.json}"
+OPENCLAW_EXTENSIONS_DIR="${OPENCLAW_EXTENSIONS_DIR:-/root/.openclaw/extensions}"
 PLUGIN_CONFIG_KEY="${PLUGIN_CONFIG_KEY:-openclaw-plugin-hermes}"
-PLUGIN_DIR_NAME="${PLUGIN_DIR_NAME:-hermes}"
-PLUGIN_LEGACY_DIR_NAME="${PLUGIN_LEGACY_DIR_NAME:-openclaw-plugin-hermes}"
-HERMES_IMAGE_NAME="hermes-agent"
+PLUGIN_DIR_NAME="${PLUGIN_DIR_NAME:-openclaw-plugin-hermes}"
+PLUGIN_LEGACY_DIR_NAME="${PLUGIN_LEGACY_DIR_NAME:-hermes}"
+HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"
 HEALTH_CHECK_TIMEOUT="${HEALTH_CHECK_TIMEOUT:-180}"
 HEALTH_CHECK_POST_START_GRACE="${HEALTH_CHECK_POST_START_GRACE:-20}"
 MIN_FREE_SPACE_GB="${MIN_FREE_SPACE_GB:-7}"
@@ -94,7 +94,13 @@ log_info()  { log_line "INFO" "${GREEN}" "$*"; }
 log_warn()  { log_line "WARN" "${YELLOW}" "$*"; }
 log_error() { log_line "ERROR" "${RED}" "$*"; }
 log_step()  { printf '\n%b%s [STEP]%b %s\n' "${CYAN}" "$(timestamp)" "${NC}" "$1"; }
-die()       { log_error "$@"; exit 1; }
+die() {
+    log_error "$@"
+    if [[ "${ROLLBACK_ARMED:-false}" == true && "${ROLLBACK_IN_PROGRESS:-false}" != true ]]; then
+        rollback_upgrade
+    fi
+    exit 1
+}
 
 # ─── 临时文件清理 trap ────────────────────────────────────────────────────────
 TEMP_FILES=()
@@ -574,6 +580,11 @@ remove_installed_plugin_directories() {
 
 # ─── 从 OpenClaw 配置读取模型信息 ────────────────────────────────────────────
 # 结构: models.providers.<provider> = { baseUrl, apiKey, models: [{id}] }
+# 注意:
+# - 安装完成后会向 OpenClaw 注入一个合成 provider: models.providers.hermes
+# - 这个 provider 只是 OpenClaw -> Hermes runtime 的本地桥接壳，不是真实上游 LLM
+# - 二次安装/升级时必须跳过它，否则会把 http://127.0.0.1/hermes-runtime
+#   误当成 Hermes 容器自己的上游模型地址，导致 LLM request failed: network connection error
 read_openclaw_models() {
     local cfg="$1"
     if [[ ! -f "${cfg}" ]]; then
@@ -581,7 +592,12 @@ read_openclaw_models() {
     fi
 
     if command -v jq &>/dev/null; then
-        OC_PROVIDER="$(jq -r '.models.providers | keys[0] // empty' "${cfg}" 2>/dev/null)" || return 1
+        OC_PROVIDER="$(jq -r '
+          .models.providers
+          | to_entries
+          | map(select(.key != "hermes"))
+          | .[0].key // empty
+        ' "${cfg}" 2>/dev/null)" || return 1
         if [[ -z "${OC_PROVIDER}" ]]; then
             return 1
         fi
@@ -600,7 +616,9 @@ except Exception:
 ps = data.get('models', {}).get('providers', {})
 if not ps:
     sys.exit(1)
-name = list(ps.keys())[0]
+name = next((k for k in ps.keys() if k != 'hermes'), '')
+if not name:
+    sys.exit(1)
 p = ps[name]
 print(f'OC_PROVIDER={name!r}')
 print(f'OC_BASE_URL={p.get("baseUrl", "")!r}')
@@ -1112,13 +1130,36 @@ phase4_install_plugin() {
         register_temp "${tmp}"
         jq --arg cn "${CONTAINER_NAME}" --arg dm "${DEFAULT_MODEL_VAL}" \
            --arg pk "${PLUGIN_CONFIG_KEY}" \
+           --arg legacy_pk "hermes" \
            '.plugins.entries[$pk].config = {
                "hermesContainerName": $cn,
                "defaultModel": $dm,
                "autoStrategy": true,
                "enableLayeredProtocol": false,
                "timeout": 600
-           } | .plugins.entries[$pk].enabled = true' "${OPENCLAW_CONFIG}" > "${tmp}" \
+           }
+           | del(.plugins.entries[$legacy_pk])
+           | .plugins.allow = (((.plugins.allow // []) | map(select(. != $legacy_pk))) + [$pk] | unique)
+           | .plugins.entries[$pk].enabled = true
+           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
+               "hermes/default": { "alias": "hermes" }
+             })
+           | .models.providers.hermes = {
+               "baseUrl": "http://127.0.0.1/hermes-runtime",
+               "apiKey": "hermes-runtime",
+               "auth": "token",
+               "api": "openai-responses",
+               "models": [
+                 {
+                   "id": "default",
+                   "name": "default",
+                   "reasoning": true,
+                   "input": ["text", "image"],
+                   "contextWindow": 200000,
+                   "maxTokens": 32000
+                 }
+               ]
+             }' "${OPENCLAW_CONFIG}" > "${tmp}" \
            && mv "${tmp}" "${OPENCLAW_CONFIG}"
     else
         python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME}" "${DEFAULT_MODEL_VAL}" <<'PYEOF'
@@ -1127,6 +1168,7 @@ cf, pk, cn, dm = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 with open(cf) as f:
     d = json.load(f)
 hermes = d.setdefault('plugins', {}).setdefault('entries', {}).setdefault(pk, {})
+d['plugins']['entries'].pop('hermes', None)
 hermes['enabled'] = True
 hermes['config'] = {
     'hermesContainerName': cn,
@@ -1135,6 +1177,30 @@ hermes['config'] = {
     'enableLayeredProtocol': False,
     'timeout': 600
 }
+d.setdefault('agents', {}).setdefault('defaults', {}).setdefault('models', {}).update({
+    'hermes/default': {'alias': 'hermes'},
+})
+d.setdefault('models', {}).setdefault('providers', {})['hermes'] = {
+    'baseUrl': 'http://127.0.0.1/hermes-runtime',
+    'apiKey': 'hermes-runtime',
+    'auth': 'token',
+    'api': 'openai-responses',
+    'models': [
+        {
+            'id': 'default',
+            'name': 'default',
+            'reasoning': True,
+            'input': ['text', 'image'],
+            'contextWindow': 200000,
+            'maxTokens': 32000,
+        },
+    ],
+}
+allow = d.setdefault('plugins', {}).setdefault('allow', [])
+allow = [item for item in allow if item != 'hermes']
+if pk not in allow:
+    allow.append(pk)
+d['plugins']['allow'] = allow
 with open(cf, 'w') as f:
     json.dump(d, f, indent=2, ensure_ascii=False)
 PYEOF

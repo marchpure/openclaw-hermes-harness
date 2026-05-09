@@ -9,62 +9,36 @@
  * OpenClaw is the brain, Hermes is the hands.
  */
 
+import { resolveHermesAcpConfig } from "./config.js";
 import { dispatchToHermes } from "./dispatcher.js";
+import { createHermesAgentHarness } from "./harness.js";
 import { checkHealth, formatHealthReport } from "./health.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
+import { buildHermesProvider } from "./provider.js";
 import {
+  cancelAllSessions,
+  cancelSession,
   generateDispatchId,
+  getActiveSessions,
   registerSession,
   unregisterSession,
-  cancelSession,
-  cancelAllSessions,
-  getActiveSessions,
 } from "./session-registry.js";
 import type { HermesPluginConfig, DispatchRequest } from "./types.js";
-import { DEFAULT_CONFIG } from "./types.js";
+import { cleanupExecEnvs } from "./execenv-builder.js";
+import { registerHostBackedSkillTools } from "./host-skill-tools.js";
 import {
   extractApmplusContext,
   removeApmplusContext,
-  traceDispatch,
   shutdownProvider,
+  traceDispatch,
 } from "./observability/index.js";
 
 // ─── Config Resolution ──────────────────────────────────────────────────────
 
 function resolveConfig(raw: unknown): HermesPluginConfig {
-  const input = (raw ?? {}) as Record<string, unknown>;
-  const otel = typeof input.otel === "object" && input.otel !== null
-    ? (input.otel as Record<string, unknown>)
-    : undefined;
-  return {
-    hermesCommand: (input.hermesCommand as string) ?? undefined,
-    hermesContainerName: (input.hermesContainerName as string) ?? DEFAULT_CONFIG.hermesContainerName,
-    hermesDataDir: (input.hermesDataDir as string) ?? undefined,
-    defaultModel: (input.defaultModel as string) ?? undefined,
-    defaultContextLevel:
-      (input.defaultContextLevel as HermesPluginConfig["defaultContextLevel"]) ??
-      DEFAULT_CONFIG.defaultContextLevel,
-    defaultCredentialScope:
-      (input.defaultCredentialScope as HermesPluginConfig["defaultCredentialScope"]) ??
-      DEFAULT_CONFIG.defaultCredentialScope,
-    defaultWriteback:
-      (input.defaultWriteback as HermesPluginConfig["defaultWriteback"]) ??
-      DEFAULT_CONFIG.defaultWriteback,
-    transport:
-      (input.transport as HermesPluginConfig["transport"]) ??
-      DEFAULT_CONFIG.transport,
-    tcpHost: (input.tcpHost as string) ?? DEFAULT_CONFIG.tcpHost,
-    tcpPort: (input.tcpPort as number) ?? DEFAULT_CONFIG.tcpPort,
-    timeout: (input.timeout as number) ?? DEFAULT_CONFIG.timeout,
-    autoStrategy: (input.autoStrategy as boolean) ?? DEFAULT_CONFIG.autoStrategy,
-    enableLayeredProtocol: (input.enableLayeredProtocol as boolean) ?? DEFAULT_CONFIG.enableLayeredProtocol,
-    otel: otel
-      ? {
-          endpoint: (otel.endpoint as string) ?? undefined,
-          serviceName: (otel.serviceName as string) ?? undefined,
-        }
-      : undefined,
-  };
+  // Keep config normalization at the boundary so the rest of the runtime can
+  // assume a single resolved shape that matches the local OpenClaw deployment.
+  return resolveHermesAcpConfig(raw);
 }
 
 // ─── Plugin Definition ──────────────────────────────────────────────────────
@@ -78,11 +52,23 @@ const plugin = {
     const config = resolveConfig(api.pluginConfig);
     const workspaceDir = api.workspaceDir ?? process.cwd();
 
+    api.registerProvider?.(buildHermesProvider({ pluginConfig: api.pluginConfig }));
+    api.registerAgentHarness?.(createHermesAgentHarness({ pluginConfig: api.pluginConfig }));
+
     const logger = {
       info: (msg: string, ...args: unknown[]) => api.logger?.info?.(msg, ...args) ?? console.log(`[hermes] ${msg}`),
       warn: (msg: string, ...args: unknown[]) => api.logger?.warn?.(msg, ...args) ?? console.warn(`[hermes] ${msg}`),
       error: (msg: string, ...args: unknown[]) => api.logger?.error?.(msg, ...args) ?? console.error(`[hermes] ${msg}`),
     };
+
+    registerHostBackedSkillTools({ api, config, logger });
+
+    // Cleanup is fire-and-forget so plugin registration stays cheap even when
+    // a previous run left many projected execenv directories behind.
+    void cleanupExecEnvs(config).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`execenv cleanup skipped: ${msg}`);
+    });
 
     // ── Tool: hermes_dispatch ───────────────────────────────────────────
 
@@ -144,11 +130,9 @@ const plugin = {
       },
 
       /**
-       * Execute the dispatch tool.
-       *
-       * OpenClaw's AgentTool interface passes (toolCallId, params, signal?, onUpdate?).
-       * We forward the AbortSignal to the dispatcher so that when the user aborts
-       * on the OpenClaw side, we first send session/cancel to Hermes before closing.
+       * OpenClaw passes (toolCallId, params, signal?, onUpdate?). Preserve the
+       * existing dispatch behavior: strip APM transport metadata, trace the
+       * dispatch, and forward cancellation into the Hermes ACP session.
        */
       async execute(_id: string, params: Record<string, unknown>, signal?: AbortSignal) {
         const apmplusCtx = extractApmplusContext(params);
@@ -165,6 +149,7 @@ const plugin = {
           timeout: cleanParams.timeout as number | undefined,
         };
 
+        // Apply overrides
         if (cleanParams.contextLevel) {
           request.contextLevel = cleanParams.contextLevel as DispatchRequest["contextLevel"];
         }
@@ -191,7 +176,6 @@ const plugin = {
             ? { ...config, enableLayeredProtocol: cleanParams.enableLayeredProtocol as boolean }
             : config;
 
-          // 创建 AbortController 并注册到活跃会话表，以便支持外部取消
           const dispatchId = generateDispatchId();
           const abortController = new AbortController();
           registerSession(dispatchId, {
@@ -200,12 +184,12 @@ const plugin = {
             startTime: Date.now(),
           });
 
-          // 关联框架 AbortSignal：当 OpenClaw 侧 abort 时，自动触发插件的 AbortController
+          const upstreamAbortHandler = () => abortController.abort();
           if (signal) {
             if (signal.aborted) {
               abortController.abort();
             } else {
-              signal.addEventListener("abort", () => abortController.abort(), { once: true });
+              signal.addEventListener("abort", upstreamAbortHandler, { once: true });
             }
           }
 
@@ -243,6 +227,7 @@ const plugin = {
               ],
             };
           } finally {
+            signal?.removeEventListener("abort", upstreamAbortHandler);
             unregisterSession(dispatchId);
           }
         } catch (err) {
@@ -354,7 +339,6 @@ const plugin = {
         }
 
         if (dispatchId) {
-          // 取消指定任务
           const found = cancelSession(dispatchId);
           if (found) {
             logger.info(`Cancelled Hermes task: ${dispatchId}`);
@@ -363,11 +347,15 @@ const plugin = {
             };
           }
           return {
-            content: [{ type: "text", text: `Task ${dispatchId} not found. Active tasks: ${sessions.map(s => s.id).join(", ")}` }],
+            content: [
+              {
+                type: "text",
+                text: `Task ${dispatchId} not found. Active tasks: ${sessions.map((session) => session.id).join(", ")}`,
+              },
+            ],
           };
         }
 
-        // 取消所有活跃任务
         const count = cancelAllSessions();
         logger.info(`Cancelled all ${count} active Hermes task(s)`);
         return {
@@ -376,24 +364,22 @@ const plugin = {
       },
     });
 
-    // ── Process signal handling ──────────────────────────────────────────
-    // 当宿主进程收到 SIGINT/SIGTERM（如用户 Ctrl+C）时，尽力取消所有活跃任务
     const cleanupHandler = () => {
       const count = cancelAllSessions();
       if (count > 0) {
-        logger.info(`Process signal received — cancelled ${count} active Hermes task(s)`);
+        logger.info(`Process signal received - cancelled ${count} active Hermes task(s)`);
       }
-      try {
-        shutdownProvider();
-      } catch (err) {
+      void shutdownProvider().catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn(`Observability shutdown failed: ${msg}`);
-      }
+      });
     };
-    process.on("SIGINT", cleanupHandler);
-    process.on("SIGTERM", cleanupHandler);
+    process.once("SIGINT", cleanupHandler);
+    process.once("SIGTERM", cleanupHandler);
 
-    logger.info("Hermes Agent plugin registered (4 tools: hermes_dispatch, hermes_status, hermes_strategy, hermes_cancel)");
+    logger.info(
+      "Hermes Agent plugin registered (provider, harness, and tools: hermes_dispatch, hermes_status, hermes_strategy, hermes_cancel, byted_web_search, computer_use)",
+    );
   },
 };
 
