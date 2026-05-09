@@ -1,12 +1,12 @@
 # openclaw-plugin-hermes
 
-OpenClaw 插件 — 将重型任务委派给容器化的 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 执行。
+OpenClaw 插件 — 将 OpenClaw workspace 投影为 task-scoped execution workdir，并交给容器化的 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 执行。
 
 > **OpenClaw 是大脑，Hermes 是手脚。**
 
 ## 概述
 
-这个插件让 OpenClaw 可以把需要终端、浏览器、代码执行等重型能力的任务委派给运行在 Docker 容器中的 Hermes Agent。通过 ACP (Agent Client Protocol) 通信，Hermes 在隔离的容器环境中执行任务，结果回传给 OpenClaw。
+这个插件让 OpenClaw 可以把任务放到运行在 Docker 容器中的 Hermes Agent 上执行。当前实现不是把 OpenClaw host tool 直接带入 Hermes，而是先把 workspace 中可投影的上下文文件与本地 skills 物化到一个 task-scoped execution workdir，再通过 ACP (Agent Client Protocol) 让 Hermes 在这个 cwd 下执行。
 
 ### 核心设计：三维传递协议
 
@@ -51,11 +51,11 @@ npm install
 {
   "plugins": {
     "entries": {
-      "openclaw-plugin-hermes": {
+      "hermes": {
         "enabled": true,
         "config": {
           "hermesContainerName": "hermes-agent",
-          "defaultModel": "minimax-m2.5",
+          "defaultModel": "doubao-seed-2-0-pro-260215",
           "autoStrategy": true,
           "enableLayeredProtocol": false,
           "timeout": 1800
@@ -70,16 +70,28 @@ npm install
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `hermesCommand` | string | `docker exec -i hermes-agent hermes acp` | 自定义 hermes-acp 启动命令 |
 | `hermesContainerName` | string | `hermes-agent` | Docker 容器名 |
 | `hermesDataDir` | string | — | Hermes 数据目录 (宿主机路径) |
-| `defaultModel` | string | — | 默认 LLM 模型 |
+| `execEnvRootDir` | string | `<hermesDataDir>/execenv` | 宿主机上的 task-scoped execenv 根目录 |
+| `runtimeExecEnvRootDir` | string | 同 `execEnvRootDir` | Hermes 运行时可见的 execenv 根目录 |
+| `projectionVersion` | string | `c1c2-v1` | execution projection 版本号 |
+| `defaultModel` | string | — | `hermes/default` 实际使用的默认 LLM 模型 |
 | `defaultContextLevel` | L0-L3 | `L1` | 默认传递层级 |
 | `defaultCredentialScope` | C0-C2 | `C0` | 默认凭据范围 |
 | `defaultWriteback` | W0-W3 | `W1` | 默认回写策略 |
 | `timeout` | number | `1800` | 超时秒数 |
 | `autoStrategy` | boolean | `true` | 自动推断策略 |
 | `enableLayeredProtocol` | boolean | `true` | 启用分层协议（L/C/W），关闭后直接派发任务 |
+| `transport` | string | `tcp` | 当前实现只支持本地 Hermes ACP TCP bridge |
+| `skillProjection.hostBackedDenylist` | string[] | `["browser","browser-use","compute-use"]` | 会被识别并过滤掉的 host-backed skill 名称 |
+| `execEnvCleanup.maxCount` | number | `200` | 最多保留多少个历史 execenv 目录 |
+
+### 模型配置口径
+
+- 正式配置入口只有 `hermes/default`
+- `defaultModel` 决定 `hermes/default` 最终映射到哪个 Hermes 上游模型
+- 不要求维护额外的模型发现列表；安装脚本也只注册 `hermes/default`
+- 底层仍保留动态模型路由兼容能力，但不作为默认对外承诺能力
 
 ## 注册的工具
 
@@ -151,7 +163,9 @@ hermes_strategy({ task: "创建一个 GitHub Actions CI 技能" })
               └── 重型任务 → hermes_dispatch
                     │
                     ├── 策略推断 (strategy-engine)
-                    ├── 上下文组装 (context-assembler)
+                    ├── execution projection (runtime-client)
+                    ├── 上下文发现/skills 过滤 (context-assembler + runtime-client)
+                    ├── execenv 构建 (execenv-builder)
                     ├── 凭据注入 (credential-injector)
                     ├── ACP 通信 (acp-client)
                     └── 结果处理 (result-processor)
@@ -167,19 +181,19 @@ hermes_strategy({ task: "创建一个 GitHub Actions CI 技能" })
 
 ## 通信协议
 
-插件通过 ACP (Agent Client Protocol) 与 Hermes 通信：
+插件通过本地 ACP TCP bridge 与 Hermes 通信：
 
 ```
-OpenClaw ──stdio──► docker exec hermes-agent hermes acp
-    │                     │
-    │  JSON-RPC           │
-    │  ← initialize       │
-    │  → new_session      │
-    │  ← session_id       │
-    │  → prompt           │
-    │  ← streaming events │
-    │  ← done             │
-    │  → close            │
+OpenClaw ──TCP──► 127.0.0.1:3100 (Hermes ACP bridge)
+    │
+    │  JSON-RPC
+    │  ← initialize
+    │  → session/new
+    │  ← session_id
+    │  → session/prompt
+    │  ← streaming events
+    │  ← done / terminal payload
+    │  → session/close
 ```
 
 ## 安全
@@ -201,8 +215,11 @@ openclaw-plugin-hermes/
     ├── index.ts              # 插件入口 (注册工具)
     ├── types.ts              # 类型定义
     ├── dispatcher.ts         # 任务调度器 (核心)
+    ├── runtime-client.ts     # execution projection 编排
     ├── strategy-engine.ts    # L/C/W 策略推断
     ├── context-assembler.ts  # 上下文组装 (L0-L3)
+    ├── execenv-builder.ts    # task-scoped execenv 物化
+    ├── runtime-paths.ts      # host/runtime 路径映射
     ├── credential-injector.ts # 凭据注入 (C0-C2)
     ├── result-processor.ts   # 结果处理 (W0-W3)
     ├── acp-client.ts         # ACP JSON-RPC 客户端

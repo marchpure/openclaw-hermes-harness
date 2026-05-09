@@ -11,8 +11,16 @@
  */
 
 import { readFile, readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import type { ContextLevel, ContextPayload, HermesPluginConfig } from "./types.js";
+import { join } from "node:path";
+import type {
+  ContextLevel,
+  ContextPayload,
+  HermesPluginConfig,
+  OpenClawAttemptContext,
+  ProjectedContext,
+  ProjectedSkill,
+  SkillManifestEntry,
+} from "./types.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -86,6 +94,8 @@ function adaptiveMemorySummary(fullMemory: string, maxChars: number): string {
 export interface AssemblerOptions {
   workspaceDir: string;
   config: HermesPluginConfig;
+  includeWorkspaceSkills?: boolean;
+  openClawContext?: OpenClawAttemptContext;
 }
 
 /**
@@ -96,7 +106,7 @@ export async function assembleContext(
   level: ContextLevel,
   options: AssemblerOptions,
 ): Promise<ContextPayload> {
-  const { workspaceDir, config } = options;
+  const { workspaceDir, config, includeWorkspaceSkills = false } = options;
   const payload: ContextPayload = { task };
 
   // ── L0: Task + Model Config ───────────────────────────────────────────
@@ -171,7 +181,7 @@ export async function assembleContext(
     payload.memory.daily = dailyMemory;
   }
 
-  if (level === "L2") return payload;
+  if (level === "L2" && !includeWorkspaceSkills) return payload;
 
   // ── L3: + Skills, MCP Servers, Cron ───────────────────────────────────
 
@@ -183,7 +193,9 @@ export async function assembleContext(
 
   // Read skills manifest
   const skillsDir = join(workspaceDir, "skills");
-  payload.skills = await readSkillsManifest(skillsDir);
+  if (!options.openClawContext?.skillsSnapshot && (level === "L3" || includeWorkspaceSkills)) {
+    payload.skills = await readSkillsManifest(skillsDir);
+  }
 
   // Read MCP server config (from OpenClaw config if available)
   // For now, return empty — this would integrate with OpenClaw's config system
@@ -198,18 +210,17 @@ export async function assembleContext(
 /**
  * Scan the skills directory and build a manifest of available skills.
  */
-async function readSkillsManifest(
-  skillsDir: string,
-): Promise<Array<{ name: string; path: string; description?: string }>> {
-  const skills: Array<{ name: string; path: string; description?: string }> = [];
+export async function readSkillsManifest(skillsDir: string): Promise<SkillManifestEntry[]> {
+  const skills: SkillManifestEntry[] = [];
 
   try {
     const entries = await readdir(skillsDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       const skillPath = join(skillsDir, entry.name, "SKILL.md");
       try {
-        await stat(skillPath);
+        const skillStat = await stat(skillPath);
+        if (!skillStat.isFile()) continue;
         // Read first few lines for description
         const content = await readFile(skillPath, "utf8");
         const descMatch = content.match(/^#\s+.*\n\n(.+)/m);
@@ -227,6 +238,65 @@ async function readSkillsManifest(
   }
 
   return skills;
+}
+
+/**
+ * Build a projected context object that can be materialized into an execution workdir.
+ */
+export async function assembleProjectedContext(
+  task: string,
+  level: ContextLevel,
+  options: AssemblerOptions,
+): Promise<ProjectedContext> {
+  const payload = await assembleContext(task, level, options);
+  return {
+    files: {
+      soul: payload.identity?.soul,
+      user: payload.identity?.user,
+      agent: payload.identity?.agents,
+      task: payload.task,
+    },
+    memory: payload.memory,
+    commandAllowlist: payload.toolConfig?.commandAllowlist,
+    discoveredSkills: payload.skills ?? [],
+    skillsPrompt: options.openClawContext?.skillsSnapshot?.prompt,
+  };
+}
+
+function formatProjectedSkill(skill: ProjectedSkill): string {
+  const description = skill.description ?? "(no description)";
+  if (skill.placement === "host-backed") {
+    return [
+      `- **${skill.name}** (host-backed): ${description}`,
+      `  Execution: OpenClaw MCP bridge.`,
+      `  MCP tool: ${skill.mcpTool ?? "OpenClaw MCP tools"}.`,
+      skill.mcpToolHint ? `  Bridge hint: ${skill.mcpToolHint}` : undefined,
+      `  Do not run this skill's host CLI directly inside the Hermes container.`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (skill.placement === "container-env-required") {
+    return [
+      `- **${skill.name}** (container-env-required): ${description}`,
+      skill.requiredEnv?.length
+        ? `  Required env: ${skill.requiredEnv.join(", ")}.`
+        : `  Required env: see the skill's SKILL.md.`,
+      skill.runtimePath ? `  Runtime file: ${skill.runtimePath}.` : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (skill.placement === "projected-local") {
+    return [
+      `- **${skill.name}** (projected-local): ${description}`,
+      skill.runtimePath ? `  Runtime file: ${skill.runtimePath}.` : undefined,
+      `  Execution: local in the Hermes container.`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  return `- **${skill.name}** (unsupported): ${description}`;
 }
 
 /**
@@ -269,6 +339,92 @@ export function serializeContextForPrompt(payload: ContextPayload): string {
       .join("\n");
     parts.push(`# Available Skills\n${skillList}`);
   }
+
+  return parts.join("\n\n---\n\n");
+}
+
+export function serializeProjectedContextForPrompt(
+  projected: ProjectedContext,
+  exposedSkills: ProjectedSkill[],
+  runtime?: {
+    runtimeCwd: string;
+    projectionPath: string;
+    conversationHistory?: string;
+  },
+): string {
+  const parts: string[] = [];
+
+  if (projected.files.task) {
+    parts.push(`# Task\n${projected.files.task}`);
+  }
+  if (projected.files.soul) {
+    parts.push(`# Identity (SOUL)\n${projected.files.soul}`);
+  }
+  if (projected.files.user) {
+    parts.push(`# User Profile\n${projected.files.user}`);
+  }
+  if (projected.files.agent) {
+    parts.push(`# Workspace Instructions\n${projected.files.agent}`);
+  }
+  if (projected.memory?.longTerm) {
+    parts.push(`# Long-term Memory\n${projected.memory.longTerm}`);
+  }
+  if (projected.memory?.daily) {
+    parts.push(`# Today's Notes\n${projected.memory.daily}`);
+  }
+  if (projected.memory?.summary) {
+    parts.push(`> ${projected.memory.summary}`);
+  }
+  if (projected.commandAllowlist?.length) {
+    parts.push(`# Allowed Commands\n${projected.commandAllowlist.map((c) => `- ${c}`).join("\n")}`);
+  }
+  if (runtime?.conversationHistory) {
+    parts.push(`# Conversation History\n${runtime.conversationHistory}`);
+  }
+  if (exposedSkills.length > 0) {
+    const promptCatalog = projected.skillsPrompt?.trim();
+    parts.push(
+      [
+        "# Available OpenClaw Skills",
+        "The following skills are selected by OpenClaw for this session. Only these skills are available.",
+        ...(promptCatalog ? ["", "OpenClaw skill catalog:", promptCatalog] : []),
+        "",
+        exposedSkills.map(formatProjectedSkill).join("\n"),
+      ].join("\n"),
+    );
+  }
+
+  parts.push(
+    [
+      "# Runtime Contract",
+      ...(runtime
+        ? [
+            `Projected runtime cwd: ${runtime.runtimeCwd}`,
+            `Projected manifest path: ${runtime.projectionPath}`,
+          ]
+        : []),
+      "Only use the skills listed under # Available OpenClaw Skills as OpenClaw-provided capabilities.",
+      "When a projected-local or container-env-required skill matches the task, read its runtime SKILL.md first and resolve relative references against that skill directory.",
+      "When a host-backed skill matches the task, call the listed concrete OpenClaw MCP tool or tool family instead of running host-specific CLIs inside the container.",
+      "Do not call `openclaw.skill.invoke`; Hermes must use the actual MCP tools exposed by tools/list.",
+      "If a capability is not listed there, do not claim it is available from the current OpenClaw workspace.",
+      "If realtime or browser-based work is requested but no matching OpenClaw skill is listed, explain the limitation naturally instead of exposing internal errors.",
+      ...(runtime
+        ? [
+            "For terminal-style execution, default to the projected runtime cwd above.",
+            "If you need to read the projected manifest or projected skills, use the exact paths above instead of guessing the working directory.",
+          ]
+        : []),
+      ...(exposedSkills.length > 0
+        ? [
+            `Projected OpenClaw skill files:`,
+            ...exposedSkills
+              .filter((skill) => skill.placement === "projected-local" || skill.placement === "container-env-required")
+              .map((skill) => `- ${skill.name}: ${skill.projectedPath ?? "(path unavailable)"}`),
+          ]
+        : []),
+    ].join("\n"),
+  );
 
   return parts.join("\n\n---\n\n");
 }
