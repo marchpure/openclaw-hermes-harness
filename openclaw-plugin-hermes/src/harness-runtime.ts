@@ -177,6 +177,26 @@ function sanitizePromptForHermes(prompt: string): string {
   return sanitized.trim();
 }
 
+function extractDisplayPromptForOpenClawTranscript(prompt: string): string {
+  const sanitized = sanitizePromptForHermes(prompt);
+  const marker = "仅本次任务派发给 Hermes 执行：";
+  const markerIndex = sanitized.lastIndexOf(marker);
+  if (markerIndex >= 0) {
+    const extracted = sanitized.slice(markerIndex + marker.length).trim();
+    if (extracted) {
+      return extracted;
+    }
+  }
+  return sanitized;
+}
+
+function normalizeUserTranscriptContent(content: unknown): Array<{ type: "text"; text: string }> | unknown {
+  if (typeof content === "string") {
+    return [{ type: "text", text: content }];
+  }
+  return content;
+}
+
 function clampAcpPrompt(prompt: string): string {
   if (prompt.length <= MAX_ACP_PROMPT_CHARS) {
     return prompt;
@@ -1141,7 +1161,7 @@ async function handleHarnessEvent(
 function buildUserMessage(params: AgentHarnessAttemptParams): HarnessMessage {
   return {
     role: "user",
-    content: sanitizePromptForHermes(params.prompt),
+    content: [{ type: "text", text: extractDisplayPromptForOpenClawTranscript(params.prompt) }],
     timestamp: Date.now(),
   } as HarnessMessage;
 }
@@ -1328,6 +1348,9 @@ async function appendMessagesToTranscriptFileBestEffort(params: {
     }
     const transcriptMessage = {
       ...(message as AgentMessageForTranscript),
+      ...(role === "user"
+        ? { content: normalizeUserTranscriptContent((message as AgentMessageForTranscript).content) }
+        : {}),
       ...(idempotencyKey ? { idempotencyKey } : {}),
     };
     const recordId = createTranscriptRecordId();
