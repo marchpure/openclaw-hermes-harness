@@ -3,10 +3,10 @@ import type {
   AgentHarnessAttemptResult,
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { readdir, readFile, realpath } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
@@ -65,6 +65,14 @@ type OpenClawTranscriptRuntimeModule = {
     idempotencyKey?: string;
     updateMode?: "inline" | "file-only" | "none";
   }) => Promise<OpenClawTranscriptAppendResult>;
+};
+type OpenClawTranscriptEventsModule = {
+  emitSessionTranscriptUpdate?: (update: string | { sessionFile: string; sessionKey?: string }) => void;
+  t?: (update: string | { sessionFile: string; sessionKey?: string }) => void;
+};
+type OpenClawSessionStoreEntry = {
+  sessionId?: string;
+  sessionFile?: string;
 };
 type McpLoopbackRuntime = {
   port: number;
@@ -571,6 +579,34 @@ async function loadOpenClawTranscriptRuntimeModule(): Promise<OpenClawTranscript
     }
   }
   throw new Error("OpenClaw transcript runtime SDK entry not found");
+}
+
+async function loadOpenClawTranscriptEventsModule(): Promise<OpenClawTranscriptEventsModule> {
+  const require = createRequire(import.meta.url);
+  const candidates: string[] = [];
+  try {
+    candidates.push(require.resolve("openclaw/plugin-sdk/src/sessions/transcript-events"));
+  } catch {}
+  for (const root of await resolveOpenClawDistDirs(require)) {
+    candidates.push(join(root, "transcript-events.js"));
+    try {
+      const entries = await readdir(root);
+      for (const entry of entries) {
+        if (/^transcript-events-[\w-]+\.js$/.test(entry)) {
+          candidates.push(join(root, entry));
+        }
+      }
+    } catch {}
+  }
+
+  for (const candidate of [...new Set(candidates)]) {
+    try {
+      return (await import(pathToFileURL(candidate).href)) as OpenClawTranscriptEventsModule;
+    } catch {
+      // Try the next installed OpenClaw runtime shard.
+    }
+  }
+  return {};
 }
 
 function buildHermesSessionOptions(params: {
@@ -1193,6 +1229,179 @@ function buildHermesMirrorDedupeIdentity(message: AgentMessageForTranscript): st
   return `${role}:${fingerprintMirrorMessageContent(message)}`;
 }
 
+function normalizeOpenClawStoreSessionKey(sessionKey: string): string {
+  return sessionKey.trim().toLowerCase();
+}
+
+function resolveDefaultOpenClawSessionStorePath(agentId?: string): string {
+  const normalizedAgentId =
+    typeof agentId === "string" && agentId.trim() ? agentId.trim().toLowerCase() : "main";
+  return join("/root/.openclaw/agents", normalizedAgentId, "sessions", "sessions.json");
+}
+
+async function resolveOpenClawSessionEntryFromStore(params: {
+  sessionKey?: string;
+  agentId?: string;
+}): Promise<{ sessionKey: string; storePath: string; entry: OpenClawSessionStoreEntry } | undefined> {
+  const sessionKey =
+    typeof params.sessionKey === "string" && params.sessionKey.trim()
+      ? params.sessionKey.trim()
+      : "";
+  if (!sessionKey) {
+    return undefined;
+  }
+
+  const storePath = resolveDefaultOpenClawSessionStorePath(params.agentId);
+  let store: Record<string, OpenClawSessionStoreEntry>;
+  try {
+    store = JSON.parse(await readFile(storePath, "utf8")) as Record<string, OpenClawSessionStoreEntry>;
+  } catch {
+    return undefined;
+  }
+
+  const exact = store[sessionKey];
+  if (exact?.sessionId || exact?.sessionFile) {
+    return { sessionKey, storePath, entry: exact };
+  }
+
+  const normalized = normalizeOpenClawStoreSessionKey(sessionKey);
+  for (const [key, entry] of Object.entries(store)) {
+    if (normalizeOpenClawStoreSessionKey(key) === normalized && (entry?.sessionId || entry?.sessionFile)) {
+      return { sessionKey: key, storePath, entry };
+    }
+  }
+  return undefined;
+}
+
+function resolveTranscriptPathFromStoreEntry(params: {
+  storePath: string;
+  entry: OpenClawSessionStoreEntry;
+}): string | undefined {
+  const sessionFile =
+    typeof params.entry.sessionFile === "string" && params.entry.sessionFile.trim()
+      ? params.entry.sessionFile.trim()
+      : "";
+  if (sessionFile) {
+    return sessionFile;
+  }
+  const sessionId =
+    typeof params.entry.sessionId === "string" && params.entry.sessionId.trim()
+      ? params.entry.sessionId.trim()
+      : "";
+  if (!sessionId) {
+    return undefined;
+  }
+  return join(dirname(params.storePath), `${sessionId}.jsonl`);
+}
+
+function createTranscriptRecordId(): string {
+  return randomBytes(4).toString("hex");
+}
+
+async function appendMessagesToTranscriptFileBestEffort(params: {
+  sessionFile: string;
+  sessionKey?: string;
+  idempotencyScope?: string;
+  messages: AgentHarnessAttemptResult["messagesSnapshot"];
+}): Promise<boolean> {
+  if (!params.messages?.length) {
+    return false;
+  }
+
+  const existingIdempotencyKeys = await readTranscriptIdempotencyKeys(params.sessionFile);
+  const records: string[] = [];
+  let appended = false;
+  let parentId = await readLatestTranscriptMessageId(params.sessionFile);
+  for (const message of params.messages) {
+    if (!message || typeof message !== "object") {
+      continue;
+    }
+    const role = (message as { role?: unknown }).role;
+    if (role !== "user" && role !== "assistant") {
+      continue;
+    }
+    const idempotencyKey = params.idempotencyScope
+      ? `${params.idempotencyScope}:${buildHermesMirrorDedupeIdentity(message as AgentMessageForTranscript)}`
+      : undefined;
+    if (idempotencyKey && existingIdempotencyKeys.has(idempotencyKey)) {
+      continue;
+    }
+    const transcriptMessage = {
+      ...(message as AgentMessageForTranscript),
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    };
+    const recordId = createTranscriptRecordId();
+    records.push(
+      JSON.stringify({
+        type: "message",
+        id: recordId,
+        parentId,
+        timestamp: new Date().toISOString(),
+        message: transcriptMessage,
+      }),
+    );
+    parentId = recordId;
+    if (idempotencyKey) {
+      existingIdempotencyKeys.add(idempotencyKey);
+    }
+    appended = true;
+  }
+
+  if (!records.length) {
+    return false;
+  }
+  await mkdir(dirname(params.sessionFile), { recursive: true });
+  await appendFile(params.sessionFile, `${records.join("\n")}\n`, "utf8");
+  await emitOpenClawTranscriptUpdateBestEffort({
+    sessionFile: params.sessionFile,
+    sessionKey: params.sessionKey,
+  });
+  return appended;
+}
+
+async function readLatestTranscriptMessageId(sessionFile: string): Promise<string | null> {
+  try {
+    const lines = (await readFile(sessionFile, "utf8")).split(/\r?\n/);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index]?.trim();
+      if (!line) {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(line) as { type?: unknown; id?: unknown; message?: unknown };
+        if (parsed.type === "message" && typeof parsed.id === "string" && parsed.id) {
+          return parsed.id;
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function emitOpenClawTranscriptUpdateBestEffort(params: {
+  sessionFile: string;
+  sessionKey?: string;
+}): Promise<void> {
+  try {
+    const module = await loadOpenClawTranscriptEventsModule();
+    const emit = module.emitSessionTranscriptUpdate ?? module.t;
+    if (typeof emit !== "function") {
+      return;
+    }
+    const sessionKey =
+      typeof params.sessionKey === "string" && params.sessionKey.trim()
+        ? params.sessionKey.trim()
+        : undefined;
+    emit(sessionKey ? { sessionFile: params.sessionFile, sessionKey } : params.sessionFile);
+  } catch {
+    // File append succeeded; live update is best effort.
+  }
+}
+
 async function appendAssistantTranscriptViaOpenClawRuntimeBestEffort(params: {
   sessionKey?: string;
   agentId?: string;
@@ -1317,6 +1526,28 @@ async function mirrorHermesTranscriptBestEffort(params: {
               : undefined;
           emitUpdate(sessionKey ? { sessionFile, sessionKey } : sessionFile);
         }
+        return;
+      }
+    }
+
+    const resolvedSession = await resolveOpenClawSessionEntryFromStore({
+      sessionKey: params.sessionKey,
+      agentId: params.agentId,
+    });
+    const resolvedSessionFile = resolvedSession
+      ? resolveTranscriptPathFromStoreEntry({
+          storePath: resolvedSession.storePath,
+          entry: resolvedSession.entry,
+        })
+      : undefined;
+    if (resolvedSessionFile) {
+      const appended = await appendMessagesToTranscriptFileBestEffort({
+        sessionFile: resolvedSessionFile,
+        sessionKey: resolvedSession?.sessionKey ?? params.sessionKey,
+        idempotencyScope: params.idempotencyScope,
+        messages: params.messages,
+      });
+      if (appended) {
         return;
       }
     }
