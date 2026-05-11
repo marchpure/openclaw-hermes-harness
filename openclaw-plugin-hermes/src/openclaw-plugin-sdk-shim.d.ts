@@ -11,6 +11,45 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
     maxTokens?: number;
     compat?: Record<string, unknown>;
   };
+  export type UnifiedModelCatalogKind =
+    | "text"
+    | "image_generation"
+    | "video_generation"
+    | "music_generation";
+  export type UnifiedModelCatalogSource =
+    | "manifest"
+    | "provider-index"
+    | "static"
+    | "live"
+    | "cache"
+    | "configured"
+    | "runtime-refresh";
+  export type UnifiedModelCatalogEntry = {
+    kind: UnifiedModelCatalogKind;
+    provider: string;
+    model: string;
+    label?: string;
+    source: UnifiedModelCatalogSource;
+  };
+  export type UnifiedModelCatalogProviderContext = Record<string, unknown>;
+  export type UnifiedModelCatalogProviderPlugin = {
+    provider: string;
+    kinds: readonly UnifiedModelCatalogKind[];
+    staticCatalog?: (
+      ctx: UnifiedModelCatalogProviderContext,
+    ) =>
+      | readonly UnifiedModelCatalogEntry[]
+      | Promise<readonly UnifiedModelCatalogEntry[] | null | undefined>
+      | null
+      | undefined;
+    liveCatalog?: (
+      ctx: UnifiedModelCatalogProviderContext,
+    ) =>
+      | readonly UnifiedModelCatalogEntry[]
+      | Promise<readonly UnifiedModelCatalogEntry[] | null | undefined>
+      | null
+      | undefined;
+  };
 }
 
 declare module "openclaw/plugin-sdk/provider-model-shared" {
@@ -31,6 +70,10 @@ declare module "openclaw/plugin-sdk/provider-model-shared" {
     docsPath?: string;
     auth?: unknown[];
     catalog?: {
+      order?: string;
+      run: () => Promise<unknown>;
+    };
+    staticCatalog?: {
       order?: string;
       run: () => Promise<unknown>;
     };

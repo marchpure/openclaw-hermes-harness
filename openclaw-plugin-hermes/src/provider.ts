@@ -1,4 +1,7 @@
-import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
+import type {
+  ProviderRuntimeModel,
+  UnifiedModelCatalogProviderPlugin,
+} from "openclaw/plugin-sdk/plugin-entry";
 import {
   normalizeModelCompat,
   type ModelDefinitionConfig,
@@ -6,6 +9,7 @@ import {
 } from "openclaw/plugin-sdk/provider-model-shared";
 
 const PROVIDER_ID = "hermes";
+const HERMES_PROVIDER_BASE_URL = "http://127.0.0.1/hermes-runtime";
 const DEFAULT_CONTEXT_WINDOW = 200_000;
 const DEFAULT_MAX_TOKENS = 32_000;
 const DEFAULT_CATALOG_MODELS = ["default"];
@@ -16,6 +20,10 @@ export function buildHermesProvider(options: { pluginConfig?: unknown } = {}): P
     label: "Hermes",
     docsPath: "/providers/models",
     auth: [],
+    staticCatalog: {
+      order: "late",
+      run: async () => buildHermesProviderCatalog({ pluginConfig: options.pluginConfig }),
+    },
     catalog: {
       order: "late",
       run: async () => buildHermesProviderCatalog({ pluginConfig: options.pluginConfig }),
@@ -45,7 +53,7 @@ export async function buildHermesProviderCatalog(
 }> {
   return {
     provider: {
-      baseUrl: "http://127.0.0.1/hermes-runtime",
+      baseUrl: HERMES_PROVIDER_BASE_URL,
       apiKey: "hermes-runtime",
       auth: "token",
       api: "openai-responses",
@@ -54,6 +62,21 @@ export async function buildHermesProviderCatalog(
       // internal compatibility path handled by the harness/runtime bridge.
       models: DEFAULT_CATALOG_MODELS.map((id) => buildModelDefinition(id)),
     },
+  };
+}
+
+export function buildHermesModelCatalogProvider(): UnifiedModelCatalogProviderPlugin {
+  return {
+    provider: PROVIDER_ID,
+    kinds: ["text"],
+    staticCatalog: () =>
+      DEFAULT_CATALOG_MODELS.map((id) => ({
+        kind: "text",
+        provider: PROVIDER_ID,
+        model: id,
+        label: id,
+        source: "static",
+      })),
   };
 }
 
@@ -67,7 +90,7 @@ function resolveHermesDynamicModel(modelId: string): ProviderRuntimeModel | unde
   return normalizeModelCompat({
     ...buildModelDefinition(id),
     provider: PROVIDER_ID,
-    baseUrl: "http://127.0.0.1/hermes-runtime",
+    baseUrl: HERMES_PROVIDER_BASE_URL,
   } as ProviderRuntimeModel);
 }
 

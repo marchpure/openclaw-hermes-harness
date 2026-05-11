@@ -14,7 +14,7 @@ import { dispatchToHermes } from "./dispatcher.js";
 import { createHermesAgentHarness } from "./harness.js";
 import { checkHealth, formatHealthReport } from "./health.js";
 import { inferStrategy, formatStrategy } from "./strategy-engine.js";
-import { buildHermesProvider } from "./provider.js";
+import { buildHermesModelCatalogProvider, buildHermesProvider } from "./provider.js";
 import {
   cancelAllSessions,
   cancelSession,
@@ -53,6 +53,7 @@ const plugin = {
     const workspaceDir = api.workspaceDir ?? process.cwd();
 
     api.registerProvider?.(buildHermesProvider({ pluginConfig: api.pluginConfig }));
+    api.registerModelCatalogProvider?.(buildHermesModelCatalogProvider());
     api.registerAgentHarness?.(createHermesAgentHarness({ pluginConfig: api.pluginConfig }));
 
     const logger = {
