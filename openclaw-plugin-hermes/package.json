@@ -31,8 +31,15 @@
   "scripts": {
     "build": "npx tsc"
   },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": { "optional": false }
+  },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "openclaw": "*",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   },

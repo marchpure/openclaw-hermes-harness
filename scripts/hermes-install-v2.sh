@@ -1424,7 +1424,66 @@ install_hermes_plugin() {
     fi
     log_info "插件安装完成"
 
+    # 插件 dist/*.js 会 `import 'openclaw'`，但 openclaw 本体是全局安装的，
+    # 而 Node ESM 不会向上查找全局 node_modules，因此必须在插件目录手动建立软链
+    ensure_plugin_openclaw_linked
+
     update_config_yaml || log_info "config.yaml 尚未生成，将在容器首次启动后由 entrypoint 创建"
+}
+
+# 在插件目录下建立 node_modules/openclaw -> 全局 openclaw 的软链，
+# 解决 `Cannot find package 'openclaw' imported from .../dist/provider.js` 的加载报错
+ensure_plugin_openclaw_linked() {
+    local plugin_dir="${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_DIR_NAME}"
+    if [[ ! -d "${plugin_dir}" ]]; then
+        log_warn "插件目录不存在，跳过 openclaw 软链补齐: ${plugin_dir}"
+        return 0
+    fi
+
+    # 若插件自带的 node_modules/openclaw 已经是合法包（包含 package.json），则无需补链
+    if [[ -f "${plugin_dir}/node_modules/openclaw/package.json" ]]; then
+        log_info "插件已携带 openclaw 依赖，跳过软链补齐"
+        return 0
+    fi
+
+    # 定位全局 openclaw 包根目录（与 patch_openclaw_runtime_for_hermes_toolset 的搜索逻辑保持一致）
+    local openclaw_bin openclaw_real openclaw_pkg_root=""
+    openclaw_bin="$(command -v openclaw || true)"
+    if [[ -z "${openclaw_bin}" ]]; then
+        log_warn "未找到 openclaw CLI，跳过 openclaw 软链补齐"
+        return 0
+    fi
+    openclaw_real="$(readlink -f "${openclaw_bin}" 2>/dev/null || realpath "${openclaw_bin}" 2>/dev/null || printf '%s\n' "${openclaw_bin}")"
+
+    local candidate
+    for candidate in \
+        "$(dirname "${openclaw_real}")/../lib/node_modules/openclaw" \
+        "$(dirname "${openclaw_real}")/../node_modules/openclaw" \
+        "$(dirname "$(dirname "${openclaw_real}")")/lib/node_modules/openclaw" \
+        "/usr/lib/node_modules/openclaw" \
+        "/usr/local/lib/node_modules/openclaw"
+    do
+        if [[ -f "${candidate}/package.json" ]]; then
+            openclaw_pkg_root="$(cd "${candidate}" && pwd)"
+            break
+        fi
+    done
+
+    if [[ -z "${openclaw_pkg_root}" ]]; then
+        log_warn "未能定位全局 openclaw 包目录，跳过软链补齐 (请确认 openclaw 已全局安装)"
+        return 0
+    fi
+
+    local link_path="${plugin_dir}/node_modules/openclaw"
+    mkdir -p "${plugin_dir}/node_modules"
+
+    # 清理可能残留的旧链接或无效目录
+    if [[ -L "${link_path}" || -e "${link_path}" ]]; then
+        rm -rf -- "${link_path}"
+    fi
+
+    ln -s "${openclaw_pkg_root}" "${link_path}"
+    log_info "已建立软链: ${link_path} -> ${openclaw_pkg_root}"
 }
 
 # ─── 阶段 4：启动容器 ─────────────────────────────────────────────────────────
