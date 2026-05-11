@@ -23,6 +23,7 @@ import {
   readSessionBinding,
   writeSessionBinding,
 } from "./runtime-client.js";
+import { mergeHermesSessionEnv } from "./session-env.js";
 import type {
   DispatchRequest,
   DispatchResult,
@@ -250,10 +251,7 @@ export async function dispatchToHermes(
         sessionOptions: buildDispatchSessionOptions({
           cwd: execution.execEnv.runtimeExecEnvPath,
           config,
-          env: {
-            ...credentialResult.envVars,
-            ...(config.mcpBridge.enabled ? config.mcpBridge.env : {}),
-          },
+          env: mergeHermesSessionEnv(config, credentialResult.envVars),
         }),
         bindingHash: execution.sessionBindingHash,
         logger,
@@ -512,7 +510,7 @@ async function dispatchDirectly(
         sessionOptions: buildDispatchSessionOptions({
           cwd: execution.execEnv.runtimeExecEnvPath,
           config,
-          env: config.mcpBridge.enabled ? config.mcpBridge.env : undefined,
+          env: mergeHermesSessionEnv(config),
         }),
         bindingHash: execution.sessionBindingHash,
         logger,

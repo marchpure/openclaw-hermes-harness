@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -281,6 +281,21 @@ function getSkillAliasNames(name: string): string[] {
   return aliases[normalizeSkillName(name)] ?? [];
 }
 
+function containsSymlinkSync(path: string): boolean {
+  try {
+    const info = lstatSync(path);
+    if (info.isSymbolicLink()) return true;
+    if (!info.isDirectory()) return false;
+    return readdirSync(path).some((entry) => containsSymlinkSync(join(path, entry)));
+  } catch {
+    return true;
+  }
+}
+
+function isProjectableSkillSource(path: string): boolean {
+  return !containsSymlinkSync(dirname(path));
+}
+
 function readSnapshotSkillPath(skill: NonNullable<OpenClawSkillSnapshot["resolvedSkills"]>[number]) {
   const raw = skill.filePath ?? skill.path;
   return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
@@ -290,7 +305,7 @@ function classifySkill(params: {
   name: string;
   sourcePath?: string;
   config: HermesPluginConfig;
-}): Pick<ProjectedSkill, "classification" | "placement" | "mcpTool" | "mcpToolHint" | "diagnostics"> {
+}): Pick<ProjectedSkill, "classification" | "placement" | "requiredEnv" | "mcpTool" | "mcpToolHint" | "diagnostics"> {
   const hostBackedNames = new Set(
     [
       ...params.config.skillProjection.hostBackedDenylist,
@@ -313,6 +328,9 @@ function classifySkill(params: {
     return {
       classification: "container-env-required",
       placement: "container-env-required",
+      requiredEnv: normalized === "byted-web-search"
+        ? ["WEB_SEARCH_API_KEY", "VOLCENGINE_ACCESS_KEY", "VOLCENGINE_SECRET_KEY", "VOLCENGINE_SESSION_TOKEN"]
+        : undefined,
     };
   }
   if (params.sourcePath?.endsWith("/SKILL.md") || params.sourcePath?.endsWith("\\SKILL.md")) {
@@ -459,7 +477,9 @@ async function mergeAlwaysExposeSkills(
 
     const manifestSkill = candidates
       .map((candidate) => manifestByName.get(normalizeSkillName(candidate)))
-      .find((candidate): candidate is SkillManifestEntry => Boolean(candidate));
+      .find((candidate): candidate is SkillManifestEntry =>
+        Boolean(candidate?.path && isProjectableSkillSource(candidate.path)),
+      );
     if (!manifestSkill) {
       continue;
     }

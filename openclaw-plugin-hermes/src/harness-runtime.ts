@@ -12,6 +12,7 @@ import { basename, dirname, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
+import { mergeHermesSessionEnv } from "./session-env.js";
 import {
   mirrorWorkspaceFromContainer,
   mirrorWorkspaceToContainer,
@@ -645,9 +646,10 @@ async function loadOpenClawTranscriptEventsModule(): Promise<OpenClawTranscriptE
 function buildHermesSessionOptions(params: {
   cwd: string;
   mcpBridge: AgentHarnessMcpBridge;
+  config: HermesPluginConfig;
 }): HermesAcpSessionOptions {
   const mcpServers = params.mcpBridge.mcpServers ?? {};
-  const env = params.mcpBridge.env ?? {};
+  const env = mergeHermesSessionEnv(params.config, params.mcpBridge.env);
   return {
     cwd: params.cwd,
     ...(mcpServers && Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
@@ -902,6 +904,7 @@ export async function runHermesHarnessAttempt(
   const sessionOptions = buildHermesSessionOptions({
     cwd: execution.execEnv.runtimeExecEnvPath,
     mcpBridge,
+    config,
   });
 
   try {
