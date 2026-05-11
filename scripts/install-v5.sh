@@ -15,12 +15,14 @@ set -Eeuo pipefail
 
 PUBLIC_BUCKET_BASE_URL="${PUBLIC_BUCKET_BASE_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com}"
 BASE_INSTALL_URL="${BASE_INSTALL_URL:-${PUBLIC_BUCKET_BASE_URL}/hermes-install.sh}"
-RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/feat/hermes-runtime-bridge-productized-squashed-from-1ca5fc3}"
+RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/main}"
 PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${RAW_REPO_BASE_URL}/openclaw-plugin-hermes-install-v5.tgz}"
 REMOTE_REPO_URL="${REMOTE_REPO_URL:-https://github.com/marchpure/openclaw-hermes-harness.git}"
-REMOTE_REPO_REF="${REMOTE_REPO_REF:-feat/hermes-runtime-bridge-productized-squashed-from-1ca5fc3}"
+REMOTE_REPO_REF="${REMOTE_REPO_REF:-main}"
 NPM_REGISTRY_URL="${NPM_REGISTRY_URL:-https://registry.npmmirror.com}"
 PREFER_PREBUILT_PLUGIN_URL="${PREFER_PREBUILT_PLUGIN_URL:-true}"
+PATCH_OPENCLAW_57_MODEL_COMPAT="${PATCH_OPENCLAW_57_MODEL_COMPAT:-true}"
+PATCH_OPENCLAW_57_AGENT_HARNESS_PIN="${PATCH_OPENCLAW_57_AGENT_HARNESS_PIN:-${PATCH_OPENCLAW_57_MODEL_COMPAT}}"
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
 if [[ -n "${SCRIPT_SOURCE}" && -e "${SCRIPT_SOURCE}" ]]; then
@@ -33,6 +35,7 @@ fi
 
 BASE_INSTALL_SCRIPT="${SCRIPT_DIR:+${SCRIPT_DIR}/hermes-install.sh}"
 LOCAL_PLUGIN_DIR="${REPO_ROOT:+${REPO_ROOT}/openclaw-plugin-hermes}"
+LOCAL_COMPAT_PATCH_SCRIPT="${REPO_ROOT:+${REPO_ROOT}/scripts/patch-openclaw-57-model-compat.js}"
 
 MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION:-2026.4.15}"
 DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR:-/var/cache/hermes-agent}"
@@ -426,6 +429,7 @@ normalize_runtime_entries() {
             })
           | .agents = (.agents // {})
           | .agents.defaults = (.agents.defaults // {})
+          | .agents.defaults.agentRuntime = { "id": "auto" }
           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
               "hermes/default": { "alias": "hermes" }
             })
@@ -504,6 +508,7 @@ cfg.update({
         "env": mcp_cfg.get("env", {}) if isinstance(mcp_cfg.get("env"), dict) else {},
     },
 })
+data.setdefault("agents", {}).setdefault("defaults", {})["agentRuntime"] = {"id": "auto"}
 data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("models", {})["hermes/default"] = {"alias": "hermes"}
 data.setdefault("models", {}).setdefault("providers", {})["hermes"] = {
     "baseUrl": "http://127.0.0.1/hermes-runtime",
@@ -735,6 +740,23 @@ NODE
     log_info "OpenClaw MCP bridge SDK helper 已补齐"
 }
 
+patch_openclaw_runtime_for_57_agent_harness_pin() {
+    if [[ "${PATCH_OPENCLAW_57_AGENT_HARNESS_PIN}" != "true" ]]; then
+        log_info "跳过 OpenClaw 5.7 agentHarnessId stale-pin 回补 (PATCH_OPENCLAW_57_AGENT_HARNESS_PIN=${PATCH_OPENCLAW_57_AGENT_HARNESS_PIN})"
+        return 0
+    fi
+    command -v node >/dev/null 2>&1 || die "缺少 node，无法安装 OpenClaw 5.7 agentHarnessId stale-pin 回补"
+    local patch_script="${LOCAL_COMPAT_PATCH_SCRIPT}"
+    if [[ -z "${patch_script}" || ! -f "${patch_script}" ]]; then
+        local tmp_dir
+        tmp_dir="$(mktemp -d)"
+        TEMP_DIRS+=("${tmp_dir}")
+        patch_script="${tmp_dir}/patch-openclaw-57-model-compat.js"
+        download_file "${RAW_REPO_BASE_URL}/scripts/patch-openclaw-57-model-compat.js" "${patch_script}"
+    fi
+    node "${patch_script}"
+}
+
 main() {
     check_prereqs
     detect_existing_installation
@@ -761,6 +783,7 @@ main() {
     # 不动大镜像缓存，避免每次都重新加载 1.1G 镜像。
     invalidate_cached_plugin_archive
     patch_openclaw_runtime_for_hermes_toolset
+    patch_openclaw_runtime_for_57_agent_harness_pin
 
     MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION}" \
     DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR}" \
@@ -775,6 +798,7 @@ main() {
 
     normalize_runtime_entries
     patch_openclaw_runtime_for_hermes_toolset
+    patch_openclaw_runtime_for_57_agent_harness_pin
     log_info "install-v5 执行完成"
 }
 

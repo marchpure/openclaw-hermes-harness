@@ -2,6 +2,22 @@
   "id": "openclaw-plugin-hermes",
   "name": "Hermes Agent",
   "description": "Delegate heavy tasks (terminal, browser, code execution) to a containerized Hermes Agent via ACP.",
+  "providers": ["hermes"],
+  "activation": {
+    "onStartup": true,
+    "onAgentHarnesses": ["hermes"]
+  },
+  "contracts": {
+    "tools": [
+      "byted_web_search",
+      "computer_use",
+      "arkdrive_netdisk",
+      "hermes_dispatch",
+      "hermes_status",
+      "hermes_strategy",
+      "hermes_cancel"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
