@@ -34,6 +34,16 @@ import type {
   AcpSessionEvent,
   HermesAcpSessionOptions,
 } from "./types.js";
+import { traceStep, recordEventSpans } from "./observability/index.js";
+import {
+  GEN_AI_INPUT,
+  GEN_AI_OUTPUT,
+  GEN_AI_USAGE_INPUT_TOKENS,
+  GEN_AI_USAGE_OUTPUT_TOKENS,
+  GEN_AI_USAGE_TOTAL_TOKENS,
+  GEN_AI_SPAN_KIND,
+  GenAiSpanKind,
+} from "./observability/genaiConst.js";
 
 // ─── Logger ─────────────────────────────────────────────────────────────────
 
@@ -119,6 +129,7 @@ export async function dispatchToHermes(
   options: DispatcherOptions,
 ): Promise<DispatchResult> {
   const { config, workspaceDir, logger, signal } = options;
+  const allowDetail = options.allowUserDetailInfoReport === true;
   const startTime = Date.now();
 
   if (signal?.aborted) {
@@ -132,36 +143,45 @@ export async function dispatchToHermes(
 
   // ── Step 1: Determine Strategy ──────────────────────────────────────
 
-  let strategy: StrategyTriple;
+  const strategy = await traceStep("hermes_strategy_inference", async (span) => {
+    let next: StrategyTriple;
+    if (request.explicitStrategy && request.contextLevel && request.credentialScope && request.writeback) {
+      // Use explicitly provided strategy
+      next = {
+        context: request.contextLevel,
+        credential: request.credentialScope,
+        writeback: request.writeback,
+        confidence: 1.0,
+        reasoning: "Explicit strategy provided by caller",
+      };
+    } else if (config.autoStrategy) {
+      // Auto-infer strategy
+      next = inferStrategy(request.task);
+      logger?.info(`Auto-strategy: ${formatStrategy(next)} (confidence: ${next.confidence})`);
 
-  if (request.explicitStrategy && request.contextLevel && request.credentialScope && request.writeback) {
-    // Use explicitly provided strategy
-    strategy = {
-      context: request.contextLevel,
-      credential: request.credentialScope,
-      writeback: request.writeback,
-      confidence: 1.0,
-      reasoning: "Explicit strategy provided by caller",
-    };
-  } else if (config.autoStrategy) {
-    // Auto-infer strategy
-    strategy = inferStrategy(request.task);
-    logger?.info(`Auto-strategy: ${formatStrategy(strategy)} (confidence: ${strategy.confidence})`);
-
-    // Apply overrides if any individual dimension is specified
-    if (request.contextLevel) strategy.context = request.contextLevel;
-    if (request.credentialScope) strategy.credential = request.credentialScope;
-    if (request.writeback) strategy.writeback = request.writeback;
-  } else {
-    // Use defaults from config
-    strategy = {
-      context: request.contextLevel ?? config.defaultContextLevel,
-      credential: request.credentialScope ?? { mode: config.defaultCredentialScope },
-      writeback: request.writeback ?? config.defaultWriteback,
-      confidence: 0.5,
-      reasoning: "Using config defaults (autoStrategy disabled)",
-    };
-  }
+      // Apply overrides if any individual dimension is specified
+      if (request.contextLevel) next.context = request.contextLevel;
+      if (request.credentialScope) next.credential = request.credentialScope;
+      if (request.writeback) next.writeback = request.writeback;
+    } else {
+      // Use defaults from config
+      next = {
+        context: request.contextLevel ?? config.defaultContextLevel,
+        credential: request.credentialScope ?? { mode: config.defaultCredentialScope },
+        writeback: request.writeback ?? config.defaultWriteback,
+        confidence: 0.5,
+        reasoning: "Using config defaults (autoStrategy disabled)",
+      };
+    }
+    span.setAttributes({
+      "hermes_strategy_context": next.context,
+      "hermes_strategy_writeback": next.writeback,
+      "hermes_strategy_credential_mode": next.credential.mode,
+      "hermes_strategy_confidence": next.confidence,
+      "hermes_strategy_auto": config.autoStrategy,
+    });
+    return next;
+  });
 
   logger?.info(`Dispatching to Hermes: ${formatStrategy(strategy)}`);
 
@@ -169,13 +189,18 @@ export async function dispatchToHermes(
 
   let execution;
   try {
-    execution = await prepareProjectedExecutionEnv({
-      task: request.task,
-      taskId: `task-${Date.now()}`,
-      workspaceDir,
-      contextLevel: strategy.context,
-      model: request.model,
-      config,
+    execution = await traceStep("hermes_context_assembly", async (span) => {
+      span.setAttribute("hermes_context_level", strategy.context);
+      const prepared = await prepareProjectedExecutionEnv({
+        task: request.task,
+        taskId: `task-${Date.now()}`,
+        workspaceDir,
+        contextLevel: strategy.context,
+        model: request.model,
+        config,
+      });
+      span.setAttribute("hermes_context_model", request.model ?? config.defaultModel ?? "");
+      return prepared;
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -187,7 +212,14 @@ export async function dispatchToHermes(
 
   // ── Step 3: Inject Credentials ──────────────────────────────────────
 
-  const credentialResult = injectCredentials(strategy.credential);
+  const credentialResult = await traceStep("hermes_credential_injection", async (span) => {
+    const result = injectCredentials(strategy.credential);
+    span.setAttributes({
+      "hermes_credential_mode": strategy.credential.mode,
+      "hermes_credential_injected_count": Object.keys(result.envVars).length,
+    });
+    return result;
+  });
 
   for (const logLine of credentialResult.auditLog) {
     logger?.info(logLine);
@@ -199,25 +231,35 @@ export async function dispatchToHermes(
   let acpText = "";
   let acpEvents: AcpSessionEvent[] = [];
   let tokensUsed = 0;
+  let usageResult: DispatchResult["usage"] | undefined;
 
   try {
-    await mirrorWorkspaceToContainer(config, workspaceDir);
+    await traceStep("hermes_workspace_mirror_to_container", async () => {
+      await mirrorWorkspaceToContainer(config, workspaceDir);
+    });
 
-    await acpClient.start();
+    await traceStep("hermes_acp_connect", async (span) => {
+      span.setAttribute("hermes_acp_transport", config.transport);
+      await acpClient.start();
+    });
 
     // Resume or create session based on execenv binding.
-    const sessionId = await resumeOrCreateSession({
-      acpClient,
-      sessionOptions: buildDispatchSessionOptions({
-        cwd: execution.execEnv.runtimeExecEnvPath,
-        config,
-        env: {
-          ...credentialResult.envVars,
-          ...(config.mcpBridge.enabled ? config.mcpBridge.env : {}),
-        },
-      }),
-      bindingHash: execution.sessionBindingHash,
-      logger,
+    const sessionId = await traceStep("hermes_session_create", async (span) => {
+      const id = await resumeOrCreateSession({
+        acpClient,
+        sessionOptions: buildDispatchSessionOptions({
+          cwd: execution.execEnv.runtimeExecEnvPath,
+          config,
+          env: {
+            ...credentialResult.envVars,
+            ...(config.mcpBridge.enabled ? config.mcpBridge.env : {}),
+          },
+        }),
+        bindingHash: execution.sessionBindingHash,
+        logger,
+      });
+      span.setAttribute("hermes.session.id", id);
+      return id;
     });
 
     const abortHandler = () => {
@@ -236,21 +278,41 @@ export async function dispatchToHermes(
     // Send the prompt
     try {
       const timeout = (request.timeout ?? config.timeout) * 1000;
-      const result = await acpClient.prompt(promptText, sessionId, { timeout, signal });
+      const result = await traceStep("hermes_llm_loop", async (span) => {
+        span.setAttributes({
+          [GEN_AI_SPAN_KIND]: GenAiSpanKind.LLMLoop,
+          "hermes.session.id": sessionId,
+          ...(allowDetail ? { [GEN_AI_INPUT]: request.task } : {}),
+          "hermes_llm_timeout_ms": timeout,
+        });
+        const response = await acpClient.prompt(promptText, sessionId, { timeout, signal });
+        span.setAttributes({
+          ...(allowDetail ? { [GEN_AI_OUTPUT]: response.text } : {}),
+          [GEN_AI_USAGE_INPUT_TOKENS]: response.usage?.input_tokens ?? 0,
+          [GEN_AI_USAGE_OUTPUT_TOKENS]: response.usage?.output_tokens ?? 0,
+          [GEN_AI_USAGE_TOTAL_TOKENS]: response.usage?.total_tokens ?? 0,
+          "hermes_llm_event_count": response.events.length,
+        });
+        recordEventSpans(response.events, { allowDetail, hermesSessionId: sessionId });
+        return response;
+      });
 
       acpText = result.text;
       acpEvents = result.events;
       tokensUsed = result.usage?.total_tokens ?? 0;
+      usageResult = result.usage;
       const touchedSkillNames = extractTouchedSkillNames(acpEvents);
 
       logger?.info(`Hermes completed: ${acpText.length} chars, ${acpEvents.length} events, ${tokensUsed} tokens`);
-      await mirrorWorkspaceFromContainer(
-        config,
-        workspaceDir,
-        [],
-        execution.execEnv.runtimeExecEnvPath,
-        touchedSkillNames,
-      );
+      await traceStep("hermes_workspace_mirror_from_container", async () => {
+        await mirrorWorkspaceFromContainer(
+          config,
+          workspaceDir,
+          [],
+          execution.execEnv.runtimeExecEnvPath,
+          touchedSkillNames,
+        );
+      });
     } finally {
       signal?.removeEventListener("abort", abortHandler);
     }
@@ -271,25 +333,36 @@ export async function dispatchToHermes(
     clearSessionBinding(execution.sessionBindingHash);
     return makeErrorResult("Hermes execution failed: " + msg, strategy, startTime);
   } finally {
-    await acpClient.close().catch(() => {});
+    await traceStep("hermes_session_close", async (span) => {
+      span.setAttribute("hermes.session.id", acpClient.currentSessionId ?? "");
+      await acpClient.close().catch(() => {});
+    });
   }
 
   // ── Step 5: Process Results ─────────────────────────────────────────
 
   let processed;
   try {
-    processed = await processResult(acpText, acpEvents, strategy.writeback, {
-      workspaceDir,
-      confirmAction: options.confirmAction,
-    });
+    processed = await traceStep("hermes_result_processing", async (span) => {
+      span.setAttribute("hermes_writeback_level", strategy.writeback);
+      const result = await processResult(acpText, acpEvents, strategy.writeback, {
+        workspaceDir,
+        confirmAction: options.confirmAction,
+      });
 
-    // Apply writeback changes
-    if (processed.memoryUpdates.length > 0 || processed.skillsCreated.length > 0) {
-      const applied = await applyWriteback(processed, { workspaceDir });
-      for (const action of applied) {
-        logger?.info(`Writeback: ${action}`);
+      // Apply writeback changes
+      if (result.memoryUpdates.length > 0 || result.skillsCreated.length > 0) {
+        const applied = await applyWriteback(result, { workspaceDir });
+        for (const action of applied) {
+          logger?.info(`Writeback: ${action}`);
+        }
       }
-    }
+      span.setAttributes({
+        "hermes_writeback_memory_updates": result.memoryUpdates.length,
+        "hermes_writeback_skills_created": result.skillsCreated.length,
+      });
+      return result;
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger?.warn(`Result processing failed (non-fatal): ${msg}`);
@@ -306,6 +379,7 @@ export async function dispatchToHermes(
     memoryUpdates: processed.memoryUpdates,
     skillsCreated: processed.skillsCreated,
     tokensUsed,
+    usage: usageResult,
     duration,
     strategy,
   };
@@ -406,32 +480,45 @@ async function dispatchDirectly(
   const acpClient = new HermesAcpClient(config, logger as any);
   let acpText = "";
   let tokensUsed = 0;
+  let usageResult: DispatchResult["usage"] | undefined;
   let bindingHash: string | null = null;
 
   try {
     if (signal?.aborted) {
       return makeCancelledResult("Aborted before direct dispatch", bypassStrategy, startTime);
     }
-    const execution = await prepareProjectedExecutionEnv({
-      task: request.task,
-      taskId: `task-${Date.now()}`,
-      workspaceDir,
-      contextLevel: "L0",
-      model: request.model,
-      config,
+    const execution = await traceStep("hermes_context_assembly", async (span) => {
+      span.setAttribute("hermes_context_level", "L0");
+      return await prepareProjectedExecutionEnv({
+        task: request.task,
+        taskId: `task-${Date.now()}`,
+        workspaceDir,
+        contextLevel: "L0",
+        model: request.model,
+        config,
+      });
     });
     bindingHash = execution.sessionBindingHash;
-    await mirrorWorkspaceToContainer(config, workspaceDir);
-    await acpClient.start();
-    const sessionId = await resumeOrCreateSession({
-      acpClient,
-      sessionOptions: buildDispatchSessionOptions({
-        cwd: execution.execEnv.runtimeExecEnvPath,
-        config,
-        env: config.mcpBridge.enabled ? config.mcpBridge.env : undefined,
-      }),
-      bindingHash: execution.sessionBindingHash,
-      logger,
+    await traceStep("hermes_workspace_mirror_to_container", async () => {
+      await mirrorWorkspaceToContainer(config, workspaceDir);
+    });
+    await traceStep("hermes_acp_connect", async (span) => {
+      span.setAttribute("hermes_acp_transport", config.transport);
+      await acpClient.start();
+    });
+    const sessionId = await traceStep("hermes_session_create", async (span) => {
+      const id = await resumeOrCreateSession({
+        acpClient,
+        sessionOptions: buildDispatchSessionOptions({
+          cwd: execution.execEnv.runtimeExecEnvPath,
+          config,
+          env: config.mcpBridge.enabled ? config.mcpBridge.env : undefined,
+        }),
+        bindingHash: execution.sessionBindingHash,
+        logger,
+      });
+      span.setAttribute("hermes.session.id", id);
+      return id;
     });
     const abortHandler = () => {
       logger?.info("Abort signal received - cancelling direct Hermes session");
@@ -447,16 +534,34 @@ async function dispatchDirectly(
     const timeout = (request.timeout ?? config.timeout) * 1000;
     let result;
     try {
-      result = await acpClient.prompt(request.task, sessionId, { timeout, signal });
+      result = await traceStep("hermes_llm_loop", async (span) => {
+        span.setAttributes({
+          [GEN_AI_SPAN_KIND]: GenAiSpanKind.LLMLoop,
+          "hermes.session.id": sessionId,
+          "hermes_llm_timeout_ms": timeout,
+        });
+        const response = await acpClient.prompt(request.task, sessionId, { timeout, signal });
+        span.setAttributes({
+          [GEN_AI_USAGE_INPUT_TOKENS]: response.usage?.input_tokens ?? 0,
+          [GEN_AI_USAGE_OUTPUT_TOKENS]: response.usage?.output_tokens ?? 0,
+          [GEN_AI_USAGE_TOTAL_TOKENS]: response.usage?.total_tokens ?? 0,
+          "hermes_llm_event_count": response.events.length,
+        });
+        recordEventSpans(response.events, { hermesSessionId: sessionId });
+        return response;
+      });
     } finally {
       signal?.removeEventListener("abort", abortHandler);
     }
 
     acpText = result.text;
     tokensUsed = result.usage?.total_tokens ?? 0;
+    usageResult = result.usage;
 
     logger?.info(`Direct dispatch completed: ${acpText.length} chars, ${tokensUsed} tokens`);
-    await mirrorWorkspaceFromContainer(config, workspaceDir, [], execution.execEnv.runtimeExecEnvPath, []);
+    await traceStep("hermes_workspace_mirror_from_container", async () => {
+      await mirrorWorkspaceFromContainer(config, workspaceDir, [], execution.execEnv.runtimeExecEnvPath, []);
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
 
@@ -473,13 +578,17 @@ async function dispatchDirectly(
     if (bindingHash) clearSessionBinding(bindingHash);
     return makeErrorResult("Direct dispatch failed: " + msg, bypassStrategy, startTime);
   } finally {
-    await acpClient.close().catch(() => {});
+    await traceStep("hermes_session_close", async (span) => {
+      span.setAttribute("hermes.session.id", acpClient.currentSessionId ?? "");
+      await acpClient.close().catch(() => {});
+    });
   }
 
   return {
     status: "success",
     result: acpText,
     tokensUsed,
+    usage: usageResult,
     duration: Date.now() - startTime,
     strategy: bypassStrategy,
   };

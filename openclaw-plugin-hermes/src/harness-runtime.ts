@@ -3,6 +3,7 @@ import type {
   AgentHarnessAttemptResult,
   NormalizedUsage,
 } from "openclaw/plugin-sdk/agent-harness";
+import { SpanStatusCode } from "@opentelemetry/api";
 import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
@@ -25,6 +26,18 @@ import {
 } from "./runtime-client.js";
 import { extractTouchedSkillNames } from "./result-processor.js";
 import type { AcpSessionEvent, HermesAcpSessionOptions, HermesPluginConfig } from "./types.js";
+import {
+  traceWithSpan,
+  traceStep,
+  recordEventSpans,
+} from "./observability/index.js";
+import {
+  GEN_AI_USAGE_INPUT_TOKENS,
+  GEN_AI_USAGE_OUTPUT_TOKENS,
+  GEN_AI_USAGE_TOTAL_TOKENS,
+  GEN_AI_SPAN_KIND,
+  GenAiSpanKind,
+} from "./observability/genaiConst.js";
 
 type HarnessMessage = NonNullable<AgentHarnessAttemptResult["messagesSnapshot"]>[number];
 type AgentHarnessMcpBridge = {
@@ -745,7 +758,50 @@ export function createHermesRuntimeClient(options: {
   config: HermesPluginConfig;
 }): HermesRuntimeClient {
   return {
-    runAttempt: (params) => runHermesHarnessAttempt(options.config, params),
+    runAttempt: async (params) => {
+      const startedAt = Date.now();
+      return await traceWithSpan(
+        {
+          endpoint: options.config.otel?.endpoint,
+          spanName: "hermes_agent_call",
+          serviceName: options.config.otel?.serviceName,
+          attributes: {
+            [GEN_AI_SPAN_KIND]: GenAiSpanKind.Agent,
+            "hermes_entrypoint": "agent_harness",
+            "hermes_provider": params.provider ?? "",
+            "hermes_model": params.modelId ?? options.config.defaultModel ?? "",
+            "hermes_session_key": params.sessionKey ?? "",
+            "hermes_session_id": params.sessionId ?? "",
+            "hermes_agent_id": params.agentId ?? "",
+          },
+        },
+        async (span) => {
+          const response = await runHermesHarnessAttempt(options.config, params);
+          span.setAttributes({
+            "hermes_status": response.promptError
+              ? "error"
+              : response.aborted || response.externalAbort
+                ? "cancelled"
+                : response.timedOut
+                  ? "timeout"
+                  : "success",
+            "hermes_duration_ms": Date.now() - startedAt,
+            "hermes_tokens_used": response.usage?.total ?? 0,
+            "hermes_tool_count": response.toolMetas?.length ?? 0,
+            [GEN_AI_USAGE_INPUT_TOKENS]: response.usage?.input ?? 0,
+            [GEN_AI_USAGE_OUTPUT_TOKENS]: response.usage?.output ?? 0,
+            [GEN_AI_USAGE_TOTAL_TOKENS]: response.usage?.total ?? 0,
+          });
+          if (response.promptError || response.timedOut) {
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: response.timedOut ? "Hermes timeout" : "Hermes prompt error",
+            });
+          }
+          return response;
+        },
+      );
+    },
   };
 }
 
@@ -818,23 +874,30 @@ export async function runHermesHarnessAttempt(
     senderIsOwner: params.senderIsOwner,
   });
 
-  const execution = await prepareProjectedExecutionEnv({
-    task: sanitizedPrompt,
-    taskId: sessionAnchor,
-    workspaceDir: params.workspaceDir,
-    contextLevel,
-    includeWorkspaceSkills: config.runtimeProjectWorkspaceSkills,
-    model: params.modelId,
-    config,
-    sessionAnchor,
-    conversationHistory: conversationHistory.promptText,
-    openClawContext: {
-      agentId: params.agentId,
-      skillsSnapshot: params.skillsSnapshot,
-      extraSystemPrompt: params.extraSystemPrompt,
-    },
-    mcpConfigHash: mcpBridge.mcpResumeHash ?? mcpBridge.mcpConfigHash,
-    credentialScopeHash: mcpBridge.credentialScopeHash,
+  const execution = await traceStep("hermes_context_assembly", async (span) => {
+    span.setAttributes({
+      "hermes_context_level": contextLevel,
+      "hermes_context_history_messages": conversationHistory.messages.length,
+      "hermes_model": params.modelId ?? config.defaultModel ?? "",
+    });
+    return await prepareProjectedExecutionEnv({
+      task: sanitizedPrompt,
+      taskId: sessionAnchor,
+      workspaceDir: params.workspaceDir,
+      contextLevel,
+      includeWorkspaceSkills: config.runtimeProjectWorkspaceSkills,
+      model: params.modelId,
+      config,
+      sessionAnchor,
+      conversationHistory: conversationHistory.promptText,
+      openClawContext: {
+        agentId: params.agentId,
+        skillsSnapshot: params.skillsSnapshot,
+        extraSystemPrompt: params.extraSystemPrompt,
+      },
+      mcpConfigHash: mcpBridge.mcpResumeHash ?? mcpBridge.mcpConfigHash,
+      credentialScopeHash: mcpBridge.credentialScopeHash,
+    });
   });
   const sessionOptions = buildHermesSessionOptions({
     cwd: execution.execEnv.runtimeExecEnvPath,
@@ -844,17 +907,27 @@ export async function runHermesHarnessAttempt(
   try {
     // Mirror prompt-referenced host paths before ACP starts so Hermes file
     // writes can later be pulled back to the OpenClaw host.
-    await mirrorWorkspaceToContainer(config, params.workspaceDir, referencedWorkspacePaths);
-    await client.start();
+    await traceStep("hermes_workspace_mirror_to_container", async (span) => {
+      span.setAttribute("hermes_workspace_path_count", referencedWorkspacePaths.length);
+      await mirrorWorkspaceToContainer(config, params.workspaceDir, referencedWorkspacePaths);
+    });
+    await traceStep("hermes_acp_connect", async (span) => {
+      span.setAttribute("hermes_acp_transport", config.transport);
+      await client.start();
+    });
     webui.lifecycleStart({ startedAt: Date.now() });
     publishHermesHarnessAgentEvent(params, {
       stream: "lifecycle",
       data: { phase: "start", startedAt: Date.now() },
     });
-    const sessionId = await resumeOrCreateSession({
-      client,
-      sessionOptions,
-      bindingHash: execution.sessionBindingHash,
+    const sessionId = await traceStep("hermes_session_create", async (span) => {
+      const id = await resumeOrCreateSession({
+        client,
+        sessionOptions,
+        bindingHash: execution.sessionBindingHash,
+      });
+      span.setAttribute("hermes.session.id", id);
+      return id;
     });
 
     const acpPrompt = clampAcpPrompt(execution.bootstrapPrompt);
@@ -864,36 +937,51 @@ export async function runHermesHarnessAttempt(
       );
     }
 
-    const result = await client.prompt(acpPrompt, sessionId, {
-      timeout: timeoutMs,
-      signal: params.abortSignal,
-      onEvent: async (event) => {
-        // Normalize every ACP streaming event into harness callbacks, WebUI
-        // gateway events, and local assistant/tool metadata.
-        await handleHarnessEvent(event, params, {
-          markAssistantStarted: async () => {
-            if (assistantStarted) return;
-            assistantStarted = true;
-            void params.onAssistantMessageStart?.();
-          },
-          markReasoningStarted: async () => {
-            if (reasoningStarted) return;
-            reasoningStarted = true;
-            void params.onReasoningStart?.();
-          },
-          markReasoningEnded: async () => {
-            if (!reasoningStarted || reasoningEnded) return;
-            reasoningEnded = true;
-            void params.onReasoningEnd?.();
-          },
-          toolMetas,
-          webui,
-          appendAssistantText: (delta) => {
-            assistantTextSoFar += delta;
-            return assistantTextSoFar;
-          },
-        });
-      },
+    const result = await traceStep("hermes_llm_loop", async (span) => {
+      span.setAttributes({
+        [GEN_AI_SPAN_KIND]: GenAiSpanKind.LLMLoop,
+        "hermes.session.id": sessionId,
+        "hermes_llm_timeout_ms": timeoutMs,
+      });
+      const response = await client.prompt(acpPrompt, sessionId, {
+        timeout: timeoutMs,
+        signal: params.abortSignal,
+        onEvent: async (event) => {
+          // Normalize every ACP streaming event into harness callbacks, WebUI
+          // gateway events, and local assistant/tool metadata.
+          await handleHarnessEvent(event, params, {
+            markAssistantStarted: async () => {
+              if (assistantStarted) return;
+              assistantStarted = true;
+              void params.onAssistantMessageStart?.();
+            },
+            markReasoningStarted: async () => {
+              if (reasoningStarted) return;
+              reasoningStarted = true;
+              void params.onReasoningStart?.();
+            },
+            markReasoningEnded: async () => {
+              if (!reasoningStarted || reasoningEnded) return;
+              reasoningEnded = true;
+              void params.onReasoningEnd?.();
+            },
+            toolMetas,
+            webui,
+            appendAssistantText: (delta) => {
+              assistantTextSoFar += delta;
+              return assistantTextSoFar;
+            },
+          });
+        },
+      });
+      span.setAttributes({
+        [GEN_AI_USAGE_INPUT_TOKENS]: response.usage?.input_tokens ?? 0,
+        [GEN_AI_USAGE_OUTPUT_TOKENS]: response.usage?.output_tokens ?? 0,
+        [GEN_AI_USAGE_TOTAL_TOKENS]: response.usage?.total_tokens ?? 0,
+        "hermes_llm_event_count": response.events.length,
+      });
+      recordEventSpans(response.events, { hermesSessionId: sessionId });
+      return response;
     });
 
     if (reasoningStarted && !reasoningEnded) {
@@ -906,13 +994,19 @@ export async function runHermesHarnessAttempt(
     const touchedSkillNames = extractTouchedSkillNames(result.events);
     // Pull back only prompt-referenced directories. This preserves observable
     // side effects without tarring large workspace caches.
-    await mirrorWorkspaceFromContainer(
-      config,
-      params.workspaceDir,
-      referencedWorkspacePaths,
-      execution.execEnv.runtimeExecEnvPath,
-      touchedSkillNames,
-    );
+    await traceStep("hermes_workspace_mirror_from_container", async (span) => {
+      span.setAttributes({
+        "hermes_workspace_path_count": referencedWorkspacePaths.length,
+        "hermes_touched_skill_count": touchedSkillNames.length,
+      });
+      await mirrorWorkspaceFromContainer(
+        config,
+        params.workspaceDir,
+        referencedWorkspacePaths,
+        execution.execEnv.runtimeExecEnvPath,
+        touchedSkillNames,
+      );
+    });
     const assistantText = result.text;
     const lastAssistant = buildAssistantMessage(params, assistantText, usage, {
       aborted: false,
@@ -926,13 +1020,16 @@ export async function runHermesHarnessAttempt(
       ...(conversationHistory.messages ?? []),
       ...currentTurnMessages,
     ] as AgentHarnessAttemptResult["messagesSnapshot"];
-    await mirrorHermesTranscriptBestEffort({
-      sessionFile: params.sessionFile,
-      sessionKey: params.sessionKey,
-      agentId: params.agentId,
-      idempotencyScope: buildHermesMirrorIdempotencyScope(params),
-      config: params.config,
-      messages: currentTurnMessages,
+    await traceStep("hermes_transcript_mirror", async (span) => {
+      span.setAttribute("hermes_transcript_message_count", currentTurnMessages.length);
+      await mirrorHermesTranscriptBestEffort({
+        sessionFile: params.sessionFile,
+        sessionKey: params.sessionKey,
+        agentId: params.agentId,
+        idempotencyScope: buildHermesMirrorIdempotencyScope(params),
+        config: params.config,
+        messages: currentTurnMessages,
+      });
     });
 
     return {
@@ -977,13 +1074,16 @@ export async function runHermesHarnessAttempt(
       buildUserMessage(params),
       ...(lastAssistant ? [lastAssistant] : []),
     ];
-    await mirrorHermesTranscriptBestEffort({
-      sessionFile: params.sessionFile,
-      sessionKey: params.sessionKey,
-      agentId: params.agentId,
-      idempotencyScope: buildHermesMirrorIdempotencyScope(params),
-      config: params.config,
-      messages: currentTurnMessages,
+    await traceStep("hermes_transcript_mirror", async (span) => {
+      span.setAttribute("hermes_transcript_message_count", currentTurnMessages.length);
+      await mirrorHermesTranscriptBestEffort({
+        sessionFile: params.sessionFile,
+        sessionKey: params.sessionKey,
+        agentId: params.agentId,
+        idempotencyScope: buildHermesMirrorIdempotencyScope(params),
+        config: params.config,
+        messages: currentTurnMessages,
+      });
     });
     return {
       assistantText: "",
@@ -1022,7 +1122,10 @@ export async function runHermesHarnessAttempt(
         data: { phase: "end", endedAt: Date.now() },
       });
     }
-    await client.close().catch(() => {});
+    await traceStep("hermes_session_close", async (span) => {
+      span.setAttribute("hermes.session.id", client.currentSessionId ?? "");
+      await client.close().catch(() => {});
+    });
   }
 }
 
