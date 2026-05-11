@@ -12,13 +12,6 @@ type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
 };
 
-export type HostBackedToolDefinition = {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-  execute: (_id: string, toolParams: Record<string, unknown>) => Promise<ToolResult> | ToolResult;
-};
-
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_CHARS = 20_000;
 const OPENCLAW_WORKSPACE_SKILLS_DIR = "/root/.openclaw/workspace/skills";
@@ -337,21 +330,7 @@ async function formatArkDriveStatus(checkScript: string, skillDir: string, confi
   try {
     await ensureExecutable(checkScript);
   } catch {
-    const workspaceNetdriveDir = join(OPENCLAW_WORKSPACE_SKILLS_DIR, "workspace-netdrive");
-    const workspaceDetectScript = join(workspaceNetdriveDir, "scripts", "detect_mounts.sh");
-    try {
-      await ensureExecutable(workspaceDetectScript);
-    } catch {
-      return { content: [{ type: "text", text: `Error: arkdrive-netdisk script not found: ${checkScript}` }] };
-    }
-    const result = await runCommand({
-      command: "bash",
-      args: [workspaceDetectScript],
-      cwd: workspaceNetdriveDir,
-      env: buildHostSkillEnv(config),
-      timeoutMs: 30_000,
-    });
-    return formatProcessResult({ label: "workspace_netdrive status", ...result });
+    return { content: [{ type: "text", text: `Error: arkdrive-netdisk script not found: ${checkScript}` }] };
   }
   const result = await runCommand({
     command: "bash",
@@ -363,10 +342,11 @@ async function formatArkDriveStatus(checkScript: string, skillDir: string, confi
   return formatProcessResult({ label: "arkdrive_netdisk status", ...result });
 }
 
-export function createHostBackedSkillTools(params: {
+export function registerHostBackedSkillTools(params: {
+  api: any;
   config: HermesPluginConfig;
   logger: Logger;
-}): HostBackedToolDefinition[] {
+}): void {
   const bytedWebSearchDir = join(OPENCLAW_WORKSPACE_SKILLS_DIR, "byted-web-search");
   const bytedWebSearchScript = join(bytedWebSearchDir, "scripts", "web_search.py");
   const computerUseDir = join(OPENCLAW_WORKSPACE_SKILLS_DIR, "computer-use");
@@ -374,7 +354,7 @@ export function createHostBackedSkillTools(params: {
   const arkDriveDir = join(OPENCLAW_WORKSPACE_SKILLS_DIR, "arkdrive-netdisk");
   const arkDriveCheckScript = join(arkDriveDir, "scripts", "check_arkdrive.sh");
 
-  return [{
+  params.api.registerTool({
     name: "byted_web_search",
     description: [
       "Run the host-backed Byted/Volcano Engine web search skill.",
@@ -443,8 +423,9 @@ export function createHostBackedSkillTools(params: {
       });
       return formatProcessResult({ label: "byted_web_search", ...result });
     },
-  },
-  {
+  });
+
+  params.api.registerTool({
     name: "computer_use",
     description: [
       "Run the host-backed computer-use CUA skill.",
@@ -494,8 +475,9 @@ export function createHostBackedSkillTools(params: {
       });
       return formatProcessResult({ label: "computer_use", ...result });
     },
-  },
-  {
+  });
+
+  params.api.registerTool({
     name: "arkdrive_netdisk",
     description: [
       "Run host-backed ArkDrive netdisk operations.",
@@ -583,15 +565,5 @@ export function createHostBackedSkillTools(params: {
 
       return { content: [{ type: "text", text: `Error: unsupported arkdrive_netdisk action: ${action}` }] };
     },
-  }];
-}
-
-export function registerHostBackedSkillTools(params: {
-  api: any;
-  config: HermesPluginConfig;
-  logger: Logger;
-}): void {
-  for (const tool of createHostBackedSkillTools(params)) {
-    params.api.registerTool(tool);
-  }
+  });
 }

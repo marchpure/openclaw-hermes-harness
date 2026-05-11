@@ -25,7 +25,6 @@ import {
   writeSessionBinding,
 } from "./runtime-client.js";
 import { extractTouchedSkillNames } from "./result-processor.js";
-import { createPrivateOpenClawMcpBridge } from "./private-openclaw-mcp.js";
 import type { AcpSessionEvent, HermesAcpSessionOptions, HermesPluginConfig } from "./types.js";
 import {
   traceWithSpan,
@@ -47,9 +46,6 @@ type AgentHarnessMcpBridge = {
   mcpConfigHash?: string;
   mcpResumeHash?: string;
   credentialScopeHash?: string;
-};
-type Logger = {
-  warn: (msg: string, ...args: unknown[]) => void;
 };
 type AgentHarnessRuntimeModule = {
   prepareAgentHarnessMcpBridge?: (params: Record<string, unknown>) => Promise<AgentHarnessMcpBridge>;
@@ -287,7 +283,6 @@ async function prepareHermesMcpBridge(params: {
   currentMessageId?: string | number;
   senderId?: string;
   senderIsOwner?: boolean;
-  logger?: Logger;
 }): Promise<AgentHarnessMcpBridge> {
   if (!params.config.mcpBridge.enabled) return {};
 
@@ -344,22 +339,16 @@ async function normalizeContainerReachableMcpBridge(args: {
   const servers = bridge.mcpServers ?? {};
   const pluginTools = servers["openclaw-plugin-tools"];
   if (!isHostOpenClawPluginToolsServer(pluginTools)) {
-    return await attachPrivateOpenClawMcpBridge({
-      bridge,
-      servers,
-      params: args.params,
-      upstreamServer: servers.openclaw,
-    });
+    return bridge;
   }
 
   const loopback = await resolveMcpLoopbackBridge(args.params.senderIsOwner);
   if (!loopback) {
     console.warn("[hermes-acp] OpenClaw MCP loopback unavailable; disabling unreachable stdio plugin tools bridge");
-    return await attachPrivateOpenClawMcpBridge({
-      bridge,
-      servers: omitUnreachablePluginToolsServer(servers),
-      params: args.params,
-    });
+    return {
+      ...bridge,
+      mcpServers: omitUnreachablePluginToolsServer(servers),
+    };
   }
 
   const openclawServer = loopback.mcpServers?.openclaw;
@@ -381,33 +370,13 @@ async function normalizeContainerReachableMcpBridge(args: {
       : {}),
   };
 
-  const upstreamOpenClawServer = materializeMcpServerEnvPlaceholders(withOpenClawMcpMeta(openclawServer), env);
-  return await attachPrivateOpenClawMcpBridge({
-    bridge: { ...bridge, env },
-    servers: omitUnreachablePluginToolsServer(servers),
-    params: args.params,
-    upstreamServer: upstreamOpenClawServer,
-  });
-}
-
-async function attachPrivateOpenClawMcpBridge(args: {
-  bridge: AgentHarnessMcpBridge;
-  servers: Record<string, unknown>;
-  params: Parameters<typeof prepareHermesMcpBridge>[0];
-  upstreamServer?: unknown;
-}): Promise<AgentHarnessMcpBridge> {
-  const privateOpenClaw = await createPrivateOpenClawMcpBridge({
-    config: args.params.config,
-    logger: args.params.logger ?? { warn: (msg, ...extra) => console.warn(`[hermes-acp] ${msg}`, ...extra) },
-    upstreamServer: args.upstreamServer,
-  });
-
   return {
-    ...args.bridge,
+    ...bridge,
     mcpServers: {
-      ...args.servers,
-      openclaw: privateOpenClaw.serverConfig,
+      ...omitUnreachablePluginToolsServer(servers),
+      openclaw: materializeMcpServerEnvPlaceholders(withOpenClawMcpMeta(openclawServer), env),
     },
+    env,
   };
 }
 
@@ -903,7 +872,6 @@ export async function runHermesHarnessAttempt(
       resolveFeishuSenderIdFromPrompt(sanitizedPrompt) ??
       resolveFeishuSenderIdFromPrompt(params.prompt),
     senderIsOwner: params.senderIsOwner,
-    logger,
   });
 
   const execution = await traceStep("hermes_context_assembly", async (span) => {
