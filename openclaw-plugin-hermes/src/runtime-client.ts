@@ -86,6 +86,7 @@ function computeSessionBindingHash(input: {
   skillsHash?: string;
   mcpConfigHash?: string;
   credentialScopeHash?: string;
+  sessionEnvHash?: string;
   extraPromptHash?: string;
   agentId?: string;
   sessionAnchor?: string;
@@ -103,6 +104,7 @@ function computeSessionBindingHash(input: {
         skillsHash: input.skillsHash,
         mcpConfigHash: input.mcpConfigHash,
         credentialScopeHash: input.credentialScopeHash,
+        sessionEnvHash: input.sessionEnvHash,
         extraPromptHash: input.extraPromptHash,
         agentId: input.agentId,
         sessionAnchor: input.sessionAnchor,
@@ -546,6 +548,7 @@ export async function prepareProjectedExecutionEnv(params: {
   openClawContext?: OpenClawAttemptContext;
   mcpConfigHash?: string;
   credentialScopeHash?: string;
+  sessionEnvHash?: string;
 }): Promise<PreparedExecution> {
   // Step 1: reduce the OpenClaw workspace into the context Hermes actually
   // needs. This is still abstract data and has not been materialized to disk.
@@ -583,6 +586,7 @@ export async function prepareProjectedExecutionEnv(params: {
     skillsHash: snapshotSkills?.skillsHash,
     mcpConfigHash: params.mcpConfigHash,
     credentialScopeHash: params.credentialScopeHash,
+    sessionEnvHash: params.sessionEnvHash,
     extraPromptHash: params.openClawContext?.extraSystemPrompt
       ? createHash("sha256").update(params.openClawContext.extraSystemPrompt).digest("hex")
       : undefined,

@@ -23,7 +23,7 @@ import {
   readSessionBinding,
   writeSessionBinding,
 } from "./runtime-client.js";
-import { mergeHermesSessionEnv } from "./session-env.js";
+import { computeHermesSessionEnvHash, mergeHermesSessionEnv } from "./session-env.js";
 import type {
   DispatchRequest,
   DispatchResult,
@@ -188,29 +188,6 @@ export async function dispatchToHermes(
 
   // ── Step 2: Assemble Context ────────────────────────────────────────
 
-  let execution;
-  try {
-    execution = await traceStep("hermes_context_assembly", async (span) => {
-      span.setAttribute("hermes_context_level", strategy.context);
-      const prepared = await prepareProjectedExecutionEnv({
-        task: request.task,
-        taskId: `task-${Date.now()}`,
-        workspaceDir,
-        contextLevel: strategy.context,
-        model: request.model,
-        config,
-      });
-      span.setAttribute("hermes_context_model", request.model ?? config.defaultModel ?? "");
-      return prepared;
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger?.error(`Context assembly failed: ${msg}`);
-    return makeErrorResult("Context assembly failed: " + msg, strategy, startTime);
-  }
-
-  const promptText = execution.bootstrapPrompt;
-
   // ── Step 3: Inject Credentials ──────────────────────────────────────
 
   const credentialResult = await traceStep("hermes_credential_injection", async (span) => {
@@ -225,6 +202,31 @@ export async function dispatchToHermes(
   for (const logLine of credentialResult.auditLog) {
     logger?.info(logLine);
   }
+
+  let execution;
+  try {
+    const sessionEnvHash = computeHermesSessionEnvHash(config, credentialResult.envVars);
+    execution = await traceStep("hermes_context_assembly", async (span) => {
+      span.setAttribute("hermes_context_level", strategy.context);
+      const prepared = await prepareProjectedExecutionEnv({
+        task: request.task,
+        taskId: `task-${Date.now()}`,
+        workspaceDir,
+        contextLevel: strategy.context,
+        model: request.model,
+        config,
+        sessionEnvHash,
+      });
+      span.setAttribute("hermes_context_model", request.model ?? config.defaultModel ?? "");
+      return prepared;
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger?.error(`Context assembly failed: ${msg}`);
+    return makeErrorResult("Context assembly failed: " + msg, strategy, startTime);
+  }
+
+  const promptText = execution.bootstrapPrompt;
 
   // ── Step 4: Execute via ACP ─────────────────────────────────────────
 
@@ -494,6 +496,7 @@ async function dispatchDirectly(
         contextLevel: "L0",
         model: request.model,
         config,
+        sessionEnvHash: computeHermesSessionEnvHash(config),
       });
     });
     bindingHash = execution.sessionBindingHash;

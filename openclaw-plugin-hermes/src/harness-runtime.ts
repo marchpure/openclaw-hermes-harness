@@ -12,7 +12,7 @@ import { basename, dirname, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { publishHermesHarnessAgentEvent } from "./agent-event-bridge.js";
 import { HermesAcpClient } from "./acp-client.js";
-import { mergeHermesSessionEnv } from "./session-env.js";
+import { computeHermesSessionEnvHash, mergeHermesSessionEnv } from "./session-env.js";
 import {
   mirrorWorkspaceFromContainer,
   mirrorWorkspaceToContainer,
@@ -875,6 +875,7 @@ export async function runHermesHarnessAttempt(
       resolveFeishuSenderIdFromPrompt(params.prompt),
     senderIsOwner: params.senderIsOwner,
   });
+  const sessionEnvHash = computeHermesSessionEnvHash(config, mcpBridge.env);
 
   const execution = await traceStep("hermes_context_assembly", async (span) => {
     span.setAttributes({
@@ -899,6 +900,7 @@ export async function runHermesHarnessAttempt(
       },
       mcpConfigHash: mcpBridge.mcpResumeHash ?? mcpBridge.mcpConfigHash,
       credentialScopeHash: mcpBridge.credentialScopeHash,
+      sessionEnvHash,
     });
   });
   const sessionOptions = buildHermesSessionOptions({
