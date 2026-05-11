@@ -1,27 +1,35 @@
 #!/usr/bin/env bash
-# 该脚本用于切换 Hermes-agent 使用的模型
-# 用法：./hermes-model-switch.sh --api-key xxx --provider ark --model doubao-seed-code --base-url https://...
-
+# Hermes Agent 模型切换脚本
+# 用法：./hermes-model-switch.sh --api-key xxx --model doubao-seed-code --base-url https://...
+#
+# 注意：
+#   - provider 已固定为 "custom"，不再支持通过 --provider 传入
+#   - 与 hermes-install-v2.sh 保持一致：host 网络、固定资源限制、容器重建前自动备份
 
 set -Eeuo pipefail
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
-CONTAINER_NAME="hermes-agent"
-DATA_DIR="/opt/hermes-data"
-ACP_PORT=3100
-HEALTH_CHECK_TIMEOUT=180
-HEALTH_CHECK_POST_START_GRACE=20
+CONTAINER_NAME="${CONTAINER_NAME:-hermes-agent}"
+DATA_DIR="${DATA_DIR:-/opt/hermes-data}"
+ACP_PORT="${ACP_PORT:-3100}"
+ACP_TCP_HOST="${ACP_TCP_HOST:-127.0.0.1}"
+ACP_TCP_PORT="${ACP_TCP_PORT:-3100}"
+HEALTH_CHECK_TIMEOUT="${HEALTH_CHECK_TIMEOUT:-180}"
+HEALTH_CHECK_POST_START_GRACE="${HEALTH_CHECK_POST_START_GRACE:-20}"
+
+# Provider 固定为 custom，不允许通过命令行覆盖
+API_PROVIDER="custom"
 
 # ─── 运行时变量 ──────────────────────────────────────────────────────────────
 API_KEY=""
-API_PROVIDER=""
 DEFAULT_MODEL_VAL=""
 API_BASE_URL=""
 
-CPU_LIMIT=""
-MEM_LIMIT=""
+# 与 hermes-install-v2.sh 保持一致：固定 CPU/MEM 限制
+CPU_LIMIT="2"
+MEM_LIMIT="4g"
 
-LOG_DIR="/opt/log/hermes-agent"
+LOG_DIR="/var/log/hermes-agent"
 LOG_FILE=""
 
 # ─── 颜色（自动检测 TTY，管道模式下禁用颜色） ────────────────────────────────
@@ -32,6 +40,18 @@ else
 fi
 
 timestamp() { date '+%Y-%m-%d %H:%M:%S'; }
+
+log_line() {
+    local level="$1" color="$2"
+    shift 2
+    printf '%b%s [%s]%b %s\n' "${color}" "$(timestamp)" "${level}" "${NC}" "$*"
+}
+
+log_info()  { log_line "INFO" "${GREEN}" "$*"; }
+log_warn()  { log_line "WARN" "${YELLOW}" "$*"; }
+log_error() { log_line "ERROR" "${RED}" "$*"; }
+log_step()  { printf '\n%b%s [STEP]%b %s\n' "${CYAN}" "$(timestamp)" "${NC}" "$1"; }
+die()       { log_error "$@"; exit 1; }
 
 init_logging() {
     local run_ts
@@ -49,39 +69,28 @@ init_logging() {
     log_info "日志文件: ${LOG_FILE}"
 }
 
-log_line() {
-    local level="$1" color="$2"
-    shift 2
-    printf '%b%s [%s]%b %s\n' "${color}" "$(timestamp)" "${level}" "${NC}" "$*"
-}
-
-log_info()  { log_line "INFO" "${GREEN}" "$*"; }
-log_warn()  { log_line "WARN" "${YELLOW}" "$*"; }
-log_error() { log_line "ERROR" "${RED}" "$*"; }
-log_step()  { printf '\n%b%s [STEP]%b %s\n' "${CYAN}" "$(timestamp)" "${NC}" "$1"; }
-die()       { log_error "$@"; exit 1; }
-
 usage() {
     cat <<'EOF'
 Hermes Agent 模型切换脚本
 
 选项:
-  --api-key <value>    指定新的 API Key
-  --provider <value>   指定新的 Provider (如 ark, openai 等)
+  --api-key <value>    指定新的 API Key（与 --base-url 同时使用以切换上游服务）
   --model <value>      指定新的默认模型
   --base-url <value>   指定新的 API Base URL
   --help, -h           显示帮助
 
-注意:
-  传入 --api-key 或 --base-url 时，必须同时传入 --provider
-  仅切换模型时，只需传入 --model
+说明:
+  - provider 已固定为 "custom"，不再接受 --provider 参数
+  - 仅切换模型时，只需传入 --model（仅更新 config.yaml 后重启容器）
+  - 传入 --api-key 或 --base-url 时，会重写 .env 并重建容器以加载新环境变量
+  - 容器重建前会自动备份容器内 /root 目录到 ${DATA_DIR}/bak
 
 示例:
   # 仅切换模型
   ./hermes-model-switch.sh --model doubao-seed-code
 
-  # 切换 provider 和 key
-  ./hermes-model-switch.sh --api-key xxx --provider ark --model doubao-seed-code --base-url https://...
+  # 切换 key + base url + 模型（需要重建容器）
+  ./hermes-model-switch.sh --api-key xxx --model doubao-seed-code --base-url https://...
 EOF
 }
 
@@ -99,9 +108,9 @@ parse_args() {
                 API_KEY="$1"
                 ;;
             --provider)
-                shift
-                require_arg_value "--provider" "${1:-}"
-                API_PROVIDER="$1"
+                # 显式拒绝传入 provider，避免与固定值 custom 冲突
+                shift || true
+                die "--provider 已不再支持，provider 已固定为 \"custom\""
                 ;;
             --model)
                 shift
@@ -151,6 +160,8 @@ gateway_start_logged() {
     docker logs --tail 200 "${CONTAINER_NAME}" 2>/dev/null | grep -Eq 'Hermes gateway started|Hermes Gateway Starting'
 }
 
+# 与 hermes-install-v2.sh 中 wait_for_container_ready 行为对齐：
+# 健康检查超时但容器仍在运行时，按容忍策略判定为成功，仅给出 WARN 提示
 wait_for_container_ready() {
     log_info "等待容器就绪 (超时 ${HEALTH_CHECK_TIMEOUT}s)"
 
@@ -207,34 +218,60 @@ wait_for_container_ready() {
         echo ""
     fi
 
-    log_warn "健康检查超时，输出最近容器日志"
+    # 与 install-v2 一致的容忍策略：超时但容器仍在运行 → 视为成功
+    log_warn "健康检查超时，但容器仍在运行；按容忍策略判定为成功，请稍后通过 'docker logs -f ${CONTAINER_NAME}' 自行确认"
     docker logs --tail 120 "${CONTAINER_NAME}" 2>/dev/null || true
+    if container_running "${CONTAINER_NAME}"; then
+        return 0
+    fi
+    log_warn "容器在健康检查结束时已退出"
     return 1
 }
 
+# Provider → API Key 环境变量名（与 install-v2 保持一致）
 provider_to_env_key() {
     case "$1" in
-        openai)         echo "OPENAI_API_KEY" ;;
-        anthropic)      echo "ANTHROPIC_API_KEY" ;;
-        google|gemini)  echo "GEMINI_API_KEY" ;;
-        openrouter)     echo "OPENROUTER_API_KEY" ;;
-        minimax)        echo "MINIMAX_API_KEY" ;;
-        volcengine|ark) echo "ARK_API_KEY" ;;
-        *)              echo "${1^^}_API_KEY" ;;
+        anthropic)           echo "ANTHROPIC_API_KEY" ;;
+        gemini|google)       echo "GEMINI_API_KEY" ;;
+        openrouter)          echo "OPENROUTER_API_KEY" ;;
+        nous-api)            echo "NOUS_API_KEY" ;;
+        copilot)             echo "GITHUB_TOKEN" ;;
+        zai)                 echo "GLM_API_KEY" ;;
+        kimi-coding)         echo "KIMI_API_KEY" ;;
+        minimax)             echo "MINIMAX_API_KEY" ;;
+        minimax-cn)          echo "MINIMAX_CN_API_KEY" ;;
+        huggingface)         echo "HF_TOKEN" ;;
+        xiaomi)              echo "XIAOMI_API_KEY" ;;
+        arcee)               echo "ARCEEAI_API_KEY" ;;
+        kilocode)            echo "KILOCODE_API_KEY" ;;
+        ai-gateway)          echo "AI_GATEWAY_API_KEY" ;;
+        deepseek)            echo "DEEPSEEK_API_KEY" ;;
+        volcengine|ark|auto|dashscope|custom|lmstudio|ollama|vllm|llamacpp)
+                             echo "OPENAI_API_KEY" ;;
+        *)                   echo "OPENAI_API_KEY" ;;
     esac
 }
 
+# Provider → Base URL 环境变量名（与 install-v2 保持一致）
 provider_to_base_url_env() {
     case "$1" in
-        openai)         echo "OPENAI_BASE_URL" ;;
-        minimax)        echo "MINIMAX_BASE_URL" ;;
-        openrouter)     echo "OPENROUTER_BASE_URL" ;;
-        volcengine|ark) echo "ARK_BASE_URL" ;;
-        *)              echo "" ;;
+        openrouter)          echo "OPENROUTER_BASE_URL" ;;
+        minimax)             echo "MINIMAX_BASE_URL" ;;
+        minimax-cn)          echo "MINIMAX_CN_BASE_URL" ;;
+        deepseek)            echo "DEEPSEEK_BASE_URL" ;;
+        dashscope)           echo "DASHSCOPE_BASE_URL" ;;
+        volcengine|ark|auto) echo "OPENAI_BASE_URL" ;;
+        custom|lmstudio|ollama|vllm|llamacpp)
+                             echo "OPENAI_BASE_URL" ;;
+        *)                   echo "OPENAI_BASE_URL" ;;
     esac
 }
 
 # 更新 .env 文件，保留现有变量，仅覆盖/新增模型相关变量
+# 同时对齐 install-v2 的 write_env_file：
+#   - HERMES_UID/HERMES_GID/HERMES_HOME
+#   - ACP_TCP_HOST/ACP_TCP_PORT
+#   - GATEWAY_ALLOW_ALL_USERS
 update_env_file() {
     local env_file="${DATA_DIR}/.env"
 
@@ -255,10 +292,19 @@ update_env_file() {
         fi
     done < "${env_file}"
 
+    # 补齐与 install-v2 一致的固定项（缺失则补，存在则保留用户原值）
+    : "${env_map[HERMES_UID]:=0}"
+    : "${env_map[HERMES_GID]:=0}"
+    : "${env_map[HERMES_HOME]:=/opt/data}"
+    : "${env_map[ACP_TCP_HOST]:=${ACP_TCP_HOST}}"
+    : "${env_map[ACP_TCP_PORT]:=${ACP_TCP_PORT}}"
+    : "${env_map[GATEWAY_ALLOW_ALL_USERS]:=true}"
+
     if [[ -n "${API_KEY}" ]]; then
         local api_env_key
         api_env_key="$(provider_to_env_key "${API_PROVIDER}")"
         env_map["${api_env_key}"]="${API_KEY}"
+        # custom provider 同时回写 OPENAI_API_KEY 兜底（与 install-v2 一致）
         if [[ "${api_env_key}" != "OPENAI_API_KEY" ]]; then
             env_map["OPENAI_API_KEY"]="${API_KEY}"
         fi
@@ -278,6 +324,7 @@ update_env_file() {
     fi
 
     {
+        local key
         for key in "${!env_map[@]}"; do
             echo "${key}=${env_map[${key}]}"
         done
@@ -288,10 +335,6 @@ update_env_file() {
 }
 
 # 更新 config.yaml 中的 default、provider 和 base_url
-# YAML 格式示例:
-#   default: "model-name"
-#   provider: "provider"
-#   base_url: "https://..."
 update_config_yaml() {
     local config_yaml="${DATA_DIR}/config.yaml"
     if [[ ! -f "${config_yaml}" ]]; then
@@ -313,58 +356,54 @@ update_config_yaml() {
         fi
     fi
 
-    if [[ -n "${API_PROVIDER}" ]]; then
-        local before after
-        before="$(grep -E '^\s*provider:' "${config_yaml}" 2>/dev/null || true)"
-        sed -i "s|^\(\s*provider:\s*\).*|\1\"${API_PROVIDER}\"|" "${config_yaml}"
-        after="$(grep -E '^\s*provider:' "${config_yaml}" 2>/dev/null || true)"
-        if [[ "${before}" != "${after}" ]]; then
-            log_info "provider 已更新: ${before} -> ${after}"
-        else
-            log_warn "provider 行未匹配或未变更，当前值: ${before:-未找到}"
-        fi
+    # provider 始终强制为 custom，确保配置与脚本固定值一致
+    local before after
+    before="$(grep -E '^\s*provider:' "${config_yaml}" 2>/dev/null || true)"
+    sed -i "s|^\(\s*provider:\s*\).*|\1\"${API_PROVIDER}\"|" "${config_yaml}"
+    after="$(grep -E '^\s*provider:' "${config_yaml}" 2>/dev/null || true)"
+    if [[ "${before}" != "${after}" ]]; then
+        log_info "provider 已更新: ${before} -> ${after}"
     fi
 
     if [[ -n "${API_BASE_URL}" ]]; then
-        local before after
-        before="$(grep -E '^\s*base_url:' "${config_yaml}" 2>/dev/null || true)"
+        local before2 after2
+        before2="$(grep -E '^\s*base_url:' "${config_yaml}" 2>/dev/null || true)"
         sed -i "s|^\(\s*base_url:\s*\).*|\1\"${API_BASE_URL}\"|" "${config_yaml}"
-        after="$(grep -E '^\s*base_url:' "${config_yaml}" 2>/dev/null || true)"
-        if [[ "${before}" != "${after}" ]]; then
-            log_info "base_url 已更新: ${before} -> ${after}"
+        after2="$(grep -E '^\s*base_url:' "${config_yaml}" 2>/dev/null || true)"
+        if [[ "${before2}" != "${after2}" ]]; then
+            log_info "base_url 已更新: ${before2} -> ${after2}"
         else
-            log_warn "base_url 行未匹配或未变更，当前值: ${before:-未找到}"
+            log_warn "base_url 行未匹配或未变更，当前值: ${before2:-未找到}"
         fi
     fi
 
-    log_info "config.yaml 更新完成 (model=${DEFAULT_MODEL_VAL:-未变更}, provider=${API_PROVIDER:-未变更}, base_url=${API_BASE_URL:-未变更})"
+    log_info "config.yaml 更新完成 (provider=${API_PROVIDER}, model=${DEFAULT_MODEL_VAL:-未变更}, base_url=${API_BASE_URL:-未变更})"
 }
 
-# 从现有容器获取镜像名
+# 从现有容器获取镜像名（用于重建时复用同一镜像版本）
 get_container_image() {
     docker inspect --format '{{.Config.Image}}' "${CONTAINER_NAME}" 2>/dev/null
 }
 
-# 自动检测 CPU 和内存限制
-detect_resource_limits() {
-    local cpu_cores mem_total_mb
-    cpu_cores="$(nproc 2>/dev/null || echo 1)"
-    mem_total_mb=$(( $(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 2097152) / 1024 ))
+# 重建容器前先备份容器内 /root 到宿主机数据目录
+# 参考 hermes-install-v2.sh#L1943-L1951 的备份逻辑
+backup_container_root() {
+    if ! container_running "${CONTAINER_NAME}"; then
+        log_warn "容器 ${CONTAINER_NAME} 未运行，跳过 /root 备份"
+        return 0
+    fi
 
-    CPU_LIMIT=$(( cpu_cores > 1 ? (cpu_cores - 1 > 4 ? 4 : cpu_cores - 1) : 1 ))
-    local mem_limit_mb=$(( mem_total_mb - 1024 ))
-    if (( mem_limit_mb > 8192 )); then
-        mem_limit_mb=8192
-    fi
-    if (( mem_limit_mb < 1024 )); then
-        mem_limit_mb=1024
-    fi
-    MEM_LIMIT="${mem_limit_mb}m"
-    log_info "资源限制: CPU=${CPU_LIMIT}核, 内存=${MEM_LIMIT}"
+    local backup_dir="${DATA_DIR}/bak"
+    mkdir -p "${backup_dir}"
+    log_info "备份容器 ${CONTAINER_NAME} 内 /root 目录到 ${backup_dir}"
+    docker exec "${CONTAINER_NAME}" bash -c \
+        'tar cf - -C /root . 2>/dev/null' | tar xf - -C "${backup_dir}" 2>/dev/null || \
+        log_warn "容器内文件备份失败（非致命），继续切换流程"
 }
 
 # 重建容器以加载新的环境变量
 # docker restart 不会重新读取 --env-file，必须删除并重建容器
+# 与 hermes-install-v2.sh start_container_from_image 的 docker run 参数保持一致
 recreate_container() {
     log_step "重建容器以加载新配置"
 
@@ -374,8 +413,10 @@ recreate_container() {
         die "无法获取容器 ${CONTAINER_NAME} 的镜像名"
     fi
     log_info "当前容器镜像: ${image_ref}"
+    log_info "资源限制: CPU=${CPU_LIMIT}核, 内存=${MEM_LIMIT}"
 
-    detect_resource_limits
+    # 重建前备份容器内 /root，避免历史数据丢失
+    backup_container_root
 
     log_info "停止并删除旧容器 ${CONTAINER_NAME}"
     docker rm -f "${CONTAINER_NAME}" >/dev/null
@@ -386,13 +427,15 @@ recreate_container() {
         --init \
         --restart unless-stopped \
         --user root \
+        --network host \
+        -e ACP_TCP_HOST="${ACP_TCP_HOST}" \
+        -e ACP_TCP_PORT="${ACP_PORT}" \
         -e TZ=Asia/Shanghai \
         --env-file "${DATA_DIR}/.env" \
         --entrypoint "/opt/hermes/docker/entrypoint-acp.sh" \
         --security-opt no-new-privileges=true \
         --tmpfs /tmp:size=256M \
         -v "${DATA_DIR}:/opt/data" \
-        -p "127.0.0.1:${ACP_PORT}:3100" \
         --cpus="${CPU_LIMIT}" \
         --memory="${MEM_LIMIT}" \
         --log-driver json-file \
@@ -438,9 +481,7 @@ print_summary() {
     status="$(docker ps --filter "name=^/${CONTAINER_NAME}$" --format '{{.Status}}' 2>/dev/null || echo "未知")"
     echo -e "  容器: ${CYAN}${CONTAINER_NAME} (${status})${NC}"
     echo -e "  端口: ${CYAN}${ACP_PORT}${NC}"
-    if [[ -n "${API_PROVIDER}" ]]; then
-        echo -e "  Provider: ${CYAN}${API_PROVIDER}${NC}"
-    fi
+    echo -e "  Provider: ${CYAN}${API_PROVIDER} (固定)${NC}"
     if [[ -n "${DEFAULT_MODEL_VAL}" ]]; then
         echo -e "  模型: ${CYAN}${DEFAULT_MODEL_VAL}${NC}"
     fi
@@ -457,13 +498,15 @@ main() {
     parse_args "$@"
     init_logging
 
-    if [[ -z "${API_KEY}" && -z "${API_PROVIDER}" && -z "${DEFAULT_MODEL_VAL}" && -z "${API_BASE_URL}" ]]; then
-        die "至少需要指定一个参数 (--api-key, --provider, --model, --base-url)"
+    if [[ -z "${API_KEY}" && -z "${DEFAULT_MODEL_VAL}" && -z "${API_BASE_URL}" ]]; then
+        die "至少需要指定一个参数 (--api-key, --model, --base-url)"
     fi
+
+    log_info "Provider 固定为: ${API_PROVIDER}"
 
     check_prerequisites
 
-    # 判断是否需要重建容器
+    # 判断是否需要重建容器：
     # .env 中的环境变量在 docker run 时注入，docker restart 不会重新读取
     # config.yaml 通过 volume 挂载，重启后容器可直接读取更新
     local need_recreate=false
@@ -479,6 +522,7 @@ main() {
     else
         update_config_yaml
         log_step "重启容器以加载更新后的 config.yaml"
+        # 仅切换模型时不需要备份（无数据丢失风险，仅 restart 不重建）
         docker restart "${CONTAINER_NAME}" >/dev/null
         wait_for_container_ready || die "容器重启后健康检查未通过"
     fi

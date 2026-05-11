@@ -3,11 +3,19 @@
 # 用法:
 #   sudo bash hermes-uninstall.sh
 #   sudo bash hermes-uninstall.sh --yes
+#
+# 与 hermes-install-v2.sh 保持一致，覆盖以下残留：
+#   - 容器 / 镜像（含 hermes-agent:rollback-* 标签）
+#   - 数据目录、缓存目录、日志目录
+#   - 后台安装的 tmux 会话与 .install-* 状态文件
+#   - OpenClaw 插件目录与 openclaw.json 中的所有 Hermes 相关条目
+#     （plugins / models.providers.hermes / agents.defaults.models / agentRuntime / model）
 
 set -Eeuo pipefail
 
 CONTAINER_NAME="${CONTAINER_NAME:-hermes-agent}"
 DATA_DIR="${DATA_DIR:-/opt/hermes-data}"
+CACHE_DIR="${CACHE_DIR:-/var/cache/hermes-agent}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/root/.openclaw/openclaw.json}"
 OPENCLAW_EXTENSIONS_DIR="${OPENCLAW_EXTENSIONS_DIR:-/root/.openclaw/extensions}"
 PLUGIN_CONFIG_KEY="${PLUGIN_CONFIG_KEY:-openclaw-plugin-hermes}"
@@ -16,10 +24,12 @@ PLUGIN_LEGACY_DIR_NAME="${PLUGIN_LEGACY_DIR_NAME:-hermes}"
 HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"
 LOG_DIR_PRIMARY="${LOG_DIR_PRIMARY:-/var/log/hermes-agent}"
 LOG_DIR_FALLBACK="${LOG_DIR_FALLBACK:-/tmp/hermes-agent}"
+TMUX_SESSION_NAME="${TMUX_SESSION_NAME:-hermes-install}"
 OPENCLAW_GATEWAY_READY_TIMEOUT="${OPENCLAW_GATEWAY_READY_TIMEOUT:-30}"
 OPENCLAW_GATEWAY_FALLBACK_SLEEP="${OPENCLAW_GATEWAY_FALLBACK_SLEEP:-5}"
 
 ASSUME_YES=false
+KEEP_DATA=false
 CONFIG_CHANGED=false
 
 declare -a PLUGIN_DIR_CANDIDATES=()
@@ -49,16 +59,21 @@ usage() {
 Hermes Agent 卸载脚本
 
 选项:
-  --yes, -y      不再询问确认，直接执行彻底清理
-  --help, -h     显示帮助
+  --yes, -y       不再询问确认，直接执行彻底清理
+  --keep-data     保留 /opt/hermes-data 数据目录（仅清理容器/镜像/插件/配置/缓存/日志）
+  --help, -h      显示帮助
 
 清理范围:
   - 删除 Docker 容器 hermes-agent
-  - 删除 Docker 镜像 hermes-agent:*（包括回滚标签）
-  - 删除 /opt/hermes-data 整个数据目录
+  - 删除 Docker 镜像 hermes-agent:*（包括 rollback 标签）
+  - 删除 /opt/hermes-data 整个数据目录（除非 --keep-data）
+  - 删除安装缓存目录 /var/cache/hermes-agent（含 .install-* 状态文件）
+  - 关闭后台安装 tmux 会话 hermes-install（如有）
   - 删除 OpenClaw 插件目录 /root/.openclaw/extensions/openclaw-plugin-hermes
   - 兼容清理旧目录 /root/.openclaw/extensions/hermes
-  - 从 /root/.openclaw/openclaw.json 中移除 Hermes 插件配置
+  - 从 /root/.openclaw/openclaw.json 中移除所有 Hermes 相关条目
+    （plugins / models.providers.hermes / agents.defaults.models["hermes/default"|"hermes"]
+     / agents.defaults.agentRuntime / agents.defaults.model）
   - 删除升级日志目录 /var/log/hermes-agent 和 /tmp/hermes-agent
 EOF
 }
@@ -97,6 +112,9 @@ parse_args() {
             --yes|-y)
                 ASSUME_YES=true
                 ;;
+            --keep-data)
+                KEEP_DATA=true
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -114,14 +132,21 @@ confirm_destructive_action() {
         return 0
     fi
 
+    local data_line="数据目录: ${DATA_DIR}"
+    if [[ "${KEEP_DATA}" == true ]]; then
+        data_line="数据目录: ${DATA_DIR} (将保留)"
+    fi
+
     cat <<EOF
 将要彻底删除 Hermes 安装与升级残留：
   - Docker 容器: ${CONTAINER_NAME}
-  - Docker 镜像: ${HERMES_IMAGE_NAME}:*
-  - 数据目录: ${DATA_DIR}
+  - Docker 镜像: ${HERMES_IMAGE_NAME}:*（含 rollback 标签）
+  - ${data_line}
+  - 缓存目录: ${CACHE_DIR}
+  - 后台安装 tmux 会话: ${TMUX_SESSION_NAME}
   - 插件目录: ${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_DIR_NAME}
   - 兼容旧目录: ${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_LEGACY_DIR_NAME}
-  - OpenClaw 配置中的 Hermes 插件条目
+  - OpenClaw 配置中的 Hermes 插件 / Provider / Agents Runtime 条目
   - 日志目录: ${LOG_DIR_PRIMARY}, ${LOG_DIR_FALLBACK}
 
 EOF
@@ -139,6 +164,23 @@ safe_remove_path() {
         log_info "已删除 ${label}: ${target}"
     else
         log_info "${label} 不存在，跳过: ${target}"
+    fi
+}
+
+# 关闭可能仍在运行的后台安装 tmux 会话，避免与卸载操作冲突
+cleanup_background_session() {
+    log_step "清理后台安装会话"
+
+    if ! command -v tmux &>/dev/null; then
+        log_info "未安装 tmux，跳过"
+        return 0
+    fi
+
+    if tmux has-session -t "${TMUX_SESSION_NAME}" 2>/dev/null; then
+        tmux kill-session -t "${TMUX_SESSION_NAME}" 2>/dev/null || true
+        log_info "已关闭 tmux 会话: ${TMUX_SESSION_NAME}"
+    else
+        log_info "未发现 tmux 会话，跳过: ${TMUX_SESSION_NAME}"
     fi
 }
 
@@ -166,6 +208,7 @@ cleanup_images() {
         return 0
     fi
 
+    # 同时匹配 hermes-agent:latest / hermes-agent:rollback-* 等所有 tag
     local -a images=()
     mapfile -t images < <(docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -E "^${HERMES_IMAGE_NAME}:" || true)
 
@@ -184,27 +227,41 @@ cleanup_images() {
     done
 }
 
-cleanup_openclaw_plugin() {
-    log_step "清理 OpenClaw 插件与配置"
-
-    if command -v openclaw &>/dev/null; then
-        log_info "优先使用 openclaw plugins uninstall 命令卸载插件"
-        if echo "y" | openclaw plugins uninstall openclaw-plugin-hermes 2>/dev/null; then
-            log_info "openclaw plugins uninstall 执行成功，跳过手动清理"
-            CONFIG_CHANGED=true
-            return 0
-        fi
-        log_warn "openclaw plugins uninstall 执行失败，回退到手动清理"
-    else
-        log_warn "未找到 openclaw 命令，回退到手动清理"
+# 通过 openclaw CLI 卸载插件（best-effort），无论成功与否后续都会兜底清理目录与配置
+try_openclaw_uninstall() {
+    if ! command -v openclaw &>/dev/null; then
+        log_warn "未找到 openclaw 命令，跳过 CLI 卸载，回退到手动清理"
+        return 1
     fi
 
+    log_info "调用 openclaw plugins uninstall openclaw-plugin-hermes"
+    if echo "y" | openclaw plugins uninstall openclaw-plugin-hermes 2>/dev/null; then
+        log_info "openclaw plugins uninstall 执行成功"
+        CONFIG_CHANGED=true
+        return 0
+    fi
+
+    log_warn "openclaw plugins uninstall 执行失败，将通过手动方式清理"
+    return 1
+}
+
+# 兜底删除残留的插件目录
+cleanup_plugin_dirs() {
     collect_plugin_dir_candidates
     local plugin_dir=""
     for plugin_dir in "${PLUGIN_DIR_CANDIDATES[@]}"; do
         safe_remove_path "${plugin_dir}" "插件目录"
     done
+}
 
+# 与 hermes-install-v2.sh 中 do_cleanup() 保持一致，
+# 移除 openclaw.json 内所有 Hermes 残留：
+#   - plugins.entries[hermes|openclaw-plugin-hermes]
+#   - plugins.allow 中相应条目
+#   - models.providers.hermes
+#   - agents.defaults.models["hermes/default"|"hermes"]
+#   - agents.defaults.agentRuntime / agents.defaults.model
+cleanup_openclaw_config() {
     if [[ ! -f "${OPENCLAW_CONFIG}" ]]; then
         log_info "OpenClaw 配置文件不存在，跳过: ${OPENCLAW_CONFIG}"
         return 0
@@ -213,42 +270,97 @@ cleanup_openclaw_plugin() {
     if command -v jq &>/dev/null; then
         local tmp
         tmp="$(mktemp)"
-        jq --arg pk "${PLUGIN_CONFIG_KEY}" --arg legacy_pk "hermes" '
+        # 只在 .agents.defaults.model.primary 明确是 hermes 别名（hermes/xxx 或字面量 hermes）时
+        # 才删除 .agents.defaults.model，避免误伤用户自定义的默认模型配置
+        if jq --arg pk "${PLUGIN_CONFIG_KEY}" --arg legacy_pk "hermes" '
             del(.plugins.entries[$pk])
             | del(.plugins.entries[$legacy_pk])
             | .plugins.allow = ((.plugins.allow // []) | map(select(. != $pk and . != $legacy_pk)))
-        ' "${OPENCLAW_CONFIG}" > "${tmp}"
-        mv "${tmp}" "${OPENCLAW_CONFIG}"
-        CONFIG_CHANGED=true
-        log_info "已从 OpenClaw 配置移除 Hermes 插件条目"
+            | del(.models.providers.hermes)
+            | del(.agents.defaults.models["hermes/default"])
+            | del(.agents.defaults.models["hermes"])
+            | del(.agents.defaults.agentRuntime)
+            | (.agents.defaults.model.primary // null) as $primary
+            | if ($primary | type) == "string"
+                 and ($primary == "hermes" or ($primary | test("^hermes/")))
+              then del(.agents.defaults.model)
+              else .
+              end
+        ' "${OPENCLAW_CONFIG}" > "${tmp}"; then
+            mv "${tmp}" "${OPENCLAW_CONFIG}"
+            CONFIG_CHANGED=true
+            log_info "已从 OpenClaw 配置移除全部 Hermes 相关条目 (jq)"
+        else
+            rm -f "${tmp}"
+            log_warn "jq 处理 OpenClaw 配置失败，请手动检查: ${OPENCLAW_CONFIG}"
+        fi
         return 0
     fi
 
     if command -v python3 &>/dev/null; then
-        python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" <<'PYEOF'
+        if python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" <<'PYEOF'
 import json, sys
 cfg, pk = sys.argv[1], sys.argv[2]
 with open(cfg) as f:
     data = json.load(f)
-data.get('plugins', {}).get('entries', {}).pop(pk, None)
-data.get('plugins', {}).get('entries', {}).pop('hermes', None)
+# 移除插件条目
+entries = data.get('plugins', {}).get('entries', {})
+entries.pop(pk, None)
+entries.pop('hermes', None)
 allow = data.get('plugins', {}).get('allow', [])
 data.setdefault('plugins', {})['allow'] = [item for item in allow if item not in (pk, 'hermes')]
+# 移除 hermes provider
+data.get('models', {}).get('providers', {}).pop('hermes', None)
+# 移除 agents defaults 中的 hermes 别名与 runtime 配置
+defaults = data.get('agents', {}).get('defaults', {})
+aliases = defaults.get('models', {})
+aliases.pop('hermes/default', None)
+aliases.pop('hermes', None)
+defaults.pop('agentRuntime', None)
+# 仅当 defaults.model.primary 明确指向 hermes 别名时才删除 model 段，
+# 避免误删用户自定义的默认模型设置
+model_cfg = defaults.get('model')
+if isinstance(model_cfg, dict):
+    primary = model_cfg.get('primary', '')
+    if isinstance(primary, str) and (primary == 'hermes' or primary.startswith('hermes/')):
+        defaults.pop('model', None)
 with open(cfg, 'w') as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
 PYEOF
-        CONFIG_CHANGED=true
-        log_info "已从 OpenClaw 配置移除 Hermes 插件条目"
+        then
+            CONFIG_CHANGED=true
+            log_info "已从 OpenClaw 配置移除全部 Hermes 相关条目 (python3)"
+        else
+            log_warn "python3 处理 OpenClaw 配置失败，请手动检查: ${OPENCLAW_CONFIG}"
+        fi
         return 0
     fi
 
     log_warn "未找到 jq 或 python3，无法自动清理 ${OPENCLAW_CONFIG} 中的 Hermes 配置"
 }
 
-cleanup_data_and_logs() {
-    log_step "清理数据与日志目录"
+cleanup_openclaw_plugin() {
+    log_step "清理 OpenClaw 插件与配置"
 
-    safe_remove_path "${DATA_DIR}" "Hermes 数据目录"
+    # 1. 优先用 openclaw CLI 卸载插件（best-effort）
+    try_openclaw_uninstall || true
+    # 2. 无论 CLI 是否成功，都兜底清理插件目录残留
+    cleanup_plugin_dirs
+    # 3. 始终手动清理 openclaw.json 中所有 Hermes 条目
+    #    （CLI 不会清理 provider / agents.defaults 等附加条目）
+    cleanup_openclaw_config
+}
+
+cleanup_data_and_logs() {
+    log_step "清理数据/缓存/日志目录"
+
+    if [[ "${KEEP_DATA}" == true ]]; then
+        log_info "按 --keep-data 保留数据目录: ${DATA_DIR}"
+    else
+        safe_remove_path "${DATA_DIR}" "Hermes 数据目录"
+    fi
+
+    safe_remove_path "${CACHE_DIR}" "Hermes 缓存目录 (含 .install-* 状态文件)"
     safe_remove_path "${LOG_DIR_PRIMARY}" "主日志目录"
     safe_remove_path "${LOG_DIR_FALLBACK}" "回退日志目录"
 }
@@ -311,17 +423,22 @@ restart_openclaw_if_needed() {
 }
 
 summary() {
+    local data_status="已删除"
+    [[ "${KEEP_DATA}" == true ]] && data_status="已保留"
+
     echo ""
     echo -e "${GREEN}  Hermes 清理完成${NC}"
     echo ""
     echo "  已清理的默认目标:"
-    echo "    容器: ${CONTAINER_NAME}"
-    echo "    镜像: ${HERMES_IMAGE_NAME}:*"
-    echo "    数据: ${DATA_DIR}"
-    echo "    插件: ${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_DIR_NAME}"
-    echo "    兼容旧插件目录: ${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_LEGACY_DIR_NAME}"
-    echo "    配置: ${OPENCLAW_CONFIG} 中的 ${PLUGIN_CONFIG_KEY} 条目"
-    echo "    日志: ${LOG_DIR_PRIMARY}, ${LOG_DIR_FALLBACK}"
+    echo "    容器:     ${CONTAINER_NAME}"
+    echo "    镜像:     ${HERMES_IMAGE_NAME}:* (含 rollback 标签)"
+    echo "    数据:     ${DATA_DIR} (${data_status})"
+    echo "    缓存:     ${CACHE_DIR}"
+    echo "    tmux:     ${TMUX_SESSION_NAME}"
+    echo "    插件:     ${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_DIR_NAME}"
+    echo "    旧插件:   ${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_LEGACY_DIR_NAME}"
+    echo "    配置:     ${OPENCLAW_CONFIG} 中的 Hermes 全部条目"
+    echo "    日志:     ${LOG_DIR_PRIMARY}, ${LOG_DIR_FALLBACK}"
     echo ""
 }
 
@@ -329,9 +446,10 @@ main() {
     parse_args "$@"
     require_root
 
-    log_info "准备在 Ubuntu/Linux 环境中清理 Hermes 安装与升级残留"
+    log_info "准备在 Linux 环境中清理 Hermes 安装与升级残留"
     confirm_destructive_action
 
+    cleanup_background_session
     cleanup_container
     cleanup_images
     cleanup_openclaw_plugin
