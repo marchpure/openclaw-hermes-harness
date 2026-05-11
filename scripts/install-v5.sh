@@ -205,7 +205,7 @@ create_v5_base_installer() {
     TEMP_DIRS+=("${tmp_dir}")
     patched_script="${tmp_dir}/hermes-install-v5-patched.sh"
 
-    HERMES_IMAGE_REF="${HERMES_IMAGE_REF}" \
+    if ! HERMES_IMAGE_REF="${HERMES_IMAGE_REF}" \
     ACP_TCP_HOST="${ACP_TCP_HOST}" \
     ACP_TCP_PORT="${ACP_TCP_PORT}" \
     python3 - "${source_script}" "${patched_script}" <<'PYEOF'
@@ -225,17 +225,42 @@ def replace_once(label, old, new):
         raise SystemExit(f"{label}: patch anchor count={count}, expected 1")
     return text.replace(old, new, 1)
 
-text = replace_once(
+def replace_one_of(label, replacements):
+    matches = [(old, new) for old, new in replacements if text.count(old) == 1]
+    duplicate_matches = [old for old, _ in replacements if text.count(old) > 1]
+    if len(matches) != 1 or duplicate_matches:
+        counts = [f"{idx + 1}:{text.count(old)}" for idx, (old, _) in enumerate(replacements)]
+        raise SystemExit(f"{label}: patch anchor counts={','.join(counts)}, expected exactly one variant")
+    old, new = matches[0]
+    return text.replace(old, new, 1)
+
+text = replace_one_of(
     "image source config",
-    'TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-image/hermes-agent-image.tar.gz}"',
-    f'TOS_IMAGE_URL="${{TOS_IMAGE_URL:-}}"\nHERMES_IMAGE_REF="${{HERMES_IMAGE_REF:-{image_ref}}}"',
+    [
+        (
+            'TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-image/hermes-agent-image.tar.gz}"',
+            f'TOS_IMAGE_URL="${{TOS_IMAGE_URL:-}}"\nHERMES_IMAGE_REF="${{HERMES_IMAGE_REF:-{image_ref}}}"',
+        ),
+        (
+            'TOS_IMAGE_URL="${TOS_IMAGE_URL:-}"',
+            f'TOS_IMAGE_URL="${{TOS_IMAGE_URL:-}}"\nHERMES_IMAGE_REF="${{HERMES_IMAGE_REF:-{image_ref}}}"',
+        ),
+    ],
 )
-text = replace_once(
+text = replace_one_of(
     "image name default",
-    'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"',
-    'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-${HERMES_IMAGE_REF}}"',
+    [
+        ('HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"', 'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"'),
+        ('HERMES_IMAGE_NAME="hermes-agent"', 'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"'),
+    ],
 )
-text = replace_once("acp port default", 'ACP_PORT="${ACP_PORT:-3100}"', f'ACP_PORT="${{ACP_PORT:-{tcp_port}}}"')
+text = replace_one_of(
+    "acp port default",
+    [
+        ('ACP_PORT="${ACP_PORT:-3100}"', f'ACP_PORT="${{ACP_PORT:-{tcp_port}}}"'),
+        ('ACP_PORT=3100', f'ACP_PORT="${{ACP_PORT:-{tcp_port}}}"'),
+    ],
+)
 text = replace_once("env acp tcp port", 'echo "ACP_TCP_PORT=3100"', 'echo "ACP_TCP_PORT=${ACP_PORT}"')
 text = replace_once("env acp tcp host", 'echo "ACP_TCP_HOST=0.0.0.0"', f'echo "ACP_TCP_HOST=${{ACP_TCP_HOST:-{tcp_host}}}"')
 text = replace_once(
@@ -334,6 +359,11 @@ text = replace_once(
 dst.write_text(text)
 dst.chmod(0o755)
 PYEOF
+    then
+        die "生成 v5 基础安装脚本失败"
+    fi
+
+    [[ -s "${patched_script}" ]] || die "生成 v5 基础安装脚本失败: ${patched_script} 不存在或为空"
 
     printf '%s\n' "${patched_script}"
 }
