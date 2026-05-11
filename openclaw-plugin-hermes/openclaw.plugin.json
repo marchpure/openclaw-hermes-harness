@@ -9,9 +9,6 @@
   },
   "contracts": {
     "tools": [
-      "byted_web_search",
-      "computer_use",
-      "arkdrive_netdisk",
       "hermes_dispatch",
       "hermes_status",
       "hermes_strategy",
