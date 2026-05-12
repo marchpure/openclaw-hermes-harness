@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -14,6 +14,7 @@ import {
   resolveExecEnvHostPath,
   resolveExecEnvRuntimePath,
 } from "./runtime-paths.js";
+import { resolveContainerSkillEnv } from "./session-env.js";
 
 function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -36,6 +37,25 @@ const ROOT_FILE_WRITEBACK_DENYLIST = new Set([
   "__pycache__",
   "node_modules",
 ]);
+const CONTAINER_ENV_FILE = ".openclaw-container-env.json";
+const PYTHON_CONTAINER_ENV_LOADER = `
+# OpenClaw Hermes projected-skill env loader.
+try:
+    import json as _openclaw_json
+    import os as _openclaw_os
+    from pathlib import Path as _OpenClawPath
+    for _openclaw_parent in _OpenClawPath(__file__).resolve().parents:
+        _openclaw_env_path = _openclaw_parent / "${CONTAINER_ENV_FILE}"
+        if _openclaw_env_path.is_file():
+            with _openclaw_env_path.open("r", encoding="utf-8") as _openclaw_env_file:
+                for _openclaw_key, _openclaw_value in _openclaw_json.load(_openclaw_env_file).items():
+                    if isinstance(_openclaw_key, str) and isinstance(_openclaw_value, str):
+                        _openclaw_os.environ.setdefault(_openclaw_key, _openclaw_value)
+            break
+except Exception:
+    pass
+
+`;
 
 function normalizeRuntimeSkillName(value: string): string | undefined {
   const trimmed = value.trim();
@@ -170,12 +190,39 @@ async function copyProjectedSkill(
     recursive: true,
     force: true,
   });
+  await patchContainerEnvSkill(skillDir, skill);
 
   return {
     ...skill,
     runtimePath: join(runtimeExecEnvPath, "skills", skillDirName, "SKILL.md"),
     projectedPath: join(runtimeExecEnvPath, "skills", skillDirName, "SKILL.md"),
   };
+}
+
+async function patchContainerEnvSkill(skillDir: string, skill: ProjectedSkill): Promise<void> {
+  if (skill.placement !== "container-env-required") return;
+  if (skill.name.trim().toLowerCase() !== "byted-web-search") return;
+
+  const scriptPath = join(skillDir, "scripts", "web_search.py");
+  let content: string;
+  try {
+    content = await readFile(scriptPath, "utf8");
+  } catch {
+    return;
+  }
+  if (content.includes("OpenClaw Hermes projected-skill env loader")) return;
+  await writeFile(scriptPath, `${PYTHON_CONTAINER_ENV_LOADER}${content}`, "utf8");
+}
+
+async function writeContainerSkillEnv(hostExecEnvPath: string, config: HermesPluginConfig): Promise<void> {
+  const env = resolveContainerSkillEnv(config);
+  const path = join(hostExecEnvPath, CONTAINER_ENV_FILE);
+  if (Object.keys(env).length === 0) {
+    await rm(path, { force: true });
+    return;
+  }
+  await writeFile(path, JSON.stringify(env, null, 2), "utf8");
+  await chmod(path, 0o600);
 }
 
 function buildManifest(input: {
@@ -833,6 +880,7 @@ export async function buildExecEnv(
   if (input.contextFiles.task) {
     await writeFile(join(hostExecEnvPath, "TASK.md"), input.contextFiles.task, "utf8");
   }
+  await writeContainerSkillEnv(hostExecEnvPath, config);
 
   const projectedSkills: ProjectedSkill[] = [];
   for (const skill of input.projectedSkills) {

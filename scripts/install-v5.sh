@@ -15,12 +15,14 @@ set -Eeuo pipefail
 
 PUBLIC_BUCKET_BASE_URL="${PUBLIC_BUCKET_BASE_URL:-https://haoxingjun-test.tos-cn-beijing.volces.com}"
 BASE_INSTALL_URL="${BASE_INSTALL_URL:-${PUBLIC_BUCKET_BASE_URL}/hermes-install.sh}"
-RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/feat/hermes-runtime-bridge-productized-squashed-from-1ca5fc3}"
+RAW_REPO_BASE_URL="${RAW_REPO_BASE_URL:-https://raw.githubusercontent.com/marchpure/openclaw-hermes-harness/main}"
 PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-${RAW_REPO_BASE_URL}/openclaw-plugin-hermes-install-v5.tgz}"
 REMOTE_REPO_URL="${REMOTE_REPO_URL:-https://github.com/marchpure/openclaw-hermes-harness.git}"
-REMOTE_REPO_REF="${REMOTE_REPO_REF:-feat/hermes-runtime-bridge-productized-squashed-from-1ca5fc3}"
+REMOTE_REPO_REF="${REMOTE_REPO_REF:-main}"
 NPM_REGISTRY_URL="${NPM_REGISTRY_URL:-https://registry.npmmirror.com}"
 PREFER_PREBUILT_PLUGIN_URL="${PREFER_PREBUILT_PLUGIN_URL:-true}"
+PATCH_OPENCLAW_57_MODEL_COMPAT="${PATCH_OPENCLAW_57_MODEL_COMPAT:-true}"
+PATCH_OPENCLAW_57_AGENT_HARNESS_PIN="${PATCH_OPENCLAW_57_AGENT_HARNESS_PIN:-${PATCH_OPENCLAW_57_MODEL_COMPAT}}"
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
 if [[ -n "${SCRIPT_SOURCE}" && -e "${SCRIPT_SOURCE}" ]]; then
@@ -33,6 +35,7 @@ fi
 
 BASE_INSTALL_SCRIPT="${SCRIPT_DIR:+${SCRIPT_DIR}/hermes-install.sh}"
 LOCAL_PLUGIN_DIR="${REPO_ROOT:+${REPO_ROOT}/openclaw-plugin-hermes}"
+LOCAL_COMPAT_PATCH_SCRIPT="${REPO_ROOT:+${REPO_ROOT}/scripts/patch-openclaw-57-model-compat.js}"
 
 MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION:-2026.4.15}"
 DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR:-/var/cache/hermes-agent}"
@@ -202,7 +205,7 @@ create_v5_base_installer() {
     TEMP_DIRS+=("${tmp_dir}")
     patched_script="${tmp_dir}/hermes-install-v5-patched.sh"
 
-    HERMES_IMAGE_REF="${HERMES_IMAGE_REF}" \
+    if ! HERMES_IMAGE_REF="${HERMES_IMAGE_REF}" \
     ACP_TCP_HOST="${ACP_TCP_HOST}" \
     ACP_TCP_PORT="${ACP_TCP_PORT}" \
     python3 - "${source_script}" "${patched_script}" <<'PYEOF'
@@ -222,17 +225,42 @@ def replace_once(label, old, new):
         raise SystemExit(f"{label}: patch anchor count={count}, expected 1")
     return text.replace(old, new, 1)
 
-text = replace_once(
+def replace_one_of(label, replacements):
+    matches = [(old, new) for old, new in replacements if text.count(old) == 1]
+    duplicate_matches = [old for old, _ in replacements if text.count(old) > 1]
+    if len(matches) != 1 or duplicate_matches:
+        counts = [f"{idx + 1}:{text.count(old)}" for idx, (old, _) in enumerate(replacements)]
+        raise SystemExit(f"{label}: patch anchor counts={','.join(counts)}, expected exactly one variant")
+    old, new = matches[0]
+    return text.replace(old, new, 1)
+
+text = replace_one_of(
     "image source config",
-    'TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-image/hermes-agent-image.tar.gz}"',
-    f'TOS_IMAGE_URL="${{TOS_IMAGE_URL:-}}"\nHERMES_IMAGE_REF="${{HERMES_IMAGE_REF:-{image_ref}}}"',
+    [
+        (
+            'TOS_IMAGE_URL="${TOS_IMAGE_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-image/hermes-agent-image.tar.gz}"',
+            f'TOS_IMAGE_URL="${{TOS_IMAGE_URL:-}}"\nHERMES_IMAGE_REF="${{HERMES_IMAGE_REF:-{image_ref}}}"',
+        ),
+        (
+            'TOS_IMAGE_URL="${TOS_IMAGE_URL:-}"',
+            f'TOS_IMAGE_URL="${{TOS_IMAGE_URL:-}}"\nHERMES_IMAGE_REF="${{HERMES_IMAGE_REF:-{image_ref}}}"',
+        ),
+    ],
 )
-text = replace_once(
+text = replace_one_of(
     "image name default",
-    'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"',
-    'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-${HERMES_IMAGE_REF}}"',
+    [
+        ('HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"', 'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"'),
+        ('HERMES_IMAGE_NAME="hermes-agent"', 'HERMES_IMAGE_NAME="${HERMES_IMAGE_NAME:-hermes-agent}"'),
+    ],
 )
-text = replace_once("acp port default", 'ACP_PORT="${ACP_PORT:-3100}"', f'ACP_PORT="${{ACP_PORT:-{tcp_port}}}"')
+text = replace_one_of(
+    "acp port default",
+    [
+        ('ACP_PORT="${ACP_PORT:-3100}"', f'ACP_PORT="${{ACP_PORT:-{tcp_port}}}"'),
+        ('ACP_PORT=3100', f'ACP_PORT="${{ACP_PORT:-{tcp_port}}}"'),
+    ],
+)
 text = replace_once("env acp tcp port", 'echo "ACP_TCP_PORT=3100"', 'echo "ACP_TCP_PORT=${ACP_PORT}"')
 text = replace_once("env acp tcp host", 'echo "ACP_TCP_HOST=0.0.0.0"', f'echo "ACP_TCP_HOST=${{ACP_TCP_HOST:-{tcp_host}}}"')
 text = replace_once(
@@ -331,6 +359,11 @@ text = replace_once(
 dst.write_text(text)
 dst.chmod(0o755)
 PYEOF
+    then
+        die "生成 v5 基础安装脚本失败"
+    fi
+
+    [[ -s "${patched_script}" ]] || die "生成 v5 基础安装脚本失败: ${patched_script} 不存在或为空"
 
     printf '%s\n' "${patched_script}"
 }
@@ -426,6 +459,7 @@ normalize_runtime_entries() {
             })
           | .agents = (.agents // {})
           | .agents.defaults = (.agents.defaults // {})
+          | .agents.defaults.agentRuntime = { "id": "auto" }
           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
               "hermes/default": { "alias": "hermes" }
             })
@@ -504,6 +538,7 @@ cfg.update({
         "env": mcp_cfg.get("env", {}) if isinstance(mcp_cfg.get("env"), dict) else {},
     },
 })
+data.setdefault("agents", {}).setdefault("defaults", {})["agentRuntime"] = {"id": "auto"}
 data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("models", {})["hermes/default"] = {"alias": "hermes"}
 data.setdefault("models", {}).setdefault("providers", {})["hermes"] = {
     "baseUrl": "http://127.0.0.1/hermes-runtime",
@@ -735,6 +770,23 @@ NODE
     log_info "OpenClaw MCP bridge SDK helper 已补齐"
 }
 
+patch_openclaw_runtime_for_57_agent_harness_pin() {
+    if [[ "${PATCH_OPENCLAW_57_AGENT_HARNESS_PIN}" != "true" ]]; then
+        log_info "跳过 OpenClaw 5.7 agentHarnessId stale-pin 回补 (PATCH_OPENCLAW_57_AGENT_HARNESS_PIN=${PATCH_OPENCLAW_57_AGENT_HARNESS_PIN})"
+        return 0
+    fi
+    command -v node >/dev/null 2>&1 || die "缺少 node，无法安装 OpenClaw 5.7 agentHarnessId stale-pin 回补"
+    local patch_script="${LOCAL_COMPAT_PATCH_SCRIPT}"
+    if [[ -z "${patch_script}" || ! -f "${patch_script}" ]]; then
+        local tmp_dir
+        tmp_dir="$(mktemp -d)"
+        TEMP_DIRS+=("${tmp_dir}")
+        patch_script="${tmp_dir}/patch-openclaw-57-model-compat.js"
+        download_file "${RAW_REPO_BASE_URL}/scripts/patch-openclaw-57-model-compat.js" "${patch_script}"
+    fi
+    node "${patch_script}"
+}
+
 main() {
     check_prereqs
     detect_existing_installation
@@ -761,6 +813,7 @@ main() {
     # 不动大镜像缓存，避免每次都重新加载 1.1G 镜像。
     invalidate_cached_plugin_archive
     patch_openclaw_runtime_for_hermes_toolset
+    patch_openclaw_runtime_for_57_agent_harness_pin
 
     MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION}" \
     DOWNLOAD_CACHE_DIR="${DOWNLOAD_CACHE_DIR}" \
@@ -775,6 +828,7 @@ main() {
 
     normalize_runtime_entries
     patch_openclaw_runtime_for_hermes_toolset
+    patch_openclaw_runtime_for_57_agent_harness_pin
     log_info "install-v5 执行完成"
 }
 

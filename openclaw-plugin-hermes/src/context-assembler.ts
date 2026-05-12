@@ -10,8 +10,8 @@
  * L3: + skills manifest, MCP server definitions, cron definitions
  */
 
-import { readFile, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type {
   ContextLevel,
   ContextPayload,
@@ -221,12 +221,13 @@ export async function readSkillsManifest(skillsDir: string): Promise<SkillManife
       try {
         const skillStat = await stat(skillPath);
         if (!skillStat.isFile()) continue;
+        const canonicalSkillPath = join(await realpath(dirname(skillPath)), "SKILL.md");
         // Read first few lines for description
-        const content = await readFile(skillPath, "utf8");
+        const content = await readFile(canonicalSkillPath, "utf8");
         const descMatch = content.match(/^#\s+.*\n\n(.+)/m);
         skills.push({
           name: entry.name,
-          path: skillPath,
+          path: canonicalSkillPath,
           description: descMatch?.[1]?.slice(0, 200),
         });
       } catch {
@@ -405,6 +406,7 @@ export function serializeProjectedContextForPrompt(
         : []),
       "Only use the skills listed under # Available OpenClaw Skills as OpenClaw-provided capabilities.",
       "When a projected-local or container-env-required skill matches the task, read its runtime SKILL.md first and resolve relative references against that skill directory.",
+      "For container-env-required skills, use the projected skill normally; required environment variables are injected into the Hermes ACP session when available.",
       "When a host-backed skill matches the task, call the listed concrete OpenClaw MCP tool or tool family instead of running host-specific CLIs inside the container.",
       "Do not call `openclaw.skill.invoke`; Hermes must use the actual MCP tools exposed by tools/list.",
       "If a capability is not listed there, do not claim it is available from the current OpenClaw workspace.",
