@@ -1,8 +1,7 @@
 import type { ProviderRuntimeModel } from "openclaw/plugin-sdk/plugin-entry";
-import {
-  normalizeModelCompat,
-  type ModelDefinitionConfig,
-  type ProviderPlugin,
+import type {
+  ModelDefinitionConfig,
+  ProviderPlugin,
 } from "openclaw/plugin-sdk/provider-model-shared";
 
 const PROVIDER_ID = "hermes";
@@ -64,11 +63,11 @@ function resolveHermesDynamicModel(modelId: string): ProviderRuntimeModel | unde
   }
   // Dynamic resolution keeps custom ids routable without needing a full remote
   // model discovery round-trip.
-  return normalizeModelCompat({
+  return {
     ...buildModelDefinition(id),
     provider: PROVIDER_ID,
     baseUrl: "http://127.0.0.1/hermes-runtime",
-  } as ProviderRuntimeModel);
+  } as ProviderRuntimeModel;
 }
 
 function buildModelDefinition(id: string): ModelDefinitionConfig {
