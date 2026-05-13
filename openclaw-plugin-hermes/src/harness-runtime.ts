@@ -102,7 +102,10 @@ type McpHttpModule = {
     mcpServers?: Record<string, unknown>;
   };
   n?: () => Promise<{ port: number; close?: () => Promise<void> }>;
-  i?: () => McpLoopbackRuntime | undefined;
+  a?: () => McpLoopbackRuntime | undefined;
+  i?: (port: number) => {
+    mcpServers?: Record<string, unknown>;
+  };
   r?: (port: number) => {
     mcpServers?: Record<string, unknown>;
   };
@@ -471,8 +474,8 @@ async function resolveMcpLoopbackBridge(senderIsOwner?: boolean): Promise<
 > {
   const module = await loadMcpHttpModule();
   const ensureMcpLoopbackServer = module.ensureMcpLoopbackServer ?? module.n;
-  const getActiveMcpLoopbackRuntime = module.getActiveMcpLoopbackRuntime ?? module.i;
-  const createMcpLoopbackServerConfig = module.createMcpLoopbackServerConfig ?? module.r;
+  const getActiveMcpLoopbackRuntime = module.getActiveMcpLoopbackRuntime ?? module.a;
+  const createMcpLoopbackServerConfig = module.createMcpLoopbackServerConfig ?? module.i ?? module.r;
   await ensureMcpLoopbackServer?.();
   const runtime = getActiveMcpLoopbackRuntime?.();
   if (!runtime) return undefined;
