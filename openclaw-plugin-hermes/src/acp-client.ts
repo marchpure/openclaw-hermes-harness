@@ -218,7 +218,7 @@ export class HermesAcpClient extends EventEmitter {
       signal?: AbortSignal;
       onEvent?: (event: AcpSessionEvent) => void | Promise<void>;
     },
-  ): Promise<{ text: string; events: AcpSessionEvent[]; usage?: { input_tokens: number; output_tokens: number; total_tokens: number } }> {
+  ): Promise<{ text: string; events: AcpSessionEvent[]; usage?: { input_tokens: number; output_tokens: number; total_tokens: number; cache_read_tokens?: number; cache_write_tokens?: number } }> {
     const sid = sessionId ?? this.sessionId;
     if (!sid) {
       throw new Error("No active session. Call newSession() first.");
@@ -227,7 +227,7 @@ export class HermesAcpClient extends EventEmitter {
     const timeout = options?.timeout ?? this.config.timeout * 1000;
     const events: AcpSessionEvent[] = [];
     let finalText = "";
-    let usage: { input_tokens: number; output_tokens: number; total_tokens: number } | undefined;
+    let usage: { input_tokens: number; output_tokens: number; total_tokens: number; cache_read_tokens?: number; cache_write_tokens?: number } | undefined;
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -329,6 +329,8 @@ export class HermesAcpClient extends EventEmitter {
             input_tokens: inputTokens,
             output_tokens: outputTokens,
             total_tokens: u.total_tokens ?? u.totalTokens ?? (inputTokens + outputTokens),
+            cache_read_tokens: u.cache_read_tokens ?? u.cacheReadTokens ?? undefined,
+            cache_write_tokens: u.cache_write_tokens ?? u.cacheWriteTokens ?? undefined,
           };
         }
         promptResponseText =

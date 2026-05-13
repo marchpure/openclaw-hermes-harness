@@ -10,6 +10,7 @@
 # - [v2 新增] patch_openclaw_runtime_for_hermes_toolset() MCP bridge SDK helper
 # - [v2 新增] detect_existing_installation() 检测已有安装
 # - [v2 新增] invalidate_cached_plugin_archive() 精确清理插件缓存
+# - [v2 新增] openclaw 5.7 版本需要打一个运行时的patch
 
 set -Eeuo pipefail
 
@@ -38,6 +39,8 @@ fi
 HERMES_DOCKER_IMAGE="${HERMES_DOCKER_IMAGE:-scarif-${HERMES_ACCOUNT_ID}-${HERMES_REGION}.cr.volces.com/hermes/hermes-agent:v1.2.0}"
 PLUGIN_VERSION="${PLUGIN_VERSION:-2.0.0}"
 PUBLIC_PLUGIN_URL="${PUBLIC_PLUGIN_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/hermes-plugin/openclaw-plugin-hermes-${PLUGIN_VERSION}.tgz}"
+PATCH_OPENCLAW_57_AGENT_HARNESS_PIN="${PATCH_OPENCLAW_57_AGENT_HARNESS_PIN:-true}"
+OPENCLAW_57_PATCH_URL="${OPENCLAW_57_PATCH_URL:-https://scarif-${HERMES_REGION}.tos-${HERMES_REGION}.ivolces.com/arkclaw/hermes/patch-openclaw-57-model-compat.js}"
 
 SCRIPT_SOURCE="${BASH_SOURCE[0]-}"
 if [[ -n "${SCRIPT_SOURCE}" && -e "${SCRIPT_SOURCE}" ]]; then
@@ -63,14 +66,16 @@ OPENCLAW_EXTENSIONS_DIR="${OPENCLAW_EXTENSIONS_DIR:-/root/.openclaw/extensions}"
 PLUGIN_CONFIG_KEY="${PLUGIN_CONFIG_KEY:-openclaw-plugin-hermes}"
 PLUGIN_DIR_NAME="${PLUGIN_DIR_NAME:-openclaw-plugin-hermes}"
 PLUGIN_LEGACY_DIR_NAME="${PLUGIN_LEGACY_DIR_NAME:-hermes}"
-HEALTH_CHECK_TIMEOUT="${HEALTH_CHECK_TIMEOUT:-180}"
+HEALTH_CHECK_TIMEOUT="${HEALTH_CHECK_TIMEOUT:-90}"
 HEALTH_CHECK_POST_START_GRACE="${HEALTH_CHECK_POST_START_GRACE:-20}"
 MIN_FREE_SPACE_GB="${MIN_FREE_SPACE_GB:-5}"
 MIN_OPENCLAW_VERSION="${MIN_OPENCLAW_VERSION:-2026.4.15}"
-OPENCLAW_GATEWAY_READY_TIMEOUT="${OPENCLAW_GATEWAY_READY_TIMEOUT:-30}"
+OPENCLAW_GATEWAY_READY_TIMEOUT="${OPENCLAW_GATEWAY_READY_TIMEOUT:-60}"
 OPENCLAW_GATEWAY_FALLBACK_SLEEP="${OPENCLAW_GATEWAY_FALLBACK_SLEEP:-5}"
 OPENCLAW_GATEWAY_RESTART_RETRIES="${OPENCLAW_GATEWAY_RESTART_RETRIES:-3}"
 OPENCLAW_GATEWAY_RESTART_RETRY_SLEEP="${OPENCLAW_GATEWAY_RESTART_RETRY_SLEEP:-5}"
+# openclaw plugins install/uninstall 在某些版本下会阻塞在 stdin 或 IPC ack 上，使用 timeout 兜底
+OPENCLAW_PLUGINS_CMD_TIMEOUT="${OPENCLAW_PLUGINS_CMD_TIMEOUT:-300}"
 
 # ─── 运行时变量 ──────────────────────────────────────────────────────────────
 API_KEY=""
@@ -80,6 +85,10 @@ API_BASE_URL=""
 CPU_LIMIT=""
 MEM_LIMIT=""
 DOCKER_ROOT_DIR=""
+OPENCLAW_VERSION_NUM=""
+
+# agentRuntime 配置需要 OpenClaw 2026.4.25+ (>= 2026.4.25)，2026.4.15 不支持
+AGENT_RUNTIME_MIN_VERSION="20260425"
 
 CLI_API_KEY=""
 CLI_API_PROVIDER=""
@@ -1209,6 +1218,8 @@ check_openclaw_compatibility() {
     fi
     log_info "OpenClaw 版本检查通过: ${version_output}"
 
+    OPENCLAW_VERSION_NUM="${version_num}"
+
 }
 
 # ─── 阶段 2：拉取镜像 ─────────────────────────────────────────────────────────
@@ -1307,6 +1318,63 @@ phase3_upgrade_plugin() {
     install_hermes_plugin
 }
 
+# 兜底校验：插件目录 + openclaw.json entry 双重确认，失败则 die 触发回滚
+verify_plugin_installed() {
+    log_step "校验插件安装状态"
+
+    # 校验 1：插件目录需存在，且包含 package.json（保证不是半截残留）
+    local plugin_dir="${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_DIR_NAME}"
+    local legacy_plugin_dir="${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_LEGACY_DIR_NAME}"
+    local resolved_plugin_dir=""
+    if [[ -f "${plugin_dir}/package.json" ]]; then
+        resolved_plugin_dir="${plugin_dir}"
+    elif [[ -f "${legacy_plugin_dir}/package.json" ]]; then
+        resolved_plugin_dir="${legacy_plugin_dir}"
+    fi
+    if [[ -z "${resolved_plugin_dir}" ]]; then
+        die "插件校验失败：未在 ${OPENCLAW_EXTENSIONS_DIR} 下找到有效插件目录 (${PLUGIN_DIR_NAME} / ${PLUGIN_LEGACY_DIR_NAME})"
+    fi
+    log_info "插件目录校验通过: ${resolved_plugin_dir}"
+
+    # 校验 2：openclaw.json 中需包含插件 entry（jq 优先，回退 python3）
+    if [[ ! -f "${OPENCLAW_CONFIG}" ]]; then
+        die "插件校验失败：未找到 ${OPENCLAW_CONFIG}"
+    fi
+
+    local entry_ok=false
+    if command -v jq &>/dev/null; then
+        if jq -e --arg pk "${PLUGIN_CONFIG_KEY}" --arg legacy_pk "hermes" \
+             '.plugins.entries[$pk] != null or .plugins.entries[$legacy_pk] != null' \
+             "${OPENCLAW_CONFIG}" >/dev/null 2>&1; then
+            entry_ok=true
+        fi
+    elif command -v python3 &>/dev/null; then
+        if python3 - "${OPENCLAW_CONFIG}" "${PLUGIN_CONFIG_KEY}" >/dev/null 2>&1 <<'PYEOF'
+import json, sys
+cfg, pk = sys.argv[1], sys.argv[2]
+with open(cfg) as f:
+    data = json.load(f)
+entries = data.get("plugins", {}).get("entries", {}) or {}
+if pk in entries or "hermes" in entries:
+    sys.exit(0)
+sys.exit(1)
+PYEOF
+        then
+            entry_ok=true
+        fi
+    else
+        log_warn "未找到 jq / python3，跳过 openclaw.json entry 校验"
+        entry_ok=true
+    fi
+
+    if [[ "${entry_ok}" != true ]]; then
+        die "插件校验失败：${OPENCLAW_CONFIG} 中未登记 ${PLUGIN_CONFIG_KEY} entry"
+    fi
+    log_info "openclaw.json 插件 entry 校验通过: ${PLUGIN_CONFIG_KEY}"
+
+    log_info "插件安装状态兜底校验全部通过"
+}
+
 uninstall_hermes_plugin() {
     if ! command -v openclaw &>/dev/null; then
         log_warn "未找到 openclaw 命令，跳过卸载"
@@ -1342,11 +1410,15 @@ PYEOF
         return 0
     fi
 
-    log_info "卸载旧版插件: openclaw-plugin-hermes"
+    log_info "卸载旧版插件: openclaw-plugin-hermes (timeout ${OPENCLAW_PLUGINS_CMD_TIMEOUT}s)"
     local uninstall_output uninstall_exit
-    uninstall_output="$(echo "y" | openclaw plugins uninstall openclaw-plugin-hermes 2>&1)" && uninstall_exit=0 || uninstall_exit=$?
+    # 同样使用 timeout + </dev/null 兜底，避免 uninstall 命令阻塞在 IPC ack 或交互输入上
+    uninstall_output="$(echo "y" | timeout "${OPENCLAW_PLUGINS_CMD_TIMEOUT}" \
+        openclaw plugins uninstall openclaw-plugin-hermes 2>&1)" && uninstall_exit=0 || uninstall_exit=$?
     if [[ "${uninstall_exit}" -eq 0 ]]; then
         log_info "插件卸载成功"
+    elif [[ "${uninstall_exit}" -eq 124 ]]; then
+        log_warn "openclaw plugins uninstall 在 ${OPENCLAW_PLUGINS_CMD_TIMEOUT}s 内未自然退出，按超时容忍处理: ${uninstall_output}"
     else
         log_warn "插件卸载失败或插件未安装 (exit=${uninstall_exit}): ${uninstall_output}"
     fi
@@ -1363,8 +1435,9 @@ PYEOF
     fi
 
     if command -v openclaw &>/dev/null; then
-        log_info "重启 OpenClaw gateway 以清理卸载后的插件状态"
-        openclaw gateway restart >/dev/null 2>&1 || log_warn "gateway restart 失败，继续安装流程"
+        # plugins uninstall 内部已经会触发一次 gateway 重启，此处只需等待 gateway 就绪即可，
+        # 避免重复 restart（最终 restart 统一由 main 在 patch 完成后做一次）。
+        log_info "等待 OpenClaw gateway 就绪 (uninstall 后)"
         wait_for_openclaw_gateway
     fi
 }
@@ -1418,9 +1491,24 @@ install_hermes_plugin() {
         die "未能解析插件包路径"
     fi
 
-    log_info "执行 openclaw plugins install ${RESOLVED_PLUGIN_PATH} --dangerously-force-unsafe-install"
-    if ! openclaw plugins install "${RESOLVED_PLUGIN_PATH}" --dangerously-force-unsafe-install; then
-        die "插件安装失败 (openclaw plugins install ${RESOLVED_PLUGIN_PATH})"
+    log_info "执行 openclaw plugins install ${RESOLVED_PLUGIN_PATH} --dangerously-force-unsafe-install (timeout ${OPENCLAW_PLUGINS_CMD_TIMEOUT}s)"
+    # 1) </dev/null 防止 install 提示阻塞在 stdin
+    # 2) timeout 兜底：某些版本在插件加载后会阻塞在 IPC ack/epoll，导致进程一直 sleep
+    #    不使用 --preserve-status，确保超时时 exit code 为 124 便于识别
+    local install_exit=0
+    timeout "${OPENCLAW_PLUGINS_CMD_TIMEOUT}" \
+        openclaw plugins install "${RESOLVED_PLUGIN_PATH}" --dangerously-force-unsafe-install </dev/null \
+        || install_exit=$?
+    if [[ "${install_exit}" -eq 124 ]]; then
+        # timeout 触发：检查插件目录是否已写入，若已就绪则视为成功
+        log_warn "openclaw plugins install 在 ${OPENCLAW_PLUGINS_CMD_TIMEOUT}s 内未自然退出，进入兜底校验"
+        if [[ -d "${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_DIR_NAME}" || -d "${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_LEGACY_DIR_NAME}" ]]; then
+            log_info "检测到插件目录已写入，视为安装成功并继续后续流程"
+        else
+            die "插件安装超时且未检测到插件目录 (${OPENCLAW_EXTENSIONS_DIR}/${PLUGIN_DIR_NAME})"
+        fi
+    elif [[ "${install_exit}" -ne 0 ]]; then
+        die "插件安装失败 (openclaw plugins install ${RESOLVED_PLUGIN_PATH}, exit=${install_exit})"
     fi
     log_info "插件安装完成"
 
@@ -1494,7 +1582,11 @@ phase4_start_container() {
         die "新版本容器启动失败或健康检查未通过"
     fi
 
-    restart_openclaw_gateway
+    # hermes 容器与 OpenClaw gateway 解耦，启动容器无需重启 gateway。
+    # 仅在 gateway 已经在运行时探测一下其就绪状态，便于后续 plugins install 顺利下发。
+    if command -v openclaw &>/dev/null; then
+        wait_for_openclaw_gateway
+    fi
 }
 
 # ─── 阶段 5：归一化 openclaw.json 配置 ────────────────────────────────────────
@@ -1519,6 +1611,8 @@ normalize_runtime_entries() {
           --arg dm "${default_model:-doubao-seed-2-0-pro-260215}" \
           --arg tcp_host "${ACP_TCP_HOST}" \
           --argjson tcp_port "${ACP_TCP_PORT}" \
+          --argjson oc_ver "${OPENCLAW_VERSION_NUM:-0}" \
+          --argjson ar_min_ver "${AGENT_RUNTIME_MIN_VERSION}" \
           '
           .plugins = (.plugins // {})
           | .plugins.entries = (.plugins.entries // {})
@@ -1544,7 +1638,7 @@ normalize_runtime_entries() {
                },
               "skillProjection": {
                 "hostBackedDenylist": (((($cfg.skillProjection.hostBackedDenylist // []) + ["browser", "browser-use", "feishu"]) | unique)),
-                "hostBackedSkillNames": (((($cfg.skillProjection.hostBackedSkillNames // []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"]) | unique)),
+                "hostBackedSkillNames": (((($cfg.skillProjection.hostBackedSkillNames // []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use", "arkdrive-netdisk", "workspace-netdrive"]) | unique)),
                 "containerEnvSkillNames": ($cfg.skillProjection.containerEnvSkillNames // []),
                 "alwaysExposeSkillNames": (((($cfg.skillProjection.alwaysExposeSkillNames // []) + ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]) | unique))
               },
@@ -1556,6 +1650,7 @@ normalize_runtime_entries() {
             })
           | .agents = (.agents // {})
           | .agents.defaults = (.agents.defaults // {})
+          | if $oc_ver >= $ar_min_ver then .agents.defaults.agentRuntime = { "id": "auto" } else . end
           | .agents.defaults.models = ((.agents.defaults.models // {}) + {
               "hermes/default": { "alias": "hermes" }
             })
@@ -1583,9 +1678,11 @@ normalize_runtime_entries() {
         local tmp
         tmp="$(mktemp "${config_dir}/openclaw.json.tmp.XXXXXX")"
         register_temp "${tmp}"
-        python3 - "${OPENCLAW_CONFIG}" "${tmp}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME}" "${ACP_TCP_HOST}" "${ACP_TCP_PORT}" <<'PYEOF' || die "OpenClaw 配置归一化失败: python 写入失败"
+        python3 - "${OPENCLAW_CONFIG}" "${tmp}" "${PLUGIN_CONFIG_KEY}" "${CONTAINER_NAME}" "${ACP_TCP_HOST}" "${ACP_TCP_PORT}" "${OPENCLAW_VERSION_NUM:-0}" "${AGENT_RUNTIME_MIN_VERSION}" <<'PYEOF' || die "OpenClaw 配置归一化失败: python 写入失败"
 import json, sys
 cf, tmp, pk, cn, tcp_host, tcp_port = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], int(sys.argv[6])
+oc_ver = int(sys.argv[7]) if sys.argv[7] else 0
+ar_min_ver = int(sys.argv[8])
 with open(cf) as f:
     data = json.load(f)
 plugins = data.setdefault("plugins", {}).setdefault("entries", {})
@@ -1624,7 +1721,7 @@ cfg.update({
     "timeout": 1800,
     "skillProjection": {
         "hostBackedDenylist": unique(skill_cfg.get("hostBackedDenylist", []) + ["browser", "browser-use", "feishu"]),
-        "hostBackedSkillNames": unique(skill_cfg.get("hostBackedSkillNames", []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use"]),
+        "hostBackedSkillNames": unique(skill_cfg.get("hostBackedSkillNames", []) + ["lark-doc", "lark-calendar", "lark-im", "lark-sheets", "lark-base", "lark-drive", "lark-task", "lark-mail", "feishu", "browser", "browser-use", "arkdrive-netdisk", "workspace-netdrive"]),
         "containerEnvSkillNames": unique(skill_cfg.get("containerEnvSkillNames", [])),
         "alwaysExposeSkillNames": unique(skill_cfg.get("alwaysExposeSkillNames", []) + ["browser-use", "computer-use", "byted-web-search", "web_search", "opencli", "byted-seedream-image-generate", "byted-seedance-video-generate", "arkdrive-netdisk"]),
     },
@@ -1637,6 +1734,8 @@ cfg.update({
         "endpoint": "http://localhost:4318",
     },
 })
+if oc_ver >= ar_min_ver:
+    data.setdefault("agents", {}).setdefault("defaults", {})["agentRuntime"] = {"id": "auto"}
 data.setdefault("agents", {}).setdefault("defaults", {}).setdefault("models", {})["hermes/default"] = {"alias": "hermes"}
 data.setdefault("models", {}).setdefault("providers", {})["hermes"] = {
     "baseUrl": "http://127.0.0.1/hermes-runtime",
@@ -1668,6 +1767,38 @@ PYEOF
     fi
 
     log_info "配置归一化完成"
+}
+
+# ─── OpenClaw 5.7 agentHarnessId stale-pin 回补 ──────────────────────────────
+patch_openclaw_runtime_for_57_agent_harness_pin() {
+    if [[ "${PATCH_OPENCLAW_57_AGENT_HARNESS_PIN}" != "true" ]]; then
+        log_info "跳过 OpenClaw 5.7 agentHarnessId stale-pin 回补 (PATCH_OPENCLAW_57_AGENT_HARNESS_PIN=${PATCH_OPENCLAW_57_AGENT_HARNESS_PIN})"
+        return 0
+    fi
+
+    # 仅 OpenClaw 5.7 需要此补丁，5.7 以下不支持 agentHarnessId，5.8+ 已内置修复
+    if [[ -z "${OPENCLAW_VERSION_NUM}" ]]; then
+        log_info "未检测到 OpenClaw 版本号，跳过 agentHarnessId stale-pin 回补"
+        return 0
+    fi
+    local oc_version_start oc_version_end
+    oc_version_start="$(version_to_number "2026.5.7")"
+    oc_version_end="$(version_to_number "2026.5.7")"
+    if (( OPENCLAW_VERSION_NUM < oc_version_start || OPENCLAW_VERSION_NUM >= oc_version_end )); then
+        log_info "OpenClaw 版本非 5.7，跳过 agentHarnessId stale-pin 回补"
+        return 0
+    fi
+
+    command -v node >/dev/null 2>&1 || die "缺少 node，无法安装 OpenClaw 5.7 agentHarnessId stale-pin 回补"
+
+    local tmp_dir patch_script
+    tmp_dir="$(mktemp -d)"
+    register_temp "${tmp_dir}"
+    patch_script="${tmp_dir}/patch-openclaw-57-model-compat.js"
+    log_info "下载 OpenClaw 5.7 agentHarnessId stale-pin 补丁: ${OPENCLAW_57_PATCH_URL}"
+    curl -fsSL "${OPENCLAW_57_PATCH_URL}" -o "${patch_script}" || die "下载 patch 脚本失败: ${OPENCLAW_57_PATCH_URL}"
+
+    node "${patch_script}"
 }
 
 # ─── MCP bridge SDK helper 补齐 ──────────────────────────────────────────────
@@ -2025,17 +2156,32 @@ main() {
     [[ "${BACKGROUND_MODE}" == true ]] && write_install_status "running" 0
     phase3_collect_config
 
-    [[ "${BACKGROUND_MODE}" == true ]] && write_install_status "running" 0
-    phase3_upgrade_plugin
-
+    # 调整顺序：先启动 hermes 容器（与插件解耦，容器只依赖镜像 + .env），再装插件。
+    # 这样可以避免 openclaw plugins install 卡住时影响容器就绪节奏，
+    # 并把 verify_plugin_installed 作为最终成功的兜底判定。
     [[ "${BACKGROUND_MODE}" == true ]] && write_install_status "running" 0
     phase4_start_container
+
+    [[ "${BACKGROUND_MODE}" == true ]] && write_install_status "running" 0
+    phase3_upgrade_plugin
 
     [[ "${BACKGROUND_MODE}" == true ]] && write_install_status "running" 0
     normalize_runtime_entries
 
     [[ "${BACKGROUND_MODE}" == true ]] && write_install_status "running" 0
+    patch_openclaw_runtime_for_57_agent_harness_pin
+
+    [[ "${BACKGROUND_MODE}" == true ]] && write_install_status "running" 0
     patch_openclaw_runtime_for_hermes_toolset
+
+    # 所有配置归一化与 patch 完成后，统一做一次 gateway 重启，让 normalize / patch 写入生效。
+    # 该 restart 是主流程的最后一次 gateway 重启（合并先前 uninstall 后 / phase4 后的两次冗余重启）。
+    [[ "${BACKGROUND_MODE}" == true ]] && write_install_status "running" 0
+    restart_openclaw_gateway
+
+    # 最终兜底校验：插件目录 + openclaw.json entry 双重确认，失败则 die 触发回滚
+    [[ "${BACKGROUND_MODE}" == true ]] && write_install_status "running" 0
+    verify_plugin_installed
 
     ROLLBACK_ARMED=false
     cleanup_rollback_artifacts
